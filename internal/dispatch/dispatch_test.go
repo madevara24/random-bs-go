@@ -11,18 +11,17 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
 // Same throwaway test vault used by internal/vaultgit's integration tests --
 // never the real PM vault. See that package's comment for why.
-const testVaultPath = "/home/obsidian/pmrunner-go-test-vault"
+const testVaultPath = testvault.Path
 
 func skipIfNoTestVault(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat(filepath.Join(testVaultPath, ".git")); err != nil {
-		t.Skipf("throwaway test vault not present at %s, skipping: %v", testVaultPath, err)
-	}
+	testvault.SkipIfAbsent(t)
 }
 
 func strp(s string) *string { return &s }
@@ -89,6 +88,7 @@ func readNote(t *testing.T, vaultPath, relPath string) *notetask.Note {
 // Phase 2's test gate in Design - Implementation.md.
 func TestRunDispatchPass(t *testing.T) {
 	skipIfNoTestVault(t)
+	defer testvault.Lock(t)()
 	v := vaultgit.New(testVaultPath, "master")
 	if err := v.Sync(); err != nil {
 		t.Fatalf("initial sync: %v", err)

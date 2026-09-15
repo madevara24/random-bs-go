@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/testvault"
 )
 
 // testVaultPath points at a throwaway bare+working clone pair set up
@@ -20,13 +21,11 @@ import (
 // test) bare+working clone pair"). Never the real PM vault -- see
 // Storage & Repos.md for why a second, unrelated clone shouldn't touch
 // production task notes.
-const testVaultPath = "/home/obsidian/pmrunner-go-test-vault"
+const testVaultPath = testvault.Path
 
 func skipIfNoTestVault(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat(filepath.Join(testVaultPath, ".git")); err != nil {
-		t.Skipf("throwaway test vault not present at %s, skipping real-git integration test: %v", testVaultPath, err)
-	}
+	testvault.SkipIfAbsent(t)
 }
 
 func seedNote(t *testing.T, v *Vault, relPath string, fm notetask.Frontmatter, prompt string) {
@@ -64,6 +63,7 @@ func runGitT(t *testing.T, dir string, args ...string) string {
 // writes, then confirms both the on-disk file and the git log reflect it.
 func TestRoundTrip(t *testing.T) {
 	skipIfNoTestVault(t)
+	defer testvault.Lock(t)()
 	v := New(testVaultPath, "master")
 
 	relPath := fmt.Sprintf("Tasks/phase1-roundtrip-%d.md", time.Now().UnixNano())
@@ -111,6 +111,7 @@ func TestRoundTrip(t *testing.T) {
 // this is what the mutex exists to prevent, per Phase 1's test gate.
 func TestConcurrentSyncAndWriteNote(t *testing.T) {
 	skipIfNoTestVault(t)
+	defer testvault.Lock(t)()
 	v := New(testVaultPath, "master")
 
 	if err := v.Sync(); err != nil {
