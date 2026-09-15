@@ -3,9 +3,7 @@ package dispatch
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,32 +23,6 @@ func skipIfNoTestVault(t *testing.T) {
 }
 
 func strp(s string) *string { return &s }
-
-func seedNote(t *testing.T, vaultPath, relPath string, fm notetask.Frontmatter, prompt string) {
-	t.Helper()
-	absPath := filepath.Join(vaultPath, relPath)
-	note := &notetask.Note{Frontmatter: fm, Prompt: prompt}
-	out, err := note.Bytes()
-	if err != nil {
-		t.Fatalf("seedNote: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-		t.Fatalf("seedNote mkdir: %v", err)
-	}
-	if err := os.WriteFile(absPath, out, 0o644); err != nil {
-		t.Fatalf("seedNote write: %v", err)
-	}
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = vaultPath
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
-	run("add", relPath)
-	run("commit", "-m", "seed "+relPath)
-	run("push", "origin", "HEAD:master")
-}
 
 type recordingEnqueuer struct {
 	mu    sync.Mutex
@@ -88,7 +60,7 @@ func readNote(t *testing.T, vaultPath, relPath string) *notetask.Note {
 // Phase 2's test gate in Design - Implementation.md.
 func TestRunDispatchPass(t *testing.T) {
 	skipIfNoTestVault(t)
-	defer testvault.Lock(t)()
+	t.Cleanup(testvault.Lock(t))
 	v := vaultgit.New(testVaultPath, "master")
 	if err := v.Sync(); err != nil {
 		t.Fatalf("initial sync: %v", err)
@@ -98,40 +70,40 @@ func TestRunDispatchPass(t *testing.T) {
 	path := func(name string) string { return fmt.Sprintf("Tasks/phase2-%s-%s.md", run, name) }
 
 	// draft: never touched.
-	seedNote(t, v.Path, path("draft"), notetask.Frontmatter{
+	testvault.Seed(t, path("draft"), notetask.Frontmatter{
 		Status: "draft", Repo: "test-repo", Created: "2026-09-15",
 	}, "A draft, not ready yet.")
 
 	// queued: already claimed by an earlier pass, must not be re-claimed or re-enqueued.
-	seedNote(t, v.Path, path("queued"), notetask.Frontmatter{
+	testvault.Seed(t, path("queued"), notetask.Frontmatter{
 		Status: "queued", Repo: "test-repo", Created: "2026-09-01", ReadyAt: strp("2026-09-02T00:00:00Z"),
 	}, "Already queued.")
 
 	// done: terminal, never touched.
-	seedNote(t, v.Path, path("done"), notetask.Frontmatter{
+	testvault.Seed(t, path("done"), notetask.Frontmatter{
 		Status: "done", Repo: "test-repo", Created: "2026-08-01",
 	}, "Already done.")
 
 	// ready, no ready_at, created 2026-09-10 -- should be stamped + claimed.
-	seedNote(t, v.Path, path("ready-a"), notetask.Frontmatter{
+	testvault.Seed(t, path("ready-a"), notetask.Frontmatter{
 		Status: "ready", Repo: "repo-a", Created: "2026-09-10",
 	}, "Ready A.")
 
 	// ready, no ready_at, created 2026-09-05 (older) -- same pass, ties with A on
 	// the stamped ready_at, so created tie-break should put this before A.
-	seedNote(t, v.Path, path("ready-b"), notetask.Frontmatter{
+	testvault.Seed(t, path("ready-b"), notetask.Frontmatter{
 		Status: "ready", Repo: "repo-b", Created: "2026-09-05",
 	}, "Ready B.")
 
 	// blocker_resolved, no ready_at, created 2026-09-01 (oldest of the tied
 	// group) -- claimable exactly like ready, should sort before B and A.
-	seedNote(t, v.Path, path("resolved-c"), notetask.Frontmatter{
+	testvault.Seed(t, path("resolved-c"), notetask.Frontmatter{
 		Status: "blocker_resolved", Repo: "repo-c", Created: "2026-09-01",
 	}, "Resolved C.")
 
 	// ready with a pre-existing ready_at earlier than "now" -- must NOT be
 	// overwritten, and should sort first (earliest ready_at of the batch).
-	seedNote(t, v.Path, path("ready-f-preexisting"), notetask.Frontmatter{
+	testvault.Seed(t, path("ready-f-preexisting"), notetask.Frontmatter{
 		Status: "ready", Repo: "repo-f", Created: "2026-09-14", ReadyAt: strp("2026-09-14T00:00:00Z"),
 	}, "Ready F, already stamped.")
 

@@ -28,25 +28,6 @@ func skipIfNoTestVault(t *testing.T) {
 	testvault.SkipIfAbsent(t)
 }
 
-func seedNote(t *testing.T, v *Vault, relPath string, fm notetask.Frontmatter, prompt string) {
-	t.Helper()
-	absPath := filepath.Join(v.Path, relPath)
-	note := &notetask.Note{Frontmatter: fm, Prompt: prompt}
-	out, err := note.Bytes()
-	if err != nil {
-		t.Fatalf("seedNote: serializing: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-		t.Fatalf("seedNote: mkdir: %v", err)
-	}
-	if err := os.WriteFile(absPath, out, 0o644); err != nil {
-		t.Fatalf("seedNote: write: %v", err)
-	}
-	runGitT(t, v.Path, "add", relPath)
-	runGitT(t, v.Path, "commit", "-m", "seed "+relPath)
-	runGitT(t, v.Path, "push", "origin", "HEAD:"+v.DefaultBranch)
-}
-
 func runGitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -63,14 +44,14 @@ func runGitT(t *testing.T, dir string, args ...string) string {
 // writes, then confirms both the on-disk file and the git log reflect it.
 func TestRoundTrip(t *testing.T) {
 	skipIfNoTestVault(t)
-	defer testvault.Lock(t)()
+	t.Cleanup(testvault.Lock(t))
 	v := New(testVaultPath, "master")
 
 	relPath := fmt.Sprintf("Tasks/phase1-roundtrip-%d.md", time.Now().UnixNano())
 	if err := v.Sync(); err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
-	seedNote(t, v, relPath, notetask.Frontmatter{
+	testvault.Seed(t, relPath, notetask.Frontmatter{
 		Status:  "ready",
 		Repo:    "test-repo",
 		Created: "2026-09-15",
@@ -111,7 +92,7 @@ func TestRoundTrip(t *testing.T) {
 // this is what the mutex exists to prevent, per Phase 1's test gate.
 func TestConcurrentSyncAndWriteNote(t *testing.T) {
 	skipIfNoTestVault(t)
-	defer testvault.Lock(t)()
+	t.Cleanup(testvault.Lock(t))
 	v := New(testVaultPath, "master")
 
 	if err := v.Sync(); err != nil {
@@ -122,7 +103,7 @@ func TestConcurrentSyncAndWriteNote(t *testing.T) {
 	relPaths := make([]string, n)
 	for i := 0; i < n; i++ {
 		relPaths[i] = fmt.Sprintf("Tasks/phase1-concurrent-%d-%d.md", time.Now().UnixNano(), i)
-		seedNote(t, v, relPaths[i], notetask.Frontmatter{
+		testvault.Seed(t, relPaths[i], notetask.Frontmatter{
 			Status:  "ready",
 			Repo:    "test-repo",
 			Created: "2026-09-15",

@@ -169,3 +169,42 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer) error {
 
 	return nil
 }
+
+// ReconcileQueued scans Tasks/ for notes already at status "queued" and
+// re-populates each repo's queue by enqueuing them -- the startup-only
+// counterpart to a restart emptying every in-memory queue. In the bash
+// pipeline, a job file surviving on disk made "queued" self-heal for free;
+// here the note's own frontmatter is the only remaining record, so this
+// must run once at boot, after a fresh Sync() and before the daemon starts
+// accepting dispatch triggers (see Design - Runner.md's worker.sh section).
+// Does not write anything to the vault -- these notes are already claimed.
+func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer) error {
+	scanned, err := scanTasks(v.Path)
+	if err != nil {
+		return err
+	}
+
+	var queuedNotes []scannedNote
+	for _, s := range scanned {
+		if s.note.Frontmatter.Status == "queued" {
+			queuedNotes = append(queuedNotes, s)
+		}
+	}
+
+	notesOnly := make([]*notetask.Note, len(queuedNotes))
+	for i := range queuedNotes {
+		notesOnly[i] = queuedNotes[i].note
+	}
+	notetask.SortByReadyThenCreated(notesOnly)
+	relPathOf := map[*notetask.Note]string{}
+	for _, q := range queuedNotes {
+		relPathOf[q.note] = q.relPath
+	}
+
+	for _, note := range notesOnly {
+		relPath := relPathOf[note]
+		slug := slugFromPath(relPath)
+		enq.Enqueue(note.Frontmatter.Repo, Job{NotePath: relPath, Repo: note.Frontmatter.Repo, Slug: slug})
+	}
+	return nil
+}
