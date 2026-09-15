@@ -37,7 +37,7 @@ sleep 999999
 
 	const idleTimeout = 2 * time.Second
 	start := time.Now()
-	sessionID, err := invokeClaude(scriptPath, tmpDir, "irrelevant prompt", "", idleTimeout, nil)
+	sessionID, _, err := invokeClaude(scriptPath, tmpDir, "irrelevant prompt", "", idleTimeout, nil)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrIdleTimeout) {

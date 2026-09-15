@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,14 @@ type Deps struct {
 	// "Idle-window value" decision -- one config key (IDLE_TIMEOUT_MINUTES),
 	// read by both run modes.
 	IdleTimeout time.Duration
+
+	// OnBlocked fires synchronously, right after the vault note is written
+	// to status: blocked by the crash-fallback path, with the fully-built
+	// alert payload. nil is fine (defaults to a no-op) -- Phase 10's real
+	// notify package is what main.go wires in here in production; keeping
+	// this a callback (same injectable pattern as worker.OnPanic/OnError)
+	// means this package never needs to import notify.
+	OnBlocked func(AlertPayload)
 }
 
 func (d Deps) claudeBin() string {
@@ -141,7 +150,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		priorSessionID = *note.Frontmatter.SessionID
 	}
 
-	sessionID, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
+	sessionID, stderrTail, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
 	if sessionID != "" {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
 	}
@@ -166,21 +175,40 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	copyAfter, copyErr := readNoteCopy(copyPath)
 	switch {
 	case copyErr != nil:
-		// No copy, or one that fails to parse -- Phase 9 is where this
-		// becomes real crash-fallback handling (blocked + alert). For now,
-		// just log it; Phase 6's contract ("treat any exit as terminal, just
-		// log") still applies to this scenario until Phase 9 lands.
-		fmt.Printf("[runner] task %s: reading back note-copy failed (Phase 9 will turn this into a real crash fallback): %v\n", job.Slug, copyErr)
-		if exitErr != nil {
-			return fmt.Errorf("runner: claude invocation for %s: %w", job.Slug, exitErr)
+		// Scenario 1 (no copy at all) and scenario 3 (copy exists but fails
+		// to parse) are handled identically -- per Design - Runner.md's
+		// two-branch trust rule, a parse failure means the runner can't
+		// trust *anything* in the copy, no partial credit, same as no copy
+		// existing to begin with.
+		scenario := ScenarioNoCopy
+		if _, statErr := os.Stat(copyPath); statErr == nil {
+			scenario = ScenarioParseFailure
 		}
-		return fmt.Errorf("runner: task %s finished but its note-copy could not be read back: %w", job.Slug, copyErr)
+		return handleCrashFallback(deps, job, crashInfo{
+			scenario:   scenario,
+			stage:      "result read-back",
+			exitErr:    exitErr,
+			stderrTail: stderrTail,
+			repoPath:   repoCfg.Path,
+			branchName: branchName,
+			sessionID:  sessionID,
+		})
 
 	case !isTerminalStatus(copyAfter.Frontmatter.Status):
-		// Parsed fine, but CC never reached done/blocked/failed -- also
-		// Phase 9's scenario 2, not yet real fallback logic here.
-		fmt.Printf("[runner] task %s: copy has non-terminal status %q (Phase 9 will turn this into a real crash fallback)\n", job.Slug, copyAfter.Frontmatter.Status)
-		return fmt.Errorf("runner: task %s's copy never reached a terminal status (got %q)", job.Slug, copyAfter.Frontmatter.Status)
+		// Scenario 2: parsed fine, but CC never reached done/blocked/failed.
+		// Per the same trust rule, the runner *can* still fold in whatever
+		// did parse (e.g. partial Work Log content) before marking blocked.
+		return handleCrashFallback(deps, job, crashInfo{
+			scenario:      ScenarioNonTerminal,
+			stage:         "result read-back",
+			exitErr:       exitErr,
+			stderrTail:    stderrTail,
+			repoPath:      repoCfg.Path,
+			branchName:    branchName,
+			sessionID:     sessionID,
+			partialCopy:   copyAfter,
+			haveCopyToUse: true,
+		})
 	}
 
 	// Happy path: merge status/pr_url/Work Log from the copy into the real
@@ -335,10 +363,13 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
 // reason given there: a fixed wall-clock timeout can't tell "genuinely
 // hung" from "still working."
 //
-// Returns the captured session_id (best-effort -- Phase 9 handles the case
-// where the process died before ever emitting one) and either the
-// process's own exit error, or ErrIdleTimeout if the watchdog fired.
-func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, error) {
+// Returns the captured session_id (best-effort -- the crash-fallback path
+// handles the case where the process died before ever emitting one), the
+// last portion of stderr (for crash-fallback alert content -- see
+// Design - Runner.md's "exit code and the last lines of stderr"
+// requirement), and either the process's own exit error, or ErrIdleTimeout
+// if the watchdog fired.
+func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, string, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)
@@ -354,12 +385,13 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
+		return "", "", fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	stderrTail := &tailWriter{max: 4000}
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("starting claude: %w", err)
+		return "", "", fmt.Errorf("starting claude: %w", err)
 	}
 
 	idleTimer := time.NewTimer(idleTimeout)
@@ -415,7 +447,26 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 	close(killDone)
 
 	if watchdogFired.Load() {
-		return sessionID, ErrIdleTimeout
+		return sessionID, stderrTail.String(), ErrIdleTimeout
 	}
-	return sessionID, waitErr
+	return sessionID, stderrTail.String(), waitErr
 }
+
+// tailWriter keeps only the last max bytes written to it -- a bounded
+// stderr capture for alert content, not a full transcript (the per-task
+// transcript log itself is still an open item, see Design - Runner.md's
+// "Open" section under runner.sh).
+type tailWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	if len(w.buf) > w.max {
+		w.buf = w.buf[len(w.buf)-w.max:]
+	}
+	return len(p), nil
+}
+
+func (w *tailWriter) String() string { return string(w.buf) }
