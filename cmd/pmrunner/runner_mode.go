@@ -3,24 +3,14 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
+	"github.com/madevara24/random-bs-go/internal/runner"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
-
-// stubProcessTask stands in for the real runner.ProcessTask until Phase 6.
-// Sleeps briefly, logs what it "did." Phase 6 replaces this wiring, not
-// this file's boot sequence.
-func stubProcessTask(job worker.Job) error {
-	fmt.Printf("[runner] (stub) processing task repo=%s slug=%s notePath=%s\n", job.Repo, job.Slug, job.NotePath)
-	time.Sleep(200 * time.Millisecond)
-	fmt.Printf("[runner] (stub) done with %s\n", job.Slug)
-	return nil
-}
 
 // runRunner is the entrypoint for `pmrunner runner`: builds the vault
 // handle and one RepoWorker per configured repo, boots (sync + reconcile),
@@ -33,7 +23,7 @@ func runRunner(cfg *config.Config) {
 	// Phase 5's empirical GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE check: this
 	// process's raw environment doesn't change after boot, so checking once
 	// here is representative of every git subprocess call the daemon will
-	// ever make (vaultgit.cleanEnv() strips these unconditionally
+	// ever make (vaultgit.CleanGitEnv() strips these unconditionally
 	// regardless, but this line is what actually answers the "did the
 	// hazard survive the new architecture" question empirically, per
 	// Design - Runner.md's GIT_DIR section).
@@ -41,10 +31,16 @@ func runRunner(cfg *config.Config) {
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
 
+	runnerDeps := runner.Deps{Vault: vault, Repos: cfg.Repos}
+
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)
 	workers := worker.Workers{}
 	for key := range cfg.Repos {
-		workers[key] = worker.New(key, globalSlots, stubProcessTask)
+		rw := worker.New(key, globalSlots, nil)
+		rw.Process = func(job worker.Job) error {
+			return runner.ProcessTask(runnerDeps, rw, job)
+		}
+		workers[key] = rw
 	}
 	workers.StartAll()
 

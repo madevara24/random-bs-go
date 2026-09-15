@@ -32,7 +32,7 @@ func runGitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = cleanEnv()
+	cmd.Env = CleanGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s (in %s): %v\n%s", strings.Join(args, " "), dir, err, out)

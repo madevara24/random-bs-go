@@ -32,7 +32,7 @@ func New(path, defaultBranch string) *Vault {
 	return &Vault{Path: path, DefaultBranch: defaultBranch}
 }
 
-// cleanEnv strips GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE from the inherited
+// CleanGitEnv strips GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE from the inherited
 // environment before handing it to a git subprocess. Every git command in
 // this package unsets these defensively -- see Design - Runner.md's
 // GIT_DIR hazard section. In the bash pipeline this mattered because
@@ -42,7 +42,7 @@ func New(path, defaultBranch string) *Vault {
 // insurance regardless of what actually launches the daemon, and Phase 5's
 // end-to-end test is where the "does the hazard still exist here" question
 // gets checked empirically rather than assumed.
-func cleanEnv() []string {
+func CleanGitEnv() []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env))
 	for _, e := range env {
@@ -59,7 +59,7 @@ func cleanEnv() []string {
 func (v *Vault) runGit(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = v.Path
-	cmd.Env = cleanEnv()
+	cmd.Env = CleanGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
@@ -69,10 +69,10 @@ func (v *Vault) runGit(args ...string) (string, error) {
 
 // EnvSnapshot reports whether GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE are
 // present in this *process's* raw, unfiltered environment -- i.e. what
-// would have leaked into a git subprocess here if cleanEnv() didn't strip
+// would have leaked into a git subprocess here if CleanGitEnv() didn't strip
 // them. Used for Phase 5's empirical "does the GIT_DIR hazard still exist
 // in this architecture" check (see Design - Runner.md); deliberately reads
-// os.Environ() directly, not cleanEnv()'s already-filtered result, or this
+// os.Environ() directly, not CleanGitEnv()'s already-filtered result, or this
 // would trivially always report false regardless of the real answer.
 func EnvSnapshot() map[string]bool {
 	found := map[string]bool{"GIT_DIR": false, "GIT_WORK_TREE": false, "GIT_INDEX_FILE": false}
