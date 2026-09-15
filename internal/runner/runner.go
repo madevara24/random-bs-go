@@ -78,6 +78,19 @@ type Deps struct {
 	// diagnostics -- main.go's wiring is what decides to also invoke
 	// hermes -z for status == "blocked" here, same as OnBlocked's case.
 	OnTerminal func(job worker.Job, status, workLog string)
+
+	// MergeGateFactory, if non-nil, is called once a task lands on
+	// status: done with auto_merge: true and a real pr_url -- Phase 11's
+	// review/CI merge-gate loop. nil (the default) means the loop never
+	// runs, which is exactly what every phase before 11 relies on to stay
+	// unaffected by this addition.
+	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) MergeGateOps
+
+	// OnRoundLimitHit fires if the merge-gate loop exhausts its round
+	// budget without a clean merge -- the PR stays open, status stays
+	// "done" (per Design - Runner.md's own pseudocode), this is purely the
+	// alert.
+	OnRoundLimitHit func(job worker.Job, prURL string)
 }
 
 func (d Deps) claudeBin() string {
@@ -247,7 +260,46 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	if deps.OnTerminal != nil {
 		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog)
 	}
+
+	prURL := derefStr(copyAfter.Frontmatter.PRURL)
+	if terminalStatus == "done" && note.Frontmatter.AutoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
+		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, copyAfter.WorkLog)
+	}
+
 	return nil
+}
+
+// runMergeGateForTask wires Phase 11's loop into a task that just landed
+// on done+auto_merge+a real pr_url. Failures here are logged and (on round
+// exhaustion specifically) alerted -- they never change the vault note's
+// status, matching Design - Runner.md's own pseudocode ("status stays
+// done" even when the loop exhausts).
+func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, workLogFallback string) {
+	reporter.SetStage("review/CI merge-gate loop")
+
+	prBody, err := fetchPRBody(repoCfg.Path, branchName)
+	if err != nil || strings.TrimSpace(prBody) == "" {
+		fmt.Printf("[runner] task %s: fetching PR body failed (%v), falling back to Work Log as review context\n", job.Slug, err)
+		prBody = workLogFallback
+	}
+	diff, err := gitDiff(repoCfg.Path, repoCfg.DefaultBranch, branchName)
+	if err != nil {
+		fmt.Printf("[runner] task %s: git diff for review failed: %v\n", job.Slug, err)
+	}
+
+	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL)
+	err = RunMergeGateLoop(ops, prBody, diff)
+	switch {
+	case err == nil:
+		fmt.Printf("[runner] task %s: merge-gate loop completed -- merged\n", job.Slug)
+	case errors.Is(err, ErrRoundLimitHit):
+		fmt.Printf("[runner] task %s: merge-gate loop hit its round limit without merging\n", job.Slug)
+		if deps.OnRoundLimitHit != nil {
+			deps.OnRoundLimitHit(job, prURL)
+		}
+	default:
+		fmt.Printf("[runner] task %s: merge-gate loop ended with an error: %v\n", job.Slug, err)
+	}
 }
 
 func isTerminalStatus(status string) bool {

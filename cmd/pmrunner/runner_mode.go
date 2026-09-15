@@ -55,6 +55,20 @@ func runRunner(cfg *config.Config) {
 				fmt.Sprintf("<@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, job.Slug, job.Repo, status),
 				job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
 		},
+		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) runner.MergeGateOps {
+			return &runner.GhMergeGateOps{
+				RepoPath:      repoCfg.Path,
+				Branch:        branchName,
+				DefaultBranch: repoCfg.DefaultBranch,
+				ClaudeBin:     "claude",
+				CodingSession: sessionID,
+			}
+		},
+		OnRoundLimitHit: func(job worker.Job, prURL string) {
+			notifier.Send(job.NotePath,
+				fmt.Sprintf("<@%s> Task `%s` (%s) hit the review/CI round limit without merging -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, job.Slug, job.Repo, prURL),
+				job.Slug+"-round-limit.md", fmt.Sprintf("# Merge-gate round limit hit\n\n- PR: %s\n- Repo: %s\n\nThe review/CI loop used all %d rounds without a clean merge. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, runner.MaxMergeGateRounds))
+		},
 	}
 
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)
