@@ -119,28 +119,100 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	sessionID, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, reporter)
 	if sessionID != "" {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
-		// Phase 6 scope: capture and persist session_id immediately.
-		// Full status/pr_url/Work Log merge-back is Phase 7.
-		werr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: capture session_id for %s", job.Slug), func(n *notetask.Note) error {
-			n.Frontmatter.SessionID = &sessionID
-			return nil
-		})
-		if werr != nil {
-			fmt.Printf("[runner] task %s: failed to persist session_id: %v\n", job.Slug, werr)
-		}
 	}
-
-	reporter.SetStage("done (phase 6: no merge-back yet)")
-
 	if exitErr != nil {
-		// Phase 6 explicitly treats any exit as terminal -- just log it.
-		// Crash fallback (Phase 9) is what actually acts on this.
 		fmt.Printf("[runner] task %s: claude exited with error: %v\n", job.Slug, exitErr)
-		return fmt.Errorf("runner: claude invocation for %s: %w", job.Slug, exitErr)
+	} else {
+		fmt.Printf("[runner] task %s: claude exited cleanly\n", job.Slug)
 	}
 
-	fmt.Printf("[runner] task %s: claude exited cleanly\n", job.Slug)
+	reporter.SetStage("result read-back")
+
+	// Delete the copy unconditionally at the end, regardless of which path
+	// below is taken -- same "always clean up" fix Background.md calls for
+	// (the bash design's known gap around .task-result.json only being
+	// cleaned up after the first read).
+	defer func() {
+		if err := os.Remove(copyPath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("[runner] task %s: failed to delete note-copy %s: %v\n", job.Slug, copyPath, err)
+		}
+	}()
+
+	copyAfter, copyErr := readNoteCopy(copyPath)
+	switch {
+	case copyErr != nil:
+		// No copy, or one that fails to parse -- Phase 9 is where this
+		// becomes real crash-fallback handling (blocked + alert). For now,
+		// just log it; Phase 6's contract ("treat any exit as terminal, just
+		// log") still applies to this scenario until Phase 9 lands.
+		fmt.Printf("[runner] task %s: reading back note-copy failed (Phase 9 will turn this into a real crash fallback): %v\n", job.Slug, copyErr)
+		if exitErr != nil {
+			return fmt.Errorf("runner: claude invocation for %s: %w", job.Slug, exitErr)
+		}
+		return fmt.Errorf("runner: task %s finished but its note-copy could not be read back: %w", job.Slug, copyErr)
+
+	case !isTerminalStatus(copyAfter.Frontmatter.Status):
+		// Parsed fine, but CC never reached done/blocked/failed -- also
+		// Phase 9's scenario 2, not yet real fallback logic here.
+		fmt.Printf("[runner] task %s: copy has non-terminal status %q (Phase 9 will turn this into a real crash fallback)\n", job.Slug, copyAfter.Frontmatter.Status)
+		return fmt.Errorf("runner: task %s's copy never reached a terminal status (got %q)", job.Slug, copyAfter.Frontmatter.Status)
+	}
+
+	// Happy path: merge status/pr_url/Work Log from the copy into the real
+	// vault note, overlaying the runner's own independently-captured
+	// session_id (never the copy's -- it was never sourced from there to
+	// begin with), and append the terminal-status Runner Log line in the
+	// same commit.
+	terminalStatus := copyAfter.Frontmatter.Status
+	mergeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: %s %s", terminalStatus, job.Slug), func(n *notetask.Note) error {
+		n.Frontmatter.Status = terminalStatus
+		n.Frontmatter.PRURL = copyAfter.Frontmatter.PRURL
+		if sessionID != "" {
+			n.Frontmatter.SessionID = &sessionID
+		}
+		n.HasWorkLog = copyAfter.HasWorkLog
+		n.WorkLog = copyAfter.WorkLog
+		notetask.AppendRunnerLog(n, terminalStatus, time.Now())
+		return nil
+	})
+	if mergeErr != nil {
+		return fmt.Errorf("runner: merging back task %s (status=%s): %w", job.Slug, terminalStatus, mergeErr)
+	}
+
+	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 	return nil
+}
+
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "done", "blocked", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}
+
+// readNoteCopy reads and parses the note-copy from the target repo.
+// Malformed or missing YAML is a hard error -- see Design - Runner.md's
+// crash-fallback section: a parse failure is treated identically to no
+// copy at all, no partial credit.
+func readNoteCopy(copyPath string) (*notetask.Note, error) {
+	data, err := os.ReadFile(copyPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading note-copy: %w", err)
+	}
+	note, err := notetask.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing note-copy: %w", err)
+	}
+	return note, nil
 }
 
 func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
