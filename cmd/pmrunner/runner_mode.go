@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
@@ -31,7 +32,11 @@ func runRunner(cfg *config.Config) {
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
 
-	runnerDeps := runner.Deps{Vault: vault, Repos: cfg.Repos}
+	runnerDeps := runner.Deps{
+		Vault:       vault,
+		Repos:       cfg.Repos,
+		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
+	}
 
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)
 	workers := worker.Workers{}

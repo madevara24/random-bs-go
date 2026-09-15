@@ -10,11 +10,14 @@ package runner
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
@@ -22,6 +25,14 @@ import (
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
+
+// ErrIdleTimeout is returned by invokeClaude (and surfaces through
+// ProcessTask) when the idle watchdog kills the process group after
+// IdleTimeout of silence on the stream-json output -- distinct from a
+// plain process-exit error so callers (Phase 9's crash-fallback alert in
+// particular) can say "the runner killed it for going idle," not just show
+// a bare exit code.
+var ErrIdleTimeout = errors.New("runner: idle timeout exceeded, process group killed")
 
 // ActivityReporter is the subset of worker.RepoWorker that ProcessTask
 // needs to report progress -- an interface so this package doesn't need
@@ -41,6 +52,13 @@ type Deps struct {
 	// ClaudeBin is the claude CLI's path/name -- overridable so Phase 8's
 	// tests can point it at a fake stub script instead of the real binary.
 	ClaudeBin string
+
+	// IdleTimeout is how long the stream-json output may go silent before
+	// the watchdog kills the process group. Same shared setting as the
+	// watcher's own staleness threshold, per Design - Runner.md's
+	// "Idle-window value" decision -- one config key (IDLE_TIMEOUT_MINUTES),
+	// read by both run modes.
+	IdleTimeout time.Duration
 }
 
 func (d Deps) claudeBin() string {
@@ -48,6 +66,13 @@ func (d Deps) claudeBin() string {
 		return "claude"
 	}
 	return d.ClaudeBin
+}
+
+func (d Deps) idleTimeout() time.Duration {
+	if d.IdleTimeout <= 0 {
+		return 15 * time.Minute // sane fallback; main.go normally sets this from config
+	}
+	return d.IdleTimeout
 }
 
 // copyFileName is the note-copy's filename inside the target repo clone --
@@ -116,7 +141,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		priorSessionID = *note.Frontmatter.SessionID
 	}
 
-	sessionID, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, reporter)
+	sessionID, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
 	if sessionID != "" {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
 	}
@@ -300,11 +325,20 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
 }
 
 // invokeClaude runs `claude -p` (fresh or --resume), parses the first
-// stream-json line for session_id, and waits for exit. Returns the
-// captured session_id (best-effort -- Phase 9 handles the case where the
-// process died before ever emitting one) and the process's own exit error,
-// if any.
-func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, reporter ActivityReporter) (string, error) {
+// stream-json line for session_id, and waits for exit -- guarded by an idle
+// watchdog: idleTimeout resets on every stream-json line (a long-but-alive
+// task keeps resetting it forever), and fires only after that long a
+// silence, killing the whole process group (not just the top-level PID) so
+// a Bash-tool-spawned child claude itself started can't survive as an
+// orphan. See Design - Runner.md's "Timeout / watchdog and kill mechanism"
+// section -- this is an idle watchdog, not a flat deadline, for exactly the
+// reason given there: a fixed wall-clock timeout can't tell "genuinely
+// hung" from "still working."
+//
+// Returns the captured session_id (best-effort -- Phase 9 handles the case
+// where the process died before ever emitting one) and either the
+// process's own exit error, or ErrIdleTimeout if the watchdog fired.
+func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)
@@ -312,6 +346,11 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, reporter Activ
 
 	cmd := exec.Command(claudeBin, args...)
 	cmd.Dir = dir
+	// New process group: claude's own PID becomes its group leader, so
+	// killing -PID (the negative of the group leader's PID) reaches every
+	// descendant it spawned (e.g. a Bash tool call's subshell), not just
+	// claude itself.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -323,11 +362,38 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, reporter Activ
 		return "", fmt.Errorf("starting claude: %w", err)
 	}
 
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+	killDone := make(chan struct{})
+	var watchdogFired atomic.Bool
+	go func() {
+		select {
+		case <-idleTimer.C:
+			// Set before killing, not after -- ProcessTask/tests check this
+			// only once cmd.Wait() has returned, which (for a watchdog kill)
+			// can't happen until this signal is actually sent, so ordering
+			// it first here means it's never observed as still false.
+			watchdogFired.Store(true)
+			pgid := cmd.Process.Pid
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		case <-killDone:
+		}
+	}()
+
 	var sessionID string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+
 		if reporter != nil {
 			reporter.TouchActivity()
 		}
@@ -346,5 +412,10 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, reporter Activ
 	}
 
 	waitErr := cmd.Wait()
+	close(killDone)
+
+	if watchdogFired.Load() {
+		return sessionID, ErrIdleTimeout
+	}
 	return sessionID, waitErr
 }
