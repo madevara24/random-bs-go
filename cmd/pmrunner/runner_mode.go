@@ -79,7 +79,7 @@ func runRunner(cfg *config.Config) {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
-	server := httpapi.New(r.DispatchWake)
+	server := httpapi.New(r.DispatchWake, workers)
 	fmt.Printf("[runner] listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
 		fmt.Printf("pmrunner: fatal: http server: %v\n", err)

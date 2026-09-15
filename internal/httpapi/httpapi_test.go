@@ -1,14 +1,17 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
 func TestHealthAlwaysOK(t *testing.T) {
-	s := New(make(chan struct{}, 1))
+	s := New(make(chan struct{}, 1), nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -24,7 +27,7 @@ func TestHealthAlwaysOK(t *testing.T) {
 
 func TestDispatchWakesAndCoalesces(t *testing.T) {
 	wake := make(chan struct{}, 1)
-	s := New(wake)
+	s := New(wake, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -75,7 +78,7 @@ func TestDispatchWakesAndCoalesces(t *testing.T) {
 }
 
 func TestDispatchRejectsNonPost(t *testing.T) {
-	s := New(make(chan struct{}, 1))
+	s := New(make(chan struct{}, 1), nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -85,5 +88,45 @@ func TestDispatchRejectsNonPost(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("GET /dispatch status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestStatusTasksReportsOnlyBusyRepos(t *testing.T) {
+	globalSlots := worker.NewGlobalSlots(1)
+	idleWorker := worker.New("idle-repo", globalSlots, nil)
+	busyWorker := worker.New("busy-repo", globalSlots, func(job worker.Job) error {
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	})
+	workers := worker.Workers{"idle-repo": idleWorker, "busy-repo": busyWorker}
+	workers.StartAll()
+	busyWorker.Enqueue(worker.Job{Repo: "busy-repo", Slug: "busy-slug", NotePath: "Tasks/busy-slug.md"})
+	time.Sleep(20 * time.Millisecond) // let it actually start
+
+	s := New(make(chan struct{}, 1), workers)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got map[string]TaskStatusWire
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if _, ok := got["idle-repo"]; ok {
+		t.Errorf("idle-repo present in response, want it omitted: %+v", got)
+	}
+	busy, ok := got["busy-repo"]
+	if !ok {
+		t.Fatalf("busy-repo missing from response: %+v", got)
+	}
+	if busy.Slug != "busy-slug" {
+		t.Errorf("busy-repo.Slug = %q, want %q", busy.Slug, "busy-slug")
 	}
 }
