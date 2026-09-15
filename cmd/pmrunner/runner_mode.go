@@ -8,6 +8,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
+	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/runner"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
@@ -31,11 +32,29 @@ func runRunner(cfg *config.Config) {
 	fmt.Printf("[runner] GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE present in daemon env: %+v\n", vaultgit.EnvSnapshot())
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
+	notifier := &notify.Notifier{Vault: vault, WebhookURL: cfg.DiscordWebhookURL}
 
 	runnerDeps := runner.Deps{
 		Vault:       vault,
 		Repos:       cfg.Repos,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
+		OnBlocked: func(payload runner.AlertPayload) {
+			notifier.SendBlocked(
+				fmt.Sprintf("Tasks/%s.md", payload.Slug), payload.Slug,
+				fmt.Sprintf("%s during %s", payload.Scenario, payload.Stage),
+				payload.DiscordMessage(cfg.DiscordUserID), payload.Slug+".md", payload.AttachmentMarkdown())
+		},
+		OnTerminal: func(job worker.Job, status, workLog string) {
+			if status == "blocked" {
+				notifier.SendBlocked(job.NotePath, job.Slug, "CC itself set status: blocked -- see its Work Log for what it needs",
+					fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, job.Slug, job.Repo),
+					job.Slug+".md", "# Task blocked\n\n"+workLog+"\n")
+				return
+			}
+			notifier.Send(job.NotePath,
+				fmt.Sprintf("<@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, job.Slug, job.Repo, status),
+				job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
+		},
 	}
 
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)

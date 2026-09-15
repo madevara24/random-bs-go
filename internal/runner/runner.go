@@ -68,6 +68,16 @@ type Deps struct {
 	// this a callback (same injectable pattern as worker.OnPanic/OnError)
 	// means this package never needs to import notify.
 	OnBlocked func(AlertPayload)
+
+	// OnTerminal fires after a successful happy-path merge-back (i.e. CC's
+	// own copy already had a terminal status when the runner read it back
+	// -- no crash involved). Covers all three of done/blocked/failed: a
+	// CC-initiated `blocked` (e.g. CC needs human input) gets exactly the
+	// same "blocked" treatment as a crash-detected one per
+	// Design - Runner.md's Blocker path section, just without crash
+	// diagnostics -- main.go's wiring is what decides to also invoke
+	// hermes -z for status == "blocked" here, same as OnBlocked's case.
+	OnTerminal func(job worker.Job, status, workLog string)
 }
 
 func (d Deps) claudeBin() string {
@@ -233,6 +243,10 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
+
+	if deps.OnTerminal != nil {
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog)
+	}
 	return nil
 }
 
