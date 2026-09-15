@@ -67,13 +67,16 @@ func (v *Vault) runGit(args ...string) (string, error) {
 	return string(out), nil
 }
 
-// EnvSnapshot runs `env` as a child of this package's git invocation path
-// and reports whether GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE are present in
-// the environment actually handed to git subprocesses -- used by Phase 5's
-// empirical check, not by normal operation.
-func (v *Vault) EnvSnapshot() map[string]bool {
+// EnvSnapshot reports whether GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE are
+// present in this *process's* raw, unfiltered environment -- i.e. what
+// would have leaked into a git subprocess here if cleanEnv() didn't strip
+// them. Used for Phase 5's empirical "does the GIT_DIR hazard still exist
+// in this architecture" check (see Design - Runner.md); deliberately reads
+// os.Environ() directly, not cleanEnv()'s already-filtered result, or this
+// would trivially always report false regardless of the real answer.
+func EnvSnapshot() map[string]bool {
 	found := map[string]bool{"GIT_DIR": false, "GIT_WORK_TREE": false, "GIT_INDEX_FILE": false}
-	for _, e := range cleanEnv() {
+	for _, e := range os.Environ() {
 		for k := range found {
 			if strings.HasPrefix(e, k+"=") {
 				found[k] = true

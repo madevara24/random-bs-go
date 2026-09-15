@@ -21,12 +21,16 @@ import (
 type Runner struct {
 	Vault   *vaultgit.Vault
 	Workers worker.Workers
+
+	// DispatchWake is the size-1 buffered channel the HTTP /dispatch
+	// handler (Phase 5) sends into. RunDispatchLoop is the consumer.
+	DispatchWake chan struct{}
 }
 
 // NewRunner constructs a Runner. Does not touch disk or start any
 // goroutines.
 func NewRunner(vault *vaultgit.Vault, workers worker.Workers) *Runner {
-	return &Runner{Vault: vault, Workers: workers}
+	return &Runner{Vault: vault, Workers: workers, DispatchWake: make(chan struct{}, 1)}
 }
 
 // Boot runs the startup sequence required before the daemon may accept any
@@ -53,4 +57,21 @@ func (r *Runner) Boot() error {
 // enqueue) against this Runner's vault and workers.
 func (r *Runner) RunDispatchPass() error {
 	return dispatch.RunDispatchPass(r.Vault, r.Workers)
+}
+
+// RunDispatchLoop blocks forever, running exactly one dispatch pass each
+// time DispatchWake fires, coalescing any signals that arrive while a pass
+// is already running (the channel is size-1, so extra sends while this
+// loop is busy inside RunDispatchPass are simply dropped by the sender --
+// see httpapi's handleDispatch). Meant to run in its own goroutine, started
+// once at boot alongside the HTTP server. onError is called (non-fatal)
+// whenever a pass returns an error; the loop keeps running regardless.
+func (r *Runner) RunDispatchLoop(onError func(error)) {
+	for range r.DispatchWake {
+		if err := r.RunDispatchPass(); err != nil {
+			if onError != nil {
+				onError(err)
+			}
+		}
+	}
 }
