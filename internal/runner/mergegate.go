@@ -25,11 +25,18 @@ const (
 // is the real implementation; tests substitute a fake that scripts
 // verdicts/CI outcomes directly.
 type MergeGateOps interface {
-	// RunReview invokes a fresh review session (round is 0-indexed, for
-	// logging/comment context) given the PR description and diff, and
-	// returns its verdict plus feedback text -- also responsible for
-	// posting the verdict as a real `gh pr comment` as a side effect.
-	RunReview(round int, prBody, diff string) (ReviewVerdict, string, error)
+	// RunReview invokes a fresh review session for the given round
+	// (0-indexed, for logging/comment context) and returns its verdict
+	// plus feedback text. Deliberately takes no prBody/diff parameters --
+	// the real implementation fetches both fresh on every call, not once
+	// outside the loop, so a round-2 review actually sees whatever the
+	// round-0/1 resume sessions pushed, not a stale pre-fix snapshot (see
+	// Design - Runner.md: "on round 2+, reads the PR's existing comment
+	// thread first, so it checks whether its own prior feedback was
+	// actually addressed" -- that only means anything if the context
+	// itself is re-fetched each round). Also responsible for posting the
+	// verdict as a real `gh pr comment` as a side effect.
+	RunReview(round int) (ReviewVerdict, string, error)
 	// WaitForCI blocks until the branch's latest CI run completes (Actions
 	// API, `gh run list` -- never the Checks API). conclusion is e.g.
 	// "success"/"failure"; failureLog is populated only on non-success.
@@ -54,9 +61,9 @@ var ErrRoundLimitHit = fmt.Errorf("runner: hit round limit (%d) without a clean 
 // RunMergeGateLoop is the loop itself: both triggers (CONCERNS, CI
 // failure) always re-enter through review before re-checking CI -- a fix
 // for one thing could plausibly break something the reviewer would catch.
-func RunMergeGateLoop(ops MergeGateOps, prBody, diff string) error {
+func RunMergeGateLoop(ops MergeGateOps) error {
 	for round := 0; round < MaxMergeGateRounds; round++ {
-		verdict, feedback, err := ops.RunReview(round, prBody, diff)
+		verdict, feedback, err := ops.RunReview(round)
 		if err != nil {
 			return fmt.Errorf("runner: review round %d: %w", round, err)
 		}

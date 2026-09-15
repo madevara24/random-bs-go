@@ -44,16 +44,56 @@ func (g *GhMergeGateOps) runGh(args ...string) (string, error) {
 	return string(out), nil
 }
 
-// RunReview implements MergeGateOps.
-func (g *GhMergeGateOps) RunReview(round int, prBody, diff string) (ReviewVerdict, string, error) {
-	prompt := buildReviewPrompt(round, prBody, diff)
+// RunReview implements MergeGateOps -- fetches the PR body, current diff,
+// and (round 2+) the existing comment thread fresh on every call, so a
+// later round genuinely sees whatever an earlier round's resumed coding
+// session pushed, not a stale pre-fix snapshot.
+func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
+	prBody, err := fetchPRBody(g.RepoPath, g.Branch)
+	if err != nil {
+		return "", "", fmt.Errorf("fetching PR body: %w", err)
+	}
+	diff, err := gitDiff(g.RepoPath, g.DefaultBranch, g.Branch)
+	if err != nil {
+		return "", "", fmt.Errorf("fetching diff: %w", err)
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), g.reviewTimeout())
+	var priorComments string
+	if round > 0 {
+		// Best-effort -- reading the thread failing shouldn't block the
+		// review itself, it just loses this round's "was my feedback
+		// addressed" framing.
+		priorComments, _ = fetchPRComments(g.RepoPath, g.Branch)
+	}
+
+	verdict, feedback, err := reviewOnce(g.ClaudeBin, g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Post the verdict as a real PR comment -- best-effort: a comment-post
+	// failure shouldn't fail the review itself (the verdict was still
+	// genuinely reached), but is worth surfacing.
+	if _, err := g.runGh("pr", "comment", g.Branch, "--body", fmt.Sprintf("**Round %d review: %s**\n\n%s", round, verdict, feedback)); err != nil {
+		fmt.Printf("[runner] mergegate: posting review comment failed (round %d): %v\n", round, err)
+	}
+
+	return verdict, feedback, nil
+}
+
+// reviewOnce is the actual claude -p review invocation + verdict parsing,
+// pulled out of RunReview so it's directly testable with hand-built
+// prBody/diff content (see TestRealReviewInvocation) without needing a
+// real PR/gh state to fetch from.
+func reviewOnce(claudeBin, repoPath string, timeout time.Duration, round int, prBody, diff, priorComments string) (ReviewVerdict, string, error) {
+	prompt := buildReviewPrompt(round, prBody, diff, priorComments)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	args := []string{"-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"}
-	cmd := exec.CommandContext(ctx, g.ClaudeBin, args...)
-	cmd.Dir = g.RepoPath
+	cmd := exec.CommandContext(ctx, claudeBinOrDefault(claudeBin), args...)
+	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("review invocation: %w", err)
@@ -67,14 +107,6 @@ func (g *GhMergeGateOps) RunReview(round int, prBody, diff string) (ReviewVerdic
 	}
 
 	verdict, feedback := parseReviewVerdict(result.Result)
-
-	// Post the verdict as a real PR comment -- best-effort: a comment-post
-	// failure shouldn't fail the review itself (the verdict was still
-	// genuinely reached), but is worth surfacing.
-	if _, err := g.runGh("pr", "comment", g.Branch, "--body", fmt.Sprintf("**Round %d review: %s**\n\n%s", round, verdict, feedback)); err != nil {
-		fmt.Printf("[runner] mergegate: posting review comment failed (round %d): %v\n", round, err)
-	}
-
 	return verdict, feedback, nil
 }
 
@@ -82,10 +114,15 @@ func (g *GhMergeGateOps) RunReview(round int, prBody, diff string) (ReviewVerdic
 // followed by feedback -- review sessions get the task's PR description
 // and diff, never the task note or its copy (no vault access, no shared
 // context with the coding session).
-func buildReviewPrompt(round int, prBody, diff string) string {
+func buildReviewPrompt(round int, prBody, diff, priorComments string) string {
 	var b strings.Builder
 	if round > 0 {
-		b.WriteString("This is a follow-up review round -- the coding session already attempted a fix based on your (or CI's) previous feedback. ")
+		b.WriteString("This is a follow-up review round -- the coding session already attempted a fix based on your (or CI's) previous feedback. Check whether your own prior feedback below was actually addressed before deciding.\n\n")
+		if priorComments != "" {
+			b.WriteString("## Prior review comment thread\n\n")
+			b.WriteString(priorComments)
+			b.WriteString("\n\n")
+		}
 	}
 	b.WriteString("You are reviewing a pull request as an independent reviewer. You have zero shared context with the session that wrote this code -- judge it purely on the PR description and diff below. Do not run any git/gh commands yourself; you are given everything you need.\n\n")
 	b.WriteString("Respond with your verdict as the exact first line `VERDICT: APPROVE` or `VERDICT: CONCERNS`, followed by a blank line, then your reasoning (and, if CONCERNS, exactly what needs to change).\n\n")
@@ -198,6 +235,19 @@ func fetchPRBody(repoPath, branch string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("gh pr view %s: %w\n%s", branch, err, out)
+	}
+	return string(out), nil
+}
+
+// fetchPRComments reads the PR's existing comment thread -- used from
+// round 2+ so the reviewer can check whether its own prior feedback was
+// actually addressed, per Design - Runner.md's review-session section.
+func fetchPRComments(repoPath, branch string) (string, error) {
+	cmd := exec.Command("gh", "pr", "view", branch, "--json", "comments", "--jq", ".comments[].body")
+	cmd.Dir = repoPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view %s (comments): %w\n%s", branch, err, out)
 	}
 	return string(out), nil
 }

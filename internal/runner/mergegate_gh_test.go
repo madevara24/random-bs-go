@@ -6,17 +6,16 @@ import (
 	"time"
 )
 
-// TestRealReviewInvocation exercises GhMergeGateOps.RunReview for real --
-// a genuine claude -p review call against a genuine diff, checked for a
-// sane verdict on an obviously-fine change and an obviously-bad one. This
-// is the one piece of Phase 11 that doesn't inherently require a real
-// GitHub repo (gh pr comment is best-effort inside RunReview and doesn't
-// fail the call if it errors, which it will here -- no real PR exists on
-// this local-only disposable repo). The gh run list / gh pr merge halves
-// of Phase 11 genuinely do need a real GitHub repo with real CI and are
-// NOT exercised by this test -- see the PM Runner Go Rewrite project notes
-// for why (a still-missing Administration permission on the fine-grained
-// PAT blocks `gh repo create`).
+// TestRealReviewInvocation exercises reviewOnce (the claude -p review
+// invocation + verdict parsing that GhMergeGateOps.RunReview delegates to,
+// after fetching prBody/diff for real) directly, with hand-built diffs --
+// a genuine claude -p review call, checked for a sane verdict on an
+// obviously-fine change and an obviously-bad one. This doesn't need a real
+// GitHub repo at all (no gh pr view/comment involved at this level); the
+// full RunReview (which does need gh pr view/comment against a real PR)
+// and the gh run list / gh pr merge halves of Phase 11 are exercised
+// separately against the real madevara24/sandbox repo -- see the PM
+// Runner Go Rewrite project notes.
 func TestRealReviewInvocation(t *testing.T) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude CLI not on PATH, skipping real invocation test")
@@ -41,18 +40,10 @@ func TestRealReviewInvocation(t *testing.T) {
 		"+\texec.Command(\"rm\", \"-rf\", \"/\").Run() // deliberately malicious, unreviewed, no tests\n" +
 		"+}\n"
 
-	ops := &GhMergeGateOps{
-		RepoPath:      testTargetRepoPath,
-		Branch:        "nonexistent-branch-no-real-pr",
-		DefaultBranch: "main",
-		ClaudeBin:     "claude",
-		ReviewTimeout: 90 * time.Second,
-	}
-
 	t.Run("obviously fine change", func(t *testing.T) {
-		verdict, feedback, err := ops.RunReview(0, "Adds a harmless doc clarification to the README.", goodDiff)
+		verdict, feedback, err := reviewOnce("claude", testTargetRepoPath, 90*time.Second, 0, "Adds a harmless doc clarification to the README.", goodDiff, "")
 		if err != nil {
-			t.Fatalf("RunReview: %v", err)
+			t.Fatalf("reviewOnce: %v", err)
 		}
 		t.Logf("verdict=%s feedback=%s", verdict, feedback)
 		if verdict != VerdictApprove {
@@ -61,9 +52,9 @@ func TestRealReviewInvocation(t *testing.T) {
 	})
 
 	t.Run("obviously bad change", func(t *testing.T) {
-		verdict, feedback, err := ops.RunReview(0, "Adds a small utility function.", badDiff)
+		verdict, feedback, err := reviewOnce("claude", testTargetRepoPath, 90*time.Second, 0, "Adds a small utility function.", badDiff, "")
 		if err != nil {
-			t.Fatalf("RunReview: %v", err)
+			t.Fatalf("reviewOnce: %v", err)
 		}
 		t.Logf("verdict=%s feedback=%s", verdict, feedback)
 		if verdict != VerdictConcerns {

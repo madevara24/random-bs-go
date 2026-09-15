@@ -263,7 +263,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 	if terminalStatus == "done" && note.Frontmatter.AutoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
-		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, copyAfter.WorkLog)
+		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL)
 	}
 
 	return nil
@@ -274,21 +274,11 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 // exhaustion specifically) alerted -- they never change the vault note's
 // status, matching Design - Runner.md's own pseudocode ("status stays
 // done" even when the loop exhausts).
-func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, workLogFallback string) {
+func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) {
 	reporter.SetStage("review/CI merge-gate loop")
 
-	prBody, err := fetchPRBody(repoCfg.Path, branchName)
-	if err != nil || strings.TrimSpace(prBody) == "" {
-		fmt.Printf("[runner] task %s: fetching PR body failed (%v), falling back to Work Log as review context\n", job.Slug, err)
-		prBody = workLogFallback
-	}
-	diff, err := gitDiff(repoCfg.Path, repoCfg.DefaultBranch, branchName)
-	if err != nil {
-		fmt.Printf("[runner] task %s: git diff for review failed: %v\n", job.Slug, err)
-	}
-
 	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL)
-	err = RunMergeGateLoop(ops, prBody, diff)
+	err := RunMergeGateLoop(ops)
 	switch {
 	case err == nil:
 		fmt.Printf("[runner] task %s: merge-gate loop completed -- merged\n", job.Slug)

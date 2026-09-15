@@ -24,7 +24,7 @@ type fakeMergeGateOps struct {
 	roundLimitHit int
 }
 
-func (f *fakeMergeGateOps) RunReview(round int, prBody, diff string) (ReviewVerdict, string, error) {
+func (f *fakeMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 	f.reviewCalls = append(f.reviewCalls, round)
 	v := f.verdicts[len(f.verdicts)-1]
 	if round < len(f.verdicts) {
@@ -58,7 +58,7 @@ func (f *fakeMergeGateOps) AlertRoundLimitHit() {
 // APPROVE -> CI green -> merge happens, no resume needed.
 func TestMergeGateLoopCleanPass(t *testing.T) {
 	ops := &fakeMergeGateOps{verdicts: []ReviewVerdict{VerdictApprove}, ciConclusion: "success"}
-	err := RunMergeGateLoop(ops, "pr body", "diff")
+	err := RunMergeGateLoop(ops)
 	if err != nil {
 		t.Fatalf("RunMergeGateLoop: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMergeGateLoopCleanPass(t *testing.T) {
 // increments the round count, then a clean round merges.
 func TestMergeGateLoopConcernsThenApprove(t *testing.T) {
 	ops := &fakeMergeGateOps{verdicts: []ReviewVerdict{VerdictConcerns, VerdictApprove}, ciConclusion: "success"}
-	err := RunMergeGateLoop(ops, "pr body", "diff")
+	err := RunMergeGateLoop(ops)
 	if err != nil {
 		t.Fatalf("RunMergeGateLoop: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestMergeGateLoopConcernsThenApprove(t *testing.T) {
 // round, not straight back to CI.
 func TestMergeGateLoopCIFailureThenApprove(t *testing.T) {
 	f := &flakyCIOps{}
-	err := RunMergeGateLoop(f, "pr body", "diff")
+	err := RunMergeGateLoop(f)
 	if err != nil {
 		t.Fatalf("RunMergeGateLoop: %v", err)
 	}
@@ -121,7 +121,7 @@ type flakyCIOps struct {
 	mergeCalls   int
 }
 
-func (f *flakyCIOps) RunReview(round int, prBody, diff string) (ReviewVerdict, string, error) {
+func (f *flakyCIOps) RunReview(round int) (ReviewVerdict, string, error) {
 	f.reviewRounds++
 	return VerdictApprove, "", nil
 }
@@ -144,7 +144,7 @@ func (f *flakyCIOps) AlertRoundLimitHit() {}
 // round limit" alert instead of looping forever.
 func TestMergeGateLoopExhaustsRoundLimit(t *testing.T) {
 	ops := &fakeMergeGateOps{verdicts: []ReviewVerdict{VerdictConcerns}, ciConclusion: "success"}
-	err := RunMergeGateLoop(ops, "pr body", "diff")
+	err := RunMergeGateLoop(ops)
 	if !errors.Is(err, ErrRoundLimitHit) {
 		t.Fatalf("RunMergeGateLoop error = %v, want ErrRoundLimitHit", err)
 	}
