@@ -82,7 +82,35 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 
 func slugFromPath(relPath string) string {
 	base := filepath.Base(relPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	return slugify(name)
+}
+
+// slugify turns an arbitrary task-note title into the git-ref-safe,
+// filename-safe form every existing MDC task branch already uses (e.g.
+// "(MDC) PR35 Review Follow-up R2 (Fold ask TestMain, delete main_test.go)"
+// -> "mdc-pr35-review-follow-up-r2-fold-ask-testmain-delete-main_test-go"):
+// lowercase, any run of characters outside [a-z0-9_] collapsed to one
+// hyphen, leading/trailing hyphens trimmed. Found missing 2026-09-17 when
+// the first note ever processed by the Go runner in production (title had
+// spaces and parens) produced an invalid `git checkout -b` branch name --
+// every prior MDC task had gone through the old bash pipeline, which did
+// slugify, so this gap had never been exercised before.
+func slugify(s string) string {
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+			prevHyphen = false
+			continue
+		}
+		if !prevHyphen {
+			b.WriteByte('-')
+			prevHyphen = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // RunDispatchPass syncs the vault, scans Tasks/ for ready/blocker_resolved

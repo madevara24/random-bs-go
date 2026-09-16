@@ -17,6 +17,24 @@ import (
 // never the real PM vault. See that package's comment for why.
 const testVaultPath = testvault.Path
 
+// TestSlugFromPathMatchesRealBranchConvention pins slugify against the
+// exact shape of an already-existing real MDC task branch name, so the
+// regression this fixes (an unsanitized filename passed straight through
+// as a git branch name) can't silently come back.
+func TestSlugFromPathMatchesRealBranchConvention(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"Tasks/(MDC) Add Project Zomboid Punchline.md", "mdc-add-project-zomboid-punchline"},
+		{"Tasks/(MDC) PR35 Review Follow-up R2 (Fold ask TestMain, delete main_test.go).md",
+			"mdc-pr35-review-follow-up-r2-fold-ask-testmain-delete-main_test-go"},
+		{"Tasks/plain-slug-already.md", "plain-slug-already"},
+	}
+	for _, c := range cases {
+		if got := slugFromPath(c.path); got != c.want {
+			t.Errorf("slugFromPath(%q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
 func skipIfNoTestVault(t *testing.T) {
 	t.Helper()
 	testvault.SkipIfAbsent(t)
