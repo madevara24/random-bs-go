@@ -139,30 +139,57 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("runner: writing in_progress for %s: %w", job.Slug, err)
+			return handleSetupFailure(deps, job, setupFailureInfo{
+				stage:   setupStageWriteInProgress,
+				err:     fmt.Errorf("writing in_progress for %s: %w", job.Slug, err),
+				repoCfg: repoCfg,
+			})
 		}
 		// Re-read so later logic sees the just-written state (frontmatter
 		// status, in particular) rather than the pre-claim snapshot.
 		note, err = deps.Vault.ReadNote(job.NotePath)
 		if err != nil {
-			return fmt.Errorf("runner: re-reading note %s after in_progress write: %w", job.NotePath, err)
+			return handleSetupFailure(deps, job, setupFailureInfo{
+				stage:   setupStageRereadNote,
+				err:     fmt.Errorf("re-reading note %s after in_progress write: %w", job.NotePath, err),
+				repoCfg: repoCfg,
+			})
 		}
 	}
 
 	branchName := fmt.Sprintf("task/%s-%s", job.Slug, time.Now().Format("2006-01-02"))
 	if !resume {
 		if err := pullAndBranch(repoCfg, branchName); err != nil {
-			return fmt.Errorf("runner: setting up branch for %s: %w", job.Slug, err)
+			return handleSetupFailure(deps, job, setupFailureInfo{
+				stage:      setupStagePullAndBranch,
+				err:        fmt.Errorf("setting up branch for %s: %w", job.Slug, err),
+				repoCfg:    repoCfg,
+				branchName: branchName,
+			})
 		}
 	}
 
 	copyName := copyFileName(job.Slug)
 	copyPath := filepath.Join(repoCfg.Path, copyName)
 	if err := writeNoteCopy(note, copyPath); err != nil {
-		return fmt.Errorf("runner: writing note-copy for %s: %w", job.Slug, err)
+		return handleSetupFailure(deps, job, setupFailureInfo{
+			stage:      setupStageWriteNoteCopy,
+			err:        fmt.Errorf("writing note-copy for %s: %w", job.Slug, err),
+			repoCfg:    repoCfg,
+			branchName: branchName,
+			copyPath:   copyPath,
+			resume:     resume,
+		})
 	}
 	if err := excludeFromGit(repoCfg.Path, copyName); err != nil {
-		return fmt.Errorf("runner: excluding note-copy for %s: %w", job.Slug, err)
+		return handleSetupFailure(deps, job, setupFailureInfo{
+			stage:      setupStageExcludeFromGit,
+			err:        fmt.Errorf("excluding note-copy for %s: %w", job.Slug, err),
+			repoCfg:    repoCfg,
+			branchName: branchName,
+			copyPath:   copyPath,
+			resume:     resume,
+		})
 	}
 
 	reporter.SetStage("invocation")

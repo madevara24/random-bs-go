@@ -46,6 +46,8 @@ func (s Scenario) String() string {
 		return "parse_failure"
 	case ScenarioNonTerminal:
 		return "non_terminal"
+	case ScenarioSetupFailure:
+		return "setup_failure"
 	default:
 		return "unknown"
 	}
