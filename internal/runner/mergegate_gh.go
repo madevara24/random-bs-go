@@ -224,11 +224,10 @@ func claudeBinOrDefault(bin string) string {
 }
 
 // fetchPRBody reads the PR description via `gh pr view` -- the review
-// session's task summary, per Background.md/Design - Runner.md: review
-// sessions read the PR's own description, never the task note or its
-// copy. Returns an error (caller falls back to the Work Log) if gh isn't
-// functional here at all, e.g. a local-only disposable repo with no
-// GitHub remote.
+// session's task summary: review sessions read the PR's own description,
+// never the task note or its copy. Returns an error (caller falls back to
+// the Work Log) if gh isn't functional here at all, e.g. a local-only
+// disposable repo with no GitHub remote.
 func fetchPRBody(repoPath, branch string) (string, error) {
 	cmd := exec.Command("gh", "pr", "view", branch, "--json", "body", "--jq", ".body")
 	cmd.Dir = repoPath
@@ -241,7 +240,7 @@ func fetchPRBody(repoPath, branch string) (string, error) {
 
 // fetchPRComments reads the PR's existing comment thread -- used from
 // round 2+ so the reviewer can check whether its own prior feedback was
-// actually addressed, per Design - Runner.md's review-session section.
+// actually addressed.
 func fetchPRComments(repoPath, branch string) (string, error) {
 	cmd := exec.Command("gh", "pr", "view", branch, "--json", "comments", "--jq", ".comments[].body")
 	cmd.Dir = repoPath

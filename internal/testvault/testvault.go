@@ -1,11 +1,11 @@
 // Package testvault provides shared test-support helpers for exercising
 // real git operations against one throwaway PM-vault-shaped bare+working
-// clone pair (never the real production PM vault -- see Storage & Repos.md
-// in the notes vault). Deliberately not a _test.go file: `go test ./...`
-// runs each package's tests in its own process, in parallel by default, and
-// more than one package (vaultgit, dispatch) needs real-git integration
-// tests against this same on-disk clone -- an in-memory mutex can't
-// coordinate across those separate test binaries, only a real flock can.
+// clone pair (never the real production PM vault). Deliberately not a
+// _test.go file: `go test ./...` runs each package's tests in its own
+// process, in parallel by default, and more than one package (vaultgit,
+// dispatch) needs real-git integration tests against this same on-disk
+// clone -- an in-memory mutex can't coordinate across those separate test
+// binaries, only a real flock can.
 package testvault
 
 import (
@@ -19,10 +19,9 @@ import (
 	"github.com/madevara24/random-bs-go/internal/notetask"
 )
 
-// Path is the throwaway test vault's working clone -- created once for this
-// rewrite, set up outside the repo (see the PM Runner Go Rewrite project
-// notes for provenance). Its Tasks/ directory is scratch space: tests seed
-// uniquely-named notes per run and never assume a clean slate.
+// Path is the throwaway test vault's working clone -- set up outside the
+// repo, on-disk, per checkout. Its Tasks/ directory is scratch space:
+// tests seed uniquely-named notes per run and never assume a clean slate.
 const Path = "/home/obsidian/pmrunner-go-test-vault"
 
 const lockFilePath = "/home/obsidian/pmrunner-go-test-vault.git/test-suite.lock"

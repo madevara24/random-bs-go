@@ -1,8 +1,6 @@
-// Package worker implements the per-repo goroutine that replaces
-// worker.sh + spawn-worker.sh: one persistent goroutine per onboarded repo,
+// Package worker implements one persistent goroutine per onboarded repo,
 // alive for the daemon's life, blocking on a wake channel and draining its
 // own FIFO queue, gated by a single shared global-concurrency semaphore.
-// See Design - Runner.md's worker.sh section for the full mapping.
 package worker
 
 import (
@@ -21,10 +19,9 @@ type Job struct {
 }
 
 // TaskStatus is what a RepoWorker exposes about its in-flight task, for the
-// watcher's /status/tasks endpoint (Phase 12). Nil on RepoWorker.currentTask
-// means idle. LastActivityAt is stamped by the runner's stream-json reader
-// (Phase 8) -- one write path, two consumers (the idle watchdog and the
-// watcher).
+// watcher's /status/tasks endpoint. Nil on RepoWorker.currentTask means
+// idle. LastActivityAt is stamped by the runner's stream-json reader --
+// one write path, two consumers (the idle watchdog and the watcher).
 type TaskStatus struct {
 	Slug           string
 	Repo           string
@@ -33,12 +30,11 @@ type TaskStatus struct {
 	Stage          string
 }
 
-// ProcessFunc does the actual task work. Phase 3 wires in a stub; Phase 6+
-// replaces it with the real runner.ProcessTask. Errors are worker's own
-// bookkeeping only -- by the time ProcessFunc returns (as opposed to
-// panicking), the runner has already written the note's terminal status and
-// fired its own alert as side effects; see Design - Runner.md's
-// "Scope vs. runner.sh" section.
+// ProcessFunc does the actual task work -- bound to runner.ProcessTask in
+// production. Errors are worker's own bookkeeping only -- by the time
+// ProcessFunc returns (as opposed to panicking), the runner has already
+// written the note's terminal status and fired its own alert as side
+// effects.
 type ProcessFunc func(job Job) error
 
 // NewGlobalSlots creates the shared global-concurrency semaphore. Created
@@ -51,8 +47,7 @@ func NewGlobalSlots(n int) chan struct{} {
 // RepoWorker is one repo's persistent worker goroutine: a mutex-guarded
 // FIFO queue, a buffered-1 wake channel, and its own currentTask, guarded
 // by its own RWMutex since the processing goroutine writes it while the
-// watcher-facing HTTP handler (Phase 12) reads it from a different
-// goroutine.
+// watcher-facing HTTP handler reads it from a different goroutine.
 type RepoWorker struct {
 	RepoKey     string
 	Process     ProcessFunc
@@ -60,16 +55,14 @@ type RepoWorker struct {
 
 	// OnPanic is called from runOne's recover() when Process panics --
 	// Process never got the chance to write anything, so this is the
-	// fallback of last resort. Phase 3's stub just logs; Phase 9's real
-	// runner-level fallback gets wired in by whatever constructs the
-	// RepoWorker (main.go), keeping this package free of any dependency on
-	// runner/notify.
+	// fallback of last resort. Meant to be wired to a real runner-level
+	// fallback by whatever constructs the RepoWorker (main.go), keeping
+	// this package free of any dependency on runner/notify.
 	OnPanic func(job Job, recovered any)
 
 	// OnError is called when Process returns a non-nil error. Purely
-	// internal bookkeeping (per Design - Runner.md: "not load-bearing") --
-	// the runner already handled the user-visible side of any failure
-	// before returning.
+	// internal bookkeeping, not load-bearing -- the runner already handled
+	// the user-visible side of any failure before returning.
 	OnError func(job Job, err error)
 
 	mu    sync.Mutex
@@ -113,7 +106,7 @@ func (w *RepoWorker) Enqueue(job Job) {
 }
 
 // QueueLen reports the current queue depth -- used by startup reconciliation
-// (Phase 4) and tests.
+// and tests.
 func (w *RepoWorker) QueueLen() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -144,8 +137,8 @@ func (w *RepoWorker) CurrentTask() *TaskStatus {
 }
 
 // SetStage updates the in-flight task's stage and stamps LastActivityAt --
-// exported so the runner package (Phase 6+) can report progress without
-// worker needing to know anything about what a "stage" means.
+// exported so the runner package can report progress without worker
+// needing to know anything about what a "stage" means.
 func (w *RepoWorker) SetStage(stage string) {
 	w.statusMu.Lock()
 	defer w.statusMu.Unlock()
@@ -156,7 +149,7 @@ func (w *RepoWorker) SetStage(stage string) {
 }
 
 // TouchActivity stamps LastActivityAt without changing Stage -- the write
-// path the runner's stream-json reader uses on every line (Phase 8).
+// path the runner's stream-json reader uses on every line.
 func (w *RepoWorker) TouchActivity() {
 	w.statusMu.Lock()
 	defer w.statusMu.Unlock()

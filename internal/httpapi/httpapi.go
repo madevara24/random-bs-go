@@ -2,10 +2,9 @@
 // trigger from the git hook (POST /dispatch), a liveness probe
 // (GET /health), and (POST /runner-log) the write side of the watcher's
 // Runner Log outcome, since the watcher runs in a separate OS process from
-// the one that actually owns the vault clone. See Background.md's "Trigger
-// model" and "Runner <-> watcher communication" sections -- every endpoint
-// here is meant to bind localhost only, no auth (same-user, same-machine
-// trust boundary).
+// the one that actually owns the vault clone. Every endpoint here is meant
+// to bind localhost only, no auth (same-user, same-machine trust
+// boundary).
 package httpapi
 
 import (
@@ -28,7 +27,7 @@ type Server struct {
 	// Workers backs GET /status/tasks -- reads each RepoWorker.currentTask
 	// under its own RWMutex. May be nil (the route then reports an empty
 	// map), which is fine for callers that only need /dispatch and
-	// /health, like Phase 5's own tests.
+	// /health.
 	Workers worker.Workers
 
 	// Vault backs POST /runner-log -- the same *vaultgit.Vault instance
@@ -60,9 +59,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleDispatch replies immediately regardless of whether a pass was
 // already pending -- the actual scan/claim/enqueue work happens later, in
-// the dedicated dispatch-pass goroutine, never inline in this handler (see
-// Design - Runner.md's dispatcher.sh section: "never runs inline in the
-// HTTP handler").
+// the dedicated dispatch-pass goroutine, never inline in this handler.
 func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -78,10 +75,10 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth is daemon-liveness only: hardcoded 200, touches zero locks
-// and zero per-repo state, by construction -- Phase 12's watcher relies on
-// this being lock-free so a wedged per-repo goroutine can never make this
+// and zero per-repo state, by construction -- the watcher relies on this
+// being lock-free so a wedged per-repo goroutine can never make this
 // endpoint itself hang. The real payload (per-repo status) is
-// GET /status/tasks, added in Phase 12; this route never grows one.
+// GET /status/tasks; this route never grows one.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
@@ -98,10 +95,10 @@ type TaskStatusWire struct {
 
 // handleStatusTasks reads every RepoWorker.currentTask under its own
 // RWMutex and returns the per-repo map (nil entries for idle repos are
-// omitted, not returned as null, to keep the payload small) -- Tier 2 of
-// the watcher's two-tier design (Design - Watcher.md): only called after
-// Tier 1 (/health) already succeeded, so a real delay here specifically
-// means "stuck on a per-repo lock," not "daemon down."
+// omitted, not returned as null, to keep the payload small) -- this is
+// Tier 2 of the watcher's checks, only called after Tier 1 (/health)
+// already succeeded, so a real delay here specifically means "stuck on a
+// per-repo lock," not "daemon down."
 func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 	out := map[string]TaskStatusWire{}
 	for repoKey, rw := range s.Workers {
@@ -132,8 +129,7 @@ type runnerLogRequest struct {
 // "notify_failed") to the named note, via the runner's own Vault -- the
 // watcher calls this instead of writing to the vault clone itself, since
 // it runs in a different OS process and has no way to share the mutex that
-// actually serializes git operations against this clone. See Design -
-// Runner.md's with-vault-lock.sh gap, found 2026-09-17.
+// actually serializes git operations against this clone.
 func (s *Server) handleRunnerLog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)

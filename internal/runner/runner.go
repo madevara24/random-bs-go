@@ -1,10 +1,6 @@
-// Package runner implements processTask -- the actual per-task work,
-// replacing the stub wired in Phases 3-5. Phase 6: setup (claim, pull,
-// branch, note-copy) + invocation (claude -p, session_id capture). Any
-// process exit is treated as terminal for now; merge-back, the idle
-// watchdog, and crash-fallback branching land in Phases 7-9. See
-// Design - Runner.md's runner.sh section for the full behavior this
-// reproduces.
+// Package runner implements ProcessTask -- the actual per-task work: setup
+// (claim, pull, branch, note-copy), invocation (claude -p, session_id
+// capture), the idle watchdog, crash-fallback branching, and merge-back.
 package runner
 
 import (
@@ -30,7 +26,7 @@ import (
 // ErrIdleTimeout is returned by invokeClaude (and surfaces through
 // ProcessTask) when the idle watchdog kills the process group after
 // IdleTimeout of silence on the stream-json output -- distinct from a
-// plain process-exit error so callers (Phase 9's crash-fallback alert in
+// plain process-exit error so callers (the crash-fallback alert in
 // particular) can say "the runner killed it for going idle," not just show
 // a bare exit code.
 var ErrIdleTimeout = errors.New("runner: idle timeout exceeded, process group killed")
@@ -50,46 +46,41 @@ type Deps struct {
 	Vault *vaultgit.Vault
 	Repos map[string]config.RepoConfig
 
-	// ClaudeBin is the claude CLI's path/name -- overridable so Phase 8's
-	// tests can point it at a fake stub script instead of the real binary.
+	// ClaudeBin is the claude CLI's path/name -- overridable so tests can
+	// point it at a fake stub script instead of the real binary.
 	ClaudeBin string
 
 	// IdleTimeout is how long the stream-json output may go silent before
 	// the watchdog kills the process group. Same shared setting as the
-	// watcher's own staleness threshold, per Design - Runner.md's
-	// "Idle-window value" decision -- one config key (IDLE_TIMEOUT_MINUTES),
-	// read by both run modes.
+	// watcher's own staleness threshold -- one config key
+	// (IDLE_TIMEOUT_MINUTES), read by both run modes.
 	IdleTimeout time.Duration
 
 	// OnBlocked fires synchronously, right after the vault note is written
 	// to status: blocked by the crash-fallback path, with the fully-built
-	// alert payload. nil is fine (defaults to a no-op) -- Phase 10's real
-	// notify package is what main.go wires in here in production; keeping
-	// this a callback (same injectable pattern as worker.OnPanic/OnError)
-	// means this package never needs to import notify.
+	// alert payload. nil is fine (defaults to a no-op); keeping this a
+	// callback (same injectable pattern as worker.OnPanic/OnError) means
+	// this package never needs to import notify.
 	OnBlocked func(AlertPayload)
 
 	// OnTerminal fires after a successful happy-path merge-back (i.e. CC's
 	// own copy already had a terminal status when the runner read it back
 	// -- no crash involved). Covers all three of done/blocked/failed: a
 	// CC-initiated `blocked` (e.g. CC needs human input) gets exactly the
-	// same "blocked" treatment as a crash-detected one per
-	// Design - Runner.md's Blocker path section, just without crash
+	// same "blocked" treatment as a crash-detected one, just without crash
 	// diagnostics -- main.go's wiring is what decides to also invoke
 	// hermes -z for status == "blocked" here, same as OnBlocked's case.
 	OnTerminal func(job worker.Job, status, workLog string)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
-	// status: done with auto_merge: true and a real pr_url -- Phase 11's
+	// status: done with auto_merge: true and a real pr_url, to run the
 	// review/CI merge-gate loop. nil (the default) means the loop never
-	// runs, which is exactly what every phase before 11 relies on to stay
-	// unaffected by this addition.
+	// runs.
 	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) MergeGateOps
 
 	// OnRoundLimitHit fires if the merge-gate loop exhausts its round
 	// budget without a clean merge -- the PR stays open, status stays
-	// "done" (per Design - Runner.md's own pseudocode), this is purely the
-	// alert.
+	// "done", this is purely the alert.
 	OnRoundLimitHit func(job worker.Job, prURL string)
 }
 
@@ -213,9 +204,8 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	reporter.SetStage("result read-back")
 
 	// Delete the copy unconditionally at the end, regardless of which path
-	// below is taken -- same "always clean up" fix Background.md calls for
-	// (the bash design's known gap around .task-result.json only being
-	// cleaned up after the first read).
+	// below is taken -- otherwise a copy that's already been read once
+	// would linger in the target repo forever.
 	defer func() {
 		if err := os.Remove(copyPath); err != nil && !os.IsNotExist(err) {
 			fmt.Printf("[runner] task %s: failed to delete note-copy %s: %v\n", job.Slug, copyPath, err)
@@ -226,10 +216,9 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	switch {
 	case copyErr != nil:
 		// Scenario 1 (no copy at all) and scenario 3 (copy exists but fails
-		// to parse) are handled identically -- per Design - Runner.md's
-		// two-branch trust rule, a parse failure means the runner can't
-		// trust *anything* in the copy, no partial credit, same as no copy
-		// existing to begin with.
+		// to parse) are handled identically: a parse failure means the
+		// runner can't trust *anything* in the copy, no partial credit,
+		// same as no copy existing to begin with.
 		scenario := ScenarioNoCopy
 		if _, statErr := os.Stat(copyPath); statErr == nil {
 			scenario = ScenarioParseFailure
@@ -296,11 +285,10 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	return nil
 }
 
-// runMergeGateForTask wires Phase 11's loop into a task that just landed
-// on done+auto_merge+a real pr_url. Failures here are logged and (on round
-// exhaustion specifically) alerted -- they never change the vault note's
-// status, matching Design - Runner.md's own pseudocode ("status stays
-// done" even when the loop exhausts).
+// runMergeGateForTask runs the review/CI merge-gate loop for a task that
+// just landed on done+auto_merge+a real pr_url. Failures here are logged
+// and (on round exhaustion specifically) alerted -- they never change the
+// vault note's status, which stays "done" even when the loop exhausts.
 func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) {
 	reporter.SetStage("review/CI merge-gate loop")
 
@@ -336,9 +324,8 @@ func derefStr(s *string) string {
 }
 
 // readNoteCopy reads and parses the note-copy from the target repo.
-// Malformed or missing YAML is a hard error -- see Design - Runner.md's
-// crash-fallback section: a parse failure is treated identically to no
-// copy at all, no partial credit.
+// Malformed or missing YAML is a hard error: a parse failure is treated
+// identically to no copy at all, no partial credit.
 func readNoteCopy(copyPath string) (*notetask.Note, error) {
 	data, err := os.ReadFile(copyPath)
 	if err != nil {
@@ -375,8 +362,7 @@ func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 }
 
 // writeNoteCopy writes the note's content into the target repo, minus the
-// Runner Log -- CC never sees runner-only bookkeeping (see Background.md's
-// note-copy decision).
+// Runner Log -- CC never sees runner-only bookkeeping.
 func writeNoteCopy(note *notetask.Note, copyPath string) error {
 	copyNote := &notetask.Note{
 		Frontmatter: note.Frontmatter,
@@ -395,7 +381,7 @@ func writeNoteCopy(note *notetask.Note, copyPath string) error {
 // excludeFromGit adds name to the target repo clone's .git/info/exclude,
 // idempotently, before CC ever runs -- so git add -A/-a and even a plain
 // `git add <file>` (without -f) skip the copy automatically. Local-only,
-// per-clone, never a tracked file (see Background.md).
+// per-clone, never a tracked file.
 func excludeFromGit(repoPath, name string) error {
 	excludePath := filepath.Join(repoPath, ".git", "info", "exclude")
 	existing, err := os.ReadFile(excludePath)
@@ -419,8 +405,8 @@ func excludeFromGit(repoPath, name string) error {
 }
 
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
-// vault access (see Background.md), so it's pointed at the note-copy
-// instead for anything it needs to read or write about task state.
+// vault access, so it's pointed at the note-copy instead for anything it
+// needs to read or write about task state.
 func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
 	var b strings.Builder
 	if resume {
@@ -441,17 +427,14 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
 // task keeps resetting it forever), and fires only after that long a
 // silence, killing the whole process group (not just the top-level PID) so
 // a Bash-tool-spawned child claude itself started can't survive as an
-// orphan. See Design - Runner.md's "Timeout / watchdog and kill mechanism"
-// section -- this is an idle watchdog, not a flat deadline, for exactly the
-// reason given there: a fixed wall-clock timeout can't tell "genuinely
-// hung" from "still working."
+// orphan. This is deliberately an idle watchdog, not a flat deadline: a
+// fixed wall-clock timeout can't tell "genuinely hung" from "still
+// working."
 //
 // Returns the captured session_id (best-effort -- the crash-fallback path
 // handles the case where the process died before ever emitting one), the
-// last portion of stderr (for crash-fallback alert content -- see
-// Design - Runner.md's "exit code and the last lines of stderr"
-// requirement), and either the process's own exit error, or ErrIdleTimeout
-// if the watchdog fired.
+// last portion of stderr (for crash-fallback alert content), and either
+// the process's own exit error, or ErrIdleTimeout if the watchdog fired.
 func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, string, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if resumeSessionID != "" {
@@ -536,9 +519,7 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 }
 
 // tailWriter keeps only the last max bytes written to it -- a bounded
-// stderr capture for alert content, not a full transcript (the per-task
-// transcript log itself is still an open item, see Design - Runner.md's
-// "Open" section under runner.sh).
+// stderr capture for alert content, not a full transcript.
 type tailWriter struct {
 	buf []byte
 	max int

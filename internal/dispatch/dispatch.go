@@ -1,8 +1,6 @@
 // Package dispatch implements the dispatch pass: sync the vault, scan
 // Tasks/ for ready work, claim it atomically, and enqueue it for
-// processing. Mirrors dispatcher.sh, minus the job-file/spawn-worker
-// machinery it no longer needs (see Design - Runner.md's dispatcher.sh
-// section).
+// processing.
 package dispatch
 
 import (
@@ -27,18 +25,9 @@ type Job struct {
 // Enqueuer is how a claimed job reaches its repo's queue. Defined here
 // (the caller side) rather than in the worker package, so this package
 // doesn't need to import worker at all -- worker.RepoWorker satisfies this
-// interface via its own Enqueue method, wired together in main.go. Phase 2
-// uses a stub implementation; Phase 4 wires the real one.
+// interface via its own Enqueue method, wired together in main.go.
 type Enqueuer interface {
 	Enqueue(repoKey string, job Job)
-}
-
-// StubEnqueuer just prints what it would enqueue -- Phase 2's placeholder,
-// before RepoWorker exists.
-type StubEnqueuer struct{}
-
-func (StubEnqueuer) Enqueue(repoKey string, job Job) {
-	fmt.Printf("[dispatch] (stub) would enqueue repo=%s slug=%s notePath=%s\n", repoKey, job.Slug, job.NotePath)
 }
 
 const tasksDir = "Tasks"
@@ -115,11 +104,11 @@ func slugify(s string) string {
 
 // RunDispatchPass syncs the vault, scans Tasks/ for ready/blocker_resolved
 // notes, stamps ready_at where empty, claims in oldest-ready_at-first
-// (tie-break oldest-created) order, and enqueues each claimed job. Meant to
-// run inside one dedicated goroutine at a time (the wake-channel coalescing
-// happens one layer up, in the daemon boot code) -- this function itself
-// has no internal concurrency guard, matching "only one pass ever runs at a
-// time" from Design - Runner.md.
+// (tie-break oldest-created) order, and enqueues each claimed job. This
+// function has no internal concurrency guard -- it must run inside one
+// dedicated goroutine at a time, with wake-channel coalescing handled one
+// layer up in the daemon boot code, so that only one pass ever runs at a
+// time.
 func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer) error {
 	if err := v.Sync(); err != nil {
 		return fmt.Errorf("dispatch: sync: %w", err)
@@ -200,12 +189,11 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer) error {
 
 // ReconcileQueued scans Tasks/ for notes already at status "queued" and
 // re-populates each repo's queue by enqueuing them -- the startup-only
-// counterpart to a restart emptying every in-memory queue. In the bash
-// pipeline, a job file surviving on disk made "queued" self-heal for free;
-// here the note's own frontmatter is the only remaining record, so this
-// must run once at boot, after a fresh Sync() and before the daemon starts
-// accepting dispatch triggers (see Design - Runner.md's worker.sh section).
-// Does not write anything to the vault -- these notes are already claimed.
+// counterpart to a restart emptying every in-memory queue. The note's own
+// frontmatter is the only record of a queued job, so this must run once at
+// boot, after a fresh Sync() and before the daemon starts accepting
+// dispatch triggers. Does not write anything to the vault -- these notes
+// are already claimed.
 func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer) error {
 	scanned, err := scanTasks(v.Path)
 	if err != nil {
