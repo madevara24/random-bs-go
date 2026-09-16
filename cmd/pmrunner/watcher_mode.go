@@ -26,7 +26,10 @@ func runWatcher(cfg *config.Config) {
 		cfg.VaultPath, cfg.IdleTimeoutMinutes, cfg.HTTPPort)
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
-	notifier := &notify.Notifier{WebhookURL: cfg.DiscordWebhookURL}
+	notifier := &notify.Notifier{
+		RunnerLogURL: fmt.Sprintf("http://127.0.0.1:%d/runner-log", cfg.HTTPPort),
+		WebhookURL:   cfg.DiscordWebhookURL,
+	}
 
 	w := &watcher.Watcher{
 		BaseURL:     fmt.Sprintf("http://127.0.0.1:%d", cfg.HTTPPort),
@@ -65,7 +68,7 @@ func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config
 	}
 	for _, u := range unnotified {
 		fmt.Printf("[watcher] unnotified terminal note detected: %s status=%s age=%v\n", u.RelPath, u.Status, u.Age)
-		notifier.Send("", fmt.Sprintf("<@%s> pmwatch: task `%s` reached status `%s` %v ago with no Discord notification ever recorded.", cfg.DiscordUserID, u.Slug, u.Status, u.Age),
+		notifier.Send(u.RelPath, fmt.Sprintf("<@%s> pmwatch: task `%s` reached status `%s` %v ago with no Discord notification ever recorded.", cfg.DiscordUserID, u.Slug, u.Status, u.Age),
 			u.Slug+"-unnotified.md", fmt.Sprintf("# Lost notification detected\n\n- Note: %s\n- Status: %s\n- Age: %v\n", u.RelPath, u.Status, u.Age))
 	}
 }

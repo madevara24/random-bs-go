@@ -36,6 +36,18 @@ type Notifier struct {
 	Vault      *vaultgit.Vault
 	WebhookURL string
 
+	// RunnerLogURL, if set, takes precedence over Vault: instead of
+	// writing the Runner Log outcome directly against the vault clone,
+	// sendSync POSTs it to the runner daemon's own /runner-log endpoint.
+	// Required for a caller running in a different OS process from the one
+	// that owns the vault clone -- e.g. the watcher, which found out the
+	// hard way (2026-09-17) that two independent vaultgit.Vault instances
+	// in two separate processes share no mutex and collide on real git
+	// locks. See Design - Runner.md's with-vault-lock.sh gap. The runner
+	// itself leaves this empty and keeps writing via Vault directly, since
+	// it already is the process that owns the clone.
+	RunnerLogURL string
+
 	// HermesCmd is the full argv minus the final message argument, e.g.
 	// {"/path/to/python", "-m", "hermes_cli.main", "-z"} -- the message
 	// text is appended as the last arg. Defaults to DefaultHermesCmd.
@@ -86,7 +98,14 @@ func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody st
 		}
 	}
 
-	if notePath == "" || n.Vault == nil {
+	if notePath == "" {
+		return
+	}
+	if n.RunnerLogURL != "" {
+		n.postRunnerLog(notePath, event)
+		return
+	}
+	if n.Vault == nil {
 		return
 	}
 	werr := n.Vault.WriteNote(notePath, fmt.Sprintf("runner: %s", event), func(note *notetask.Note) error {
@@ -95,6 +114,36 @@ func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody st
 	})
 	if werr != nil {
 		fmt.Printf("[notify] failed to append %q to Runner Log for %s: %v\n", event, notePath, werr)
+	}
+}
+
+// postRunnerLog asks the runner daemon to record the outcome, since it (not
+// this process) owns the vault clone. One attempt, no retry of its own --
+// the outer sendSync retry already covers "Discord was down," and if the
+// runner daemon itself is unreachable that's a health-check failure the
+// watcher's own /health poll surfaces separately, not something worth a
+// second retry loop here.
+func (n *Notifier) postRunnerLog(notePath, event string) {
+	body, err := json.Marshal(map[string]string{"note_path": notePath, "event": event})
+	if err != nil {
+		fmt.Printf("[notify] failed to marshal runner-log request for %s: %v\n", notePath, err)
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, n.RunnerLogURL, bytes.NewReader(body))
+	if err != nil {
+		fmt.Printf("[notify] failed to build runner-log request for %s: %v\n", notePath, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("[notify] POST %s for %s: %v\n", n.RunnerLogURL, notePath, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Printf("[notify] POST %s for %s returned status %d\n", n.RunnerLogURL, notePath, resp.StatusCode)
 	}
 }
 

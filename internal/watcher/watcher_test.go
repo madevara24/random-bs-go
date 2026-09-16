@@ -44,7 +44,7 @@ func TestCheckHealthConnectionRefused(t *testing.T) {
 
 // TestCheckHealthOKWhenServing confirms the happy path doesn't misreport.
 func TestCheckHealthOKWhenServing(t *testing.T) {
-	srv := httptest.NewServer(httpapi.New(make(chan struct{}, 1), nil))
+	srv := httptest.NewServer(httpapi.New(make(chan struct{}, 1), nil, nil))
 	defer srv.Close()
 
 	w := &Watcher{BaseURL: srv.URL, HealthHTTPTimeout: 2 * time.Second}
@@ -214,7 +214,7 @@ func TestCheckStatusTasksFlagsStaleBeforeRunnerWatchdog(t *testing.T) {
 	workers.StartAll()
 	rw.Enqueue(worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug})
 
-	srv := httptest.NewServer(httpapi.New(make(chan struct{}, 1), workers))
+	srv := httptest.NewServer(httpapi.New(make(chan struct{}, 1), workers, nil))
 	defer srv.Close()
 
 	const watcherIdleTimeout = 500 * time.Millisecond

@@ -1,7 +1,9 @@
 package notify
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -158,6 +160,46 @@ func TestSendAgainstRealWebhook(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Runner Log missing \"notified\" after a real send: %+v", note.RunnerLog)
+	}
+}
+
+// TestSendWithRunnerLogURLPostsInsteadOfWritingVault confirms that when
+// RunnerLogURL is set, sendSync POSTs the outcome there instead of touching
+// Vault directly -- the path the watcher must use per Design - Runner.md's
+// with-vault-lock.sh gap, since it runs in a different OS process from the
+// one that owns the vault clone. Vault is deliberately left nil here: if
+// the code fell back to it anyway, this would panic instead of silently
+// passing.
+func TestSendWithRunnerLogURLPostsInsteadOfWritingVault(t *testing.T) {
+	var hit atomic.Bool
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer discord.Close()
+
+	n := &Notifier{RunnerLogURL: srv.URL, WebhookURL: discord.URL}
+	n.sendSync("Tasks/some-note.md", "test message", "test.md", "test attachment body")
+
+	if !hit.Load() {
+		t.Fatal("RunnerLogURL was never called")
+	}
+	var got map[string]string
+	if err := json.Unmarshal(gotBody, &got); err != nil {
+		t.Fatalf("decoding runner-log request body: %v", err)
+	}
+	if got["note_path"] != "Tasks/some-note.md" {
+		t.Errorf("note_path = %q, want %q", got["note_path"], "Tasks/some-note.md")
+	}
+	if got["event"] != "notified" {
+		t.Errorf("event = %q, want %q", got["event"], "notified")
 	}
 }
 
