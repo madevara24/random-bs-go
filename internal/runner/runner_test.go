@@ -49,6 +49,14 @@ func runGit(t *testing.T, dir string, args ...string) string {
 // gets created, claude actually runs and does something, and the captured
 // session_id is a genuine, resumable session -- checked by independently
 // resuming it with a manual `claude --resume` call afterward.
+//
+// The task deliberately tells CC to reach status: done without opening a
+// PR (out of scope for this phase's test gate), which since the
+// done-without-pr_url safety net was added means ProcessTask now routes
+// this through handleCrashFallback and returns an error, with the vault
+// note ending up blocked rather than done -- expected here, not a
+// regression; this test's actual assertions (branch/commits/session_id)
+// don't depend on the final status.
 func TestProcessTaskSetupAndInvocation(t *testing.T) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude CLI not on PATH, skipping real invocation test")
@@ -83,8 +91,8 @@ func TestProcessTaskSetupAndInvocation(t *testing.T) {
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
 
 	err := ProcessTask(deps, noopReporter{}, job)
-	if err != nil {
-		t.Fatalf("ProcessTask: %v", err)
+	if err == nil {
+		t.Fatal("ProcessTask returned nil error, want an error since the task reached done without a pr_url")
 	}
 
 	// Branch was created.

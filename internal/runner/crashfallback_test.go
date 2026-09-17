@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,44 @@ func TestCrashFallbackScenario2NonTerminal(t *testing.T) {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioNonTerminal, gotAlert)
+}
+
+// TestCrashFallbackScenario4DoneWithoutPR forces scenario 4 (copy reports
+// status: done but pr_url is empty) by having the stub overwrite the copy
+// with a done status, a Work Log entry, and no pr_url at all -- reproducing
+// the live gap where CC did real work and set status: done but never ran
+// git commit/push or gh pr create. The real vault note must end up blocked,
+// not merged in as a clean done, and the Work Log content should still be
+// folded in.
+func TestCrashFallbackScenario4DoneWithoutPR(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+
+	deps, job, v, slug := setupCrashTest(t, "phase9-s4", scriptPath)
+	copyName := copyFileName(slug)
+	writeStubScript(t, scriptPath, fmt.Sprintf(
+		"printf -- '---\\nstatus: done\\nrepo: phase6-test-repo\\ncreated: \"2026-09-15\"\\npr_url: null\\n---\\nCrash-fallback test task.\\n\\n## Work Log\\n\\nDid the real work but forgot to open a PR.\\n' > %q\nexit 0",
+		filepath.Join(testTargetRepoPath, copyName)))
+
+	var gotAlert *AlertPayload
+	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+
+	err := ProcessTask(deps, noopReporter{}, job)
+	if err == nil {
+		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
+	}
+	assertBlocked(t, v, job.NotePath, ScenarioDoneWithoutPR, gotAlert)
+
+	note, err := v.ReadNote(job.NotePath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.Status == "done" {
+		t.Error("status = done, want it not to have been merged in as a clean done")
+	}
+	if !note.HasWorkLog || !strings.Contains(note.WorkLog, "forgot to open a PR") {
+		t.Errorf("Work Log content from the copy was not folded in: %+v", note.WorkLog)
+	}
 }
 
 // TestCrashFallbackScenario3ParseFailure forces scenario 3 (copy exists
