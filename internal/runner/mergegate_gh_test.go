@@ -6,6 +6,26 @@ import (
 	"time"
 )
 
+// TestWaitForCINoWorkflows checks that a repo with no
+// .github/workflows returns success immediately, without ever shelling
+// out to `gh run list` -- the RepoPath here is a bare temp dir with no
+// gh/git setup at all, so any attempt to actually run gh would fail the
+// test outright.
+func TestWaitForCINoWorkflows(t *testing.T) {
+	g := &GhMergeGateOps{RepoPath: t.TempDir(), Branch: "some-branch"}
+
+	conclusion, log, err := g.WaitForCI()
+	if err != nil {
+		t.Fatalf("WaitForCI: %v", err)
+	}
+	if conclusion != "success" {
+		t.Errorf("conclusion = %q, want %q", conclusion, "success")
+	}
+	if log != "" {
+		t.Errorf("log = %q, want empty", log)
+	}
+}
+
 // TestRealReviewInvocation exercises reviewOnce (the claude -p review
 // invocation + verdict parsing that GhMergeGateOps.RunReview delegates to,
 // after fetching prBody/diff for real) directly, with hand-built diffs --

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -158,12 +159,32 @@ type ciRun struct {
 	Conclusion string `json:"conclusion"`
 }
 
+// hasCIWorkflows reports whether the local clone at repoPath has any
+// GitHub Actions workflow files at all. Checked against the repo itself
+// (not repos.json's `ci` field, which nothing reads) so this can never
+// drift from what's actually configured.
+func hasCIWorkflows(repoPath string) bool {
+	for _, ext := range []string{"yml", "yaml"} {
+		matches, _ := filepath.Glob(filepath.Join(repoPath, ".github", "workflows", "*."+ext))
+		if len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // WaitForCI implements MergeGateOps -- polls `gh run list` (Actions API)
 // for the branch's latest run until it completes. Never uses
 // `gh pr checks --watch` (the Checks API): confirmed structurally broken
 // (403 Resource not accessible), not flaky, per the bash design's own
 // hard-won finding.
+//
+// If the repo has no workflow files at all, there's nothing CI will ever
+// report -- return success immediately instead of polling for 30 minutes.
 func (g *GhMergeGateOps) WaitForCI() (string, string, error) {
+	if !hasCIWorkflows(g.RepoPath) {
+		return "success", "", nil
+	}
 	deadline := time.Now().Add(30 * time.Minute)
 	for {
 		out, err := g.runGh("run", "list", "--branch", g.Branch, "--json", "databaseId,status,conclusion", "--limit", "1")
