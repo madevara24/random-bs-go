@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
+	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/runner"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -72,14 +74,7 @@ func runRunner(cfg *config.Config) {
 	}
 
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)
-	workers := worker.Workers{}
-	for key := range cfg.Repos {
-		rw := worker.New(key, globalSlots, nil)
-		rw.Process = func(job worker.Job) error {
-			return runner.ProcessTask(runnerDeps, rw, job)
-		}
-		workers[key] = rw
-	}
+	workers := buildWorkers(cfg, globalSlots, runnerDeps, newPanicHandler(vault, notifier, cfg.DiscordUserID))
 	workers.StartAll()
 
 	r := daemon.NewRunner(vault, workers)
@@ -97,5 +92,61 @@ func runRunner(cfg *config.Config) {
 	fmt.Printf("[runner] listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
 		fmt.Printf("pmrunner: fatal: http server: %v\n", err)
+	}
+}
+
+// buildWorkers constructs one RepoWorker per configured repo, wiring
+// Process to runner.ProcessTask and OnPanic to onPanic -- split out of
+// runRunner so a test can assert every worker comes out of construction
+// with both callbacks wired, without booting the full daemon (HTTP server,
+// dispatch loop, real vault sync).
+func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runner.Deps, onPanic func(job worker.Job, recovered any)) worker.Workers {
+	workers := worker.Workers{}
+	for key := range cfg.Repos {
+		rw := worker.New(key, globalSlots, nil)
+		rw.Process = func(job worker.Job) error {
+			return runner.ProcessTask(runnerDeps, rw, job)
+		}
+		rw.OnPanic = onPanic
+		workers[key] = rw
+	}
+	return workers
+}
+
+// newPanicHandler builds the RepoWorker.OnPanic callback wired into
+// production: a Go panic inside ProcessTask means Process never got the
+// chance to write anything to the vault note itself, so this is the
+// fallback of last resort, same role as setupfallback.go's
+// handleSetupFailure for a setup-step error -- write status: blocked with
+// the recovered panic value, then always fire the Discord alert regardless
+// of whether that write succeeded.
+func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUserID string) func(job worker.Job, recovered any) {
+	return func(job worker.Job, recovered any) {
+		entry := fmt.Sprintf("%s: recovered from panic in repo %s: %v", time.Now().UTC().Format(time.RFC3339), job.Repo, recovered)
+		writeErr := vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (panic)", job.Slug), func(n *notetask.Note) error {
+			n.Frontmatter.Status = "blocked"
+			if strings.TrimSpace(n.WorkLog) == "" {
+				n.WorkLog = entry
+			} else {
+				n.WorkLog = strings.TrimSpace(n.WorkLog) + "\n" + entry
+			}
+			n.HasWorkLog = true
+			notetask.AppendRunnerLog(n, "blocked", time.Now())
+			return nil
+		})
+		if writeErr != nil {
+			fmt.Printf("[runner] task %s: failed to write blocked status after panic: %v\n", job.Slug, writeErr)
+		}
+
+		// Always fires, independent of writeErr above -- Discord must not
+		// depend on the vault being writable, same rule as
+		// handleSetupFailure's Discord call.
+		notifier.SendBlocked(job.NotePath, job.Slug,
+			fmt.Sprintf("panic recovered in Process: %v", recovered),
+			fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- panic recovered: %v", discordUserID, job.Slug, job.Repo, recovered),
+			job.Slug+".md",
+			fmt.Sprintf("# Task blocked: panic\n\n- **Repo**: %s\n- **Recovered panic**: %v\n", job.Repo, recovered))
+
+		fmt.Printf("[runner] task %s: blocked (panic recovered): %v\n", job.Slug, recovered)
 	}
 }
