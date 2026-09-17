@@ -38,6 +38,21 @@ const (
 	ScenarioNonTerminal
 )
 
+// ScenarioDoneWithoutPR: copy parses fine and reports status: done, but
+// pr_url is empty -- CC's own report of a clean finish can't be trusted
+// without the PR it implies exists. Same partial-credit treatment as
+// ScenarioNonTerminal: whatever did parse (e.g. Work Log content) is folded
+// in before marking blocked. Confirmed live 2026-09-17: task
+// random-bs-go-wire-onpanic-to-real-alerting did the real work and set
+// status: done, but never ran git commit/push or gh pr create.
+//
+// Declared as an explicit value outside the iota block above, same pattern
+// as setupfallback.go's ScenarioSetupFailure (value 3) -- this package's
+// scenarios grew a fourth family across two files, and mixing an iota block
+// with a value appended by a different file invites exactly the accidental
+// collision a plain sequential iota would hide.
+const ScenarioDoneWithoutPR Scenario = 4
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -46,6 +61,8 @@ func (s Scenario) String() string {
 		return "parse_failure"
 	case ScenarioNonTerminal:
 		return "non_terminal"
+	case ScenarioDoneWithoutPR:
+		return "done_without_pr"
 	case ScenarioSetupFailure:
 		return "setup_failure"
 	default:
@@ -97,6 +114,10 @@ type AlertPayload struct {
 // the rest. mentionID is the Discord user ID to @-mention (Devara), per
 // the bash design's "always @-mentions" behavior.
 func (p AlertPayload) DiscordMessage(mentionID string) string {
+	if p.Scenario == ScenarioDoneWithoutPR {
+		return fmt.Sprintf("<@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
+			mentionID, p.Slug, p.Repo)
+	}
 	return fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
 		mentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
 }
@@ -112,6 +133,9 @@ func (p AlertPayload) AttachmentMarkdown() string {
 	fmt.Fprintf(&b, "- **Stage**: %s\n", p.Stage)
 	if p.WatchdogKilled {
 		b.WriteString("- **Cause**: the runner's idle watchdog killed the process group after it went silent past the configured idle timeout -- not a bare crash.\n")
+	}
+	if p.Scenario == ScenarioDoneWithoutPR {
+		b.WriteString("- **Cause**: CC self-reported `status: done` but left `pr_url` empty -- no crash occurred, claude exited cleanly. The work may be real but is unverified as shipped (no commit/push/PR confirmed).\n")
 	}
 	fmt.Fprintf(&b, "- **Exit code**: %d\n", p.ExitCode)
 	if p.ExitErrText != "" {

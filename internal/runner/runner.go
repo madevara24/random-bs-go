@@ -248,6 +248,23 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			partialCopy:   copyAfter,
 			haveCopyToUse: true,
 		})
+
+	case copyAfter.Frontmatter.Status == "done" && !hasPRURL(copyAfter.Frontmatter.PRURL):
+		// A done copy with no pr_url can't be trusted as a clean finish --
+		// done implies a PR was opened. Same partial-credit treatment as the
+		// non-terminal case above: fold in whatever did parse before marking
+		// blocked, rather than merging in a false "clean done".
+		return handleCrashFallback(deps, job, crashInfo{
+			scenario:      ScenarioDoneWithoutPR,
+			stage:         "result read-back",
+			exitErr:       exitErr,
+			stderrTail:    stderrTail,
+			repoPath:      repoCfg.Path,
+			branchName:    branchName,
+			sessionID:     sessionID,
+			partialCopy:   copyAfter,
+			haveCopyToUse: true,
+		})
 	}
 
 	// Happy path: merge status/pr_url/Work Log from the copy into the real
@@ -314,6 +331,10 @@ func isTerminalStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func hasPRURL(s *string) bool {
+	return s != nil && *s != ""
 }
 
 func derefStr(s *string) string {
