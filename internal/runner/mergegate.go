@@ -1,5 +1,4 @@
-// Review & CI merge-gate loop (auto_merge: true only). See Design -
-// Runner.md's "Review & CI merge-gate loop" section: a fresh (no
+// Review & CI merge-gate loop (auto_merge: true only): a fresh (no
 // --resume, no vault access) review session plus real CI, both gating the
 // runner's own gh pr merge -- never CC approving/merging its own work.
 package runner
@@ -30,12 +29,12 @@ type MergeGateOps interface {
 	// plus feedback text. Deliberately takes no prBody/diff parameters --
 	// the real implementation fetches both fresh on every call, not once
 	// outside the loop, so a round-2 review actually sees whatever the
-	// round-0/1 resume sessions pushed, not a stale pre-fix snapshot (see
-	// Design - Runner.md: "on round 2+, reads the PR's existing comment
-	// thread first, so it checks whether its own prior feedback was
-	// actually addressed" -- that only means anything if the context
-	// itself is re-fetched each round). Also responsible for posting the
-	// verdict as a real `gh pr comment` as a side effect.
+	// round-0/1 resume sessions pushed, not a stale pre-fix snapshot: on
+	// round 2+ it also reads the PR's existing comment thread first, to
+	// check whether its own prior feedback was actually addressed, which
+	// only means anything if the context itself is re-fetched each round.
+	// Also responsible for posting the verdict as a real `gh pr comment`
+	// as a side effect.
 	RunReview(round int) (ReviewVerdict, string, error)
 	// WaitForCI blocks until the branch's latest CI run completes (Actions
 	// API, `gh run list` -- never the Checks API). conclusion is e.g.
@@ -54,8 +53,8 @@ type MergeGateOps interface {
 }
 
 // ErrRoundLimitHit is returned when the loop exhausts MaxMergeGateRounds
-// without a clean merge -- status stays whatever the last round left it at
-// (per Design - Runner.md, the loop doesn't touch status itself).
+// without a clean merge -- the loop never touches status itself, so it
+// stays whatever the last round left it at.
 var ErrRoundLimitHit = fmt.Errorf("runner: hit round limit (%d) without a clean merge -- needs judgment", MaxMergeGateRounds)
 
 // RunMergeGateLoop is the loop itself: both triggers (CONCERNS, CI

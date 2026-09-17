@@ -1,11 +1,9 @@
-// Package daemon wires together the pieces built in Phases 1-4 into the
+// Package daemon wires together dispatch, worker, and vaultgit into the
 // runner's actual boot sequence: sync the vault, reconcile any notes
 // already at "queued" from a prior run into the in-memory queues, and only
-// then be ready to accept dispatch triggers. Not named in
-// Design - Implementation.md's package table, which stops at internal/
-// dispatch, worker, runner, notify, watcher, httpapi -- added as thin glue
-// so cmd/pmrunner/main.go doesn't have to hold this orchestration itself
-// and so it stays independently testable.
+// then be ready to accept dispatch triggers. Thin glue so
+// cmd/pmrunner/main.go doesn't have to hold this orchestration itself and
+// so it stays independently testable.
 package daemon
 
 import (
@@ -23,7 +21,7 @@ type Runner struct {
 	Workers worker.Workers
 
 	// DispatchWake is the size-1 buffered channel the HTTP /dispatch
-	// handler (Phase 5) sends into. RunDispatchLoop is the consumer.
+	// handler sends into. RunDispatchLoop is the consumer.
 	DispatchWake chan struct{}
 }
 
@@ -36,8 +34,7 @@ func NewRunner(vault *vaultgit.Vault, workers worker.Workers) *Runner {
 // Boot runs the startup sequence required before the daemon may accept any
 // dispatch trigger: sync-then-reconcile, never the reverse -- reconciling
 // against a stale local clone would miss anything that landed on the bare
-// repo since the daemon's last run (see Design - Runner.md's
-// with-vault-lock.sh section). Callers must call Workers.StartAll() first
+// repo since the daemon's last run. Callers must call Workers.StartAll() first
 // (or at least before relying on queued jobs actually draining) --
 // ReconcileQueued only needs the map to exist to enqueue into it; the
 // buffered wake channel means goroutine start order relative to this call

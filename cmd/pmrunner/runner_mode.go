@@ -22,13 +22,12 @@ func runRunner(cfg *config.Config) {
 	fmt.Printf("pmrunner: mode=runner vault=%s repos=%d global_slots=%d idle_timeout=%dm http_port=%d\n",
 		cfg.VaultPath, len(cfg.Repos), cfg.GlobalSlots, cfg.IdleTimeoutMinutes, cfg.HTTPPort)
 
-	// Phase 5's empirical GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE check: this
-	// process's raw environment doesn't change after boot, so checking once
-	// here is representative of every git subprocess call the daemon will
-	// ever make (vaultgit.CleanGitEnv() strips these unconditionally
-	// regardless, but this line is what actually answers the "did the
-	// hazard survive the new architecture" question empirically, per
-	// Design - Runner.md's GIT_DIR section).
+	// This process's raw environment doesn't change after boot, so checking
+	// once here is representative of every git subprocess call the daemon
+	// will ever make. vaultgit.CleanGitEnv() strips GIT_DIR/GIT_WORK_TREE/
+	// GIT_INDEX_FILE unconditionally regardless, but this line answers
+	// empirically whether a parent process has leaked those vars into this
+	// daemon's environment.
 	fmt.Printf("[runner] GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE present in daemon env: %+v\n", vaultgit.EnvSnapshot())
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)

@@ -1,7 +1,7 @@
-// Package watcher implements the pmwatch mode's real checks: the two-tier
-// HTTP poll (Design - Watcher.md) plus the independent direct vault scan
-// for gap 3. Closes the three gaps from PM Runner Monitoring Gaps: dead
-// pipeline, wedged session, lost success notice.
+// Package watcher implements the pmwatch mode's real checks: a two-tier
+// HTTP poll plus an independent direct vault scan, covering three gaps a
+// dead runner daemon can hide -- a dead pipeline, a wedged session, and a
+// lost success notice.
 package watcher
 
 import (
@@ -86,9 +86,9 @@ type Watcher struct {
 	Vault   *vaultgit.Vault
 
 	// IdleTimeout is the single shared staleness threshold -- same value
-	// as the runner's own idle-watchdog window, per Design - Watcher.md's
-	// decision that a task the watcher calls "stale" is exactly the task
-	// the runner is about to kill anyway. Used for both gap 2 and gap 3.
+	// as the runner's own idle-watchdog window, so a task the watcher
+	// calls "stale" is exactly the task the runner is about to kill
+	// anyway. Used for both gap 2 and gap 3.
 	IdleTimeout time.Duration
 
 	// HealthHTTPTimeout/StatusHTTPTimeout are the short per-call timeouts
@@ -113,9 +113,8 @@ func (w *Watcher) statusTimeout() time.Duration {
 }
 
 // CheckHealth is Tier 1: daemon-liveness only. Connection-refused and
-// timeout-despite-connect are reported as distinct HealthResults, per
-// Design - Watcher.md's requirement that these are meaningful, differently
-// alertable signals.
+// timeout-despite-connect are reported as distinct HealthResults, since
+// they're meaningful, differently alertable signals.
 func (w *Watcher) CheckHealth() (HealthResult, error) {
 	client := &http.Client{Timeout: w.healthTimeout()}
 	resp, err := client.Get(w.BaseURL + "/health")
@@ -189,9 +188,8 @@ func slugFromPath(relPath string) string {
 // ScanForUnnotified is gap 3, independent of the two HTTP tiers above --
 // a direct read of Tasks/ (not through the daemon's HTTP surface at all,
 // since RepoWorker.currentTask is already cleared by the time this
-// matters, per Background.md's Runner Log decision). Flags any note at a
-// terminal status whose Runner Log has neither "notified" nor
-// "notify_failed" yet, past ageThreshold.
+// matters). Flags any note at a terminal status whose Runner Log has
+// neither "notified" nor "notify_failed" yet, past ageThreshold.
 func (w *Watcher) ScanForUnnotified(ageThreshold time.Duration) ([]UnnotifiedNote, error) {
 	pattern := filepath.Join(w.Vault.Path, tasksDir, "*.md")
 	matches, err := filepath.Glob(pattern)

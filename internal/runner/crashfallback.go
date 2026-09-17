@@ -1,8 +1,8 @@
-// Crash-fallback handling: the three post-watchdog scenarios from
-// Design - Runner.md's "Crash fallback" section, and the alert payload
-// content built from whichever one fired. Distinct from worker's own
-// recover() -- this is runner's expected-failure handling for a CLI that
-// ran but didn't finish cleanly, not a panic in the Go code itself.
+// Crash-fallback handling: the three post-watchdog scenarios (no copy,
+// unparseable copy, non-terminal copy), and the alert payload content
+// built from whichever one fired. Distinct from worker's own recover() --
+// this is runner's expected-failure handling for a CLI that ran but
+// didn't finish cleanly, not a panic in the Go code itself.
 package runner
 
 import (
@@ -17,8 +17,8 @@ import (
 )
 
 // Scenario names one of the three crash-fallback paths (a fourth, hang,
-// resolves into scenario 1 or 3 once the idle watchdog kills the process --
-// see Design - Runner.md).
+// resolves into scenario 1 or 3 once the idle watchdog kills the
+// process).
 type Scenario int
 
 const (
@@ -71,10 +71,10 @@ type crashInfo struct {
 }
 
 // AlertPayload is the crash-fallback alert's content -- a short Discord
-// message plus a fuller .md attachment, per Design - Runner.md's "write
-// blocked, then alert alone isn't diagnosable" requirement. Phase 9 builds
-// this content; Phase 10's notify package is what actually sends it
-// (async, with retry).
+// message plus a fuller .md attachment, since a bare "blocked" write with
+// no further detail isn't diagnosable on its own. This file builds the
+// content; the notify package is what actually sends it (async, with
+// retry).
 type AlertPayload struct {
 	Slug     string
 	Repo     string
@@ -176,7 +176,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		}
 		if info.haveCopyToUse && info.partialCopy != nil {
 			// Fold in whatever did parse -- real information CC managed to
-			// record, per Design - Runner.md's trust-rule distinction.
+			// record before things went wrong.
 			if info.partialCopy.HasWorkLog {
 				n.HasWorkLog = true
 				n.WorkLog = info.partialCopy.WorkLog
