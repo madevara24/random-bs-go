@@ -34,14 +34,12 @@ func New(path, defaultBranch string) *Vault {
 
 // CleanGitEnv strips GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE from the inherited
 // environment before handing it to a git subprocess. Every git command in
-// this package unsets these defensively -- see Design - Runner.md's
-// GIT_DIR hazard section. In the bash pipeline this mattered because
-// runner.sh was a background descendant of the git hook process, which
-// git sets these three vars for. In this daemon, git commands run from the
-// long-lived process itself, not a hook descendant -- but this is cheap
-// insurance regardless of what actually launches the daemon, and Phase 5's
-// end-to-end test is where the "does the hazard still exist here" question
-// gets checked empirically rather than assumed.
+// this package unsets these defensively: a git hook process sets these
+// three vars, and any background descendant of one would otherwise
+// inherit them and point git subprocesses at the wrong repo. This daemon's
+// git commands run from the long-lived process itself, not a hook
+// descendant, but it's cheap insurance regardless of what actually
+// launches the daemon.
 func CleanGitEnv() []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env))
@@ -70,10 +68,9 @@ func (v *Vault) runGit(args ...string) (string, error) {
 // EnvSnapshot reports whether GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE are
 // present in this *process's* raw, unfiltered environment -- i.e. what
 // would have leaked into a git subprocess here if CleanGitEnv() didn't strip
-// them. Used for Phase 5's empirical "does the GIT_DIR hazard still exist
-// in this architecture" check (see Design - Runner.md); deliberately reads
-// os.Environ() directly, not CleanGitEnv()'s already-filtered result, or this
-// would trivially always report false regardless of the real answer.
+// them. Deliberately reads os.Environ() directly, not CleanGitEnv()'s
+// already-filtered result, or this would trivially always report false
+// regardless of the real answer.
 func EnvSnapshot() map[string]bool {
 	found := map[string]bool{"GIT_DIR": false, "GIT_WORK_TREE": false, "GIT_INDEX_FILE": false}
 	for _, e := range os.Environ() {

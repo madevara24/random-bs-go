@@ -10,17 +10,16 @@ import (
 	"github.com/madevara24/random-bs-go/internal/watcher"
 )
 
-// pollInterval is how often pmwatch runs its three checks. Not pinned by
-// any of the design docs (Design - Watcher.md leaves the idle-timeout
-// value itself "TBD," and never states a separate poll cadence) -- 60s is
-// a reasonable default, cheap enough not to matter and short enough to
+// pollInterval is how often pmwatch runs its three checks. 60s is a
+// reasonable default -- cheap enough not to matter and short enough to
 // catch a dead pipeline promptly.
 const pollInterval = 60 * time.Second
 
-// runWatcher is the entrypoint for `pmrunner watcher` (pmwatch): the real
-// polling loop from Design - Watcher.md -- Tier 1 /health, Tier 2
+// runWatcher is the entrypoint for `pmrunner watcher` (pmwatch): runs three
+// checks every pollInterval, forever -- Tier 1 /health, Tier 2
 // /status/tasks (only if Tier 1 succeeded), and an independent direct
-// Tasks/ scan for gap 3, every pollInterval, forever.
+// Tasks/ scan for notes that reached a terminal status with no
+// notification ever sent.
 func runWatcher(cfg *config.Config) {
 	fmt.Printf("pmrunner: mode=watcher vault=%s idle_timeout=%dm http_port=%d\n",
 		cfg.VaultPath, cfg.IdleTimeoutMinutes, cfg.HTTPPort)

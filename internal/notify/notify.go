@@ -1,8 +1,7 @@
-// Package notify is the runner's (and, from Phase 12, the watcher's)
-// shared Discord-webhook + hermes -z mechanism. Own package specifically
-// because both run modes of the daemon need the same Discord-alert
-// mechanism -- the watcher's own down/hung-daemon alerts reuse this,
-// exactly as decided in Design - Runner.md's notify.sh section.
+// Package notify is the runner's and the watcher's shared Discord-webhook
+// + hermes -z mechanism. Own package specifically because both run modes
+// of the daemon need the same Discord-alert mechanism -- the watcher's own
+// down/hung-daemon alerts reuse this.
 package notify
 
 import (
@@ -20,11 +19,10 @@ import (
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
-// DefaultHermesCmd is the real invocation confirmed in the bash design's
-// notify.sh section -- no bare `hermes` binary exists on PATH, this is the
-// venv python module invocation found via the hermes-gateway.service
-// systemd unit's actual ExecStart. Callers needing something else (tests,
-// a future path change) override Notifier.HermesCmd.
+// DefaultHermesCmd is the real invocation -- no bare `hermes` binary
+// exists on PATH, this is the venv python module invocation found via the
+// hermes-gateway.service systemd unit's actual ExecStart. Callers needing
+// something else (tests, a future path change) override Notifier.HermesCmd.
 var DefaultHermesCmd = []string{
 	"/home/obsidian/.hermes/hermes-agent/venv/bin/python", "-m", "hermes_cli.main", "-z",
 }
@@ -43,9 +41,8 @@ type Notifier struct {
 	// that owns the vault clone -- e.g. the watcher, which found out the
 	// hard way (2026-09-17) that two independent vaultgit.Vault instances
 	// in two separate processes share no mutex and collide on real git
-	// locks. See Design - Runner.md's with-vault-lock.sh gap. The runner
-	// itself leaves this empty and keeps writing via Vault directly, since
-	// it already is the process that owns the clone.
+	// locks. The runner itself leaves this empty and keeps writing via
+	// Vault directly, since it already is the process that owns the clone.
 	RunnerLogURL string
 
 	// HermesCmd is the full argv minus the final message argument, e.g.
@@ -71,10 +68,10 @@ func (n *Notifier) Send(notePath, message, attachmentName, attachmentBody string
 }
 
 // SendBlocked does everything Send does, and additionally invokes hermes
-// -z as a real first-responder call -- the bash design's two-notification
-// pattern for `blocked` specifically (most Discord bots, Hermes likely
-// included, filter out webhook/bot-authored messages, so the Discord
-// mention alone probably wouldn't register as input for Hermes).
+// -z as a real first-responder call -- a `blocked`-specific
+// two-notification pattern (most Discord bots, Hermes likely included,
+// filter out webhook/bot-authored messages, so the Discord mention alone
+// probably wouldn't register as input for Hermes).
 func (n *Notifier) SendBlocked(notePath, slug, reason, message, attachmentName, attachmentBody string) {
 	go func() {
 		n.sendSync(notePath, message, attachmentName, attachmentBody)
@@ -160,8 +157,7 @@ func (n *Notifier) invokeHermes(slug, reason string) {
 }
 
 // postDiscordAlert sends one short message + one .md attachment on a
-// single Discord message, via the payload_json + fileN multipart shape
-// verified live in Design - Runner.md's notify.sh section.
+// single Discord message, via the payload_json + fileN multipart shape.
 func postDiscordAlert(webhookURL, content, attachmentName, attachmentBody string) error {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)

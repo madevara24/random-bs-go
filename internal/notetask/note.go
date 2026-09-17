@@ -16,7 +16,7 @@ import (
 // Frontmatter mirrors the task note schema exactly, field order included --
 // yaml.v3 marshals struct fields in declaration order. Nullable fields are
 // *string so an absent value round-trips as YAML `null`, not an empty
-// string, matching the schema in Design - Implementation.md.
+// string.
 type Frontmatter struct {
 	Status      string  `yaml:"status"`
 	Repo        string  `yaml:"repo"`
