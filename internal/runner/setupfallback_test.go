@@ -27,7 +27,11 @@ func TestSetupFailurePullAndBranchRestoresRepoAndAlerts(t *testing.T) {
 
 	run := fmt.Sprintf("%d", time.Now().UnixNano())
 	slug := "setupfail-branch-" + run
-	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+	// Deliberately not "Tasks/<slug>.md" -- a real vault note's filename
+	// follows the "(repo) Title" convention with parentheses and spaces, so
+	// a regression that reconstructs the path from the slug instead of
+	// using job.NotePath would target a nonexistent file here.
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Setup Failure Branch Test %s.md", run)
 
 	v := vaultgit.New(testvault.Path, "master")
 	if err := v.Sync(); err != nil {
@@ -56,8 +60,9 @@ func TestSetupFailurePullAndBranchRestoresRepoAndAlerts(t *testing.T) {
 		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()
 	})
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
@@ -87,6 +92,12 @@ func TestSetupFailurePullAndBranchRestoresRepoAndAlerts(t *testing.T) {
 		t.Errorf("branch %s still exists after cleanup, want it deleted:\n%s", branchName, branches)
 	}
 
+	if gotJob == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotJob.NotePath != relPath {
+		t.Errorf("OnBlocked job.NotePath = %q, want %q (must not be reconstructed from the slug)", gotJob.NotePath, relPath)
+	}
 	if gotAlert == nil {
 		t.Fatal("OnBlocked was never called")
 	}
@@ -111,7 +122,9 @@ func TestSetupFailureWriteInProgressStillAlertsDiscord(t *testing.T) {
 
 	run := fmt.Sprintf("%d", time.Now().UnixNano())
 	slug := "setupfail-writenote-" + run
-	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+	// See the sibling test above for why this deliberately isn't
+	// "Tasks/<slug>.md".
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Setup Failure WriteNote Test %s.md", run)
 
 	v := vaultgit.New(testvault.Path, "master")
 	if err := v.Sync(); err != nil {
@@ -135,14 +148,21 @@ func TestSetupFailureWriteInProgressStillAlertsDiscord(t *testing.T) {
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 
+	if gotJob == nil {
+		t.Fatal("OnBlocked was never called, even though the note's own blocked write couldn't succeed")
+	}
+	if gotJob.NotePath != relPath {
+		t.Errorf("OnBlocked job.NotePath = %q, want %q (must not be reconstructed from the slug)", gotJob.NotePath, relPath)
+	}
 	if gotAlert == nil {
 		t.Fatal("OnBlocked was never called, even though the note's own blocked write couldn't succeed")
 	}

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -111,6 +112,13 @@ func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody st
 	})
 	if werr != nil {
 		fmt.Printf("[notify] failed to append %q to Runner Log for %s: %v\n", event, notePath, werr)
+		// Called directly, not via Send/SendBlocked -- those would attempt
+		// another Runner Log append and recurse into this same failure. No
+		// attachment, no @-mention: the alert this append was meant to
+		// record already carried the mention.
+		_ = postDiscordAlert(n.WebhookURL,
+			fmt.Sprintf("[runner] WARNING: could not append %q to the Runner Log for `%s`: %v", event, notePath, werr),
+			"", "")
 	}
 }
 
@@ -140,7 +148,14 @@ func (n *Notifier) postRunnerLog(notePath, event string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Printf("[notify] POST %s for %s returned status %d\n", n.RunnerLogURL, notePath, resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[notify] POST %s for %s returned status %d: %s\n", n.RunnerLogURL, notePath, resp.StatusCode, respBody)
+		// Same rule as sendSync's own append-failure warning above: called
+		// directly, not via Send/SendBlocked, to avoid recursing into
+		// another Runner Log append. No attachment, no @-mention.
+		_ = postDiscordAlert(n.WebhookURL,
+			fmt.Sprintf("[runner] WARNING: could not append %q to the Runner Log for `%s`: runner-log endpoint returned status %d: %s", event, notePath, resp.StatusCode, respBody),
+			"", "")
 	}
 }
 
@@ -170,15 +185,17 @@ func postDiscordAlert(webhookURL, content, attachmentName, attachmentBody string
 		return fmt.Errorf("writing payload_json field: %w", err)
 	}
 
-	part, err := w.CreatePart(map[string][]string{
-		"Content-Disposition": {fmt.Sprintf(`form-data; name="file1"; filename=%q`, attachmentName)},
-		"Content-Type":        {"text/markdown"},
-	})
-	if err != nil {
-		return fmt.Errorf("creating file1 part: %w", err)
-	}
-	if _, err := part.Write([]byte(attachmentBody)); err != nil {
-		return fmt.Errorf("writing attachment body: %w", err)
+	if attachmentName != "" || attachmentBody != "" {
+		part, err := w.CreatePart(map[string][]string{
+			"Content-Disposition": {fmt.Sprintf(`form-data; name="file1"; filename=%q`, attachmentName)},
+			"Content-Type":        {"text/markdown"},
+		})
+		if err != nil {
+			return fmt.Errorf("creating file1 part: %w", err)
+		}
+		if _, err := part.Write([]byte(attachmentBody)); err != nil {
+			return fmt.Errorf("writing attachment body: %w", err)
+		}
 	}
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("closing multipart writer: %w", err)
