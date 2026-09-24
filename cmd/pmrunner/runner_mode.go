@@ -39,9 +39,9 @@ func runRunner(cfg *config.Config) {
 		Vault:       vault,
 		Repos:       cfg.Repos,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
-		OnBlocked: func(payload runner.AlertPayload) {
+		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.SendBlocked(
-				fmt.Sprintf("Tasks/%s.md", payload.Slug), payload.Slug,
+				job.NotePath, payload.Slug,
 				fmt.Sprintf("%s during %s", payload.Scenario, payload.Stage),
 				payload.DiscordMessage(cfg.DiscordUserID), payload.Slug+".md", payload.AttachmentMarkdown())
 		},

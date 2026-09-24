@@ -132,7 +132,7 @@ func handleSetupFailure(deps Deps, job worker.Job, info setupFailureInfo) error 
 
 	// Always fires, independent of writeErr above -- see doc comment.
 	if deps.OnBlocked != nil {
-		deps.OnBlocked(payload)
+		deps.OnBlocked(job, payload)
 	}
 
 	fmt.Printf("[runner] task %s: blocked (setup failure at %q): %v\n", job.Slug, info.stage, info.err)

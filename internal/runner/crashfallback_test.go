@@ -32,6 +32,12 @@ func writeStubScript(t *testing.T, path, extraBody string) {
 // setupCrashTest seeds a task note and returns everything a crash-fallback
 // scenario test needs. slugPrefix distinguishes the three scenarios in the
 // shared throwaway vault/target repo.
+//
+// The note's real filename deliberately does NOT match "Tasks/<slug>.md" --
+// it uses the "(repo) Title" convention with parentheses and spaces, same
+// as real vault notes -- so that a regression which reconstructs the path
+// from the slug (rather than using job.NotePath) fails loudly instead of
+// passing by coincidence.
 func setupCrashTest(t *testing.T, slugPrefix, claudeBin string) (Deps, worker.Job, *vaultgit.Vault, string) {
 	t.Helper()
 	testvault.SkipIfAbsent(t)
@@ -39,7 +45,7 @@ func setupCrashTest(t *testing.T, slugPrefix, claudeBin string) (Deps, worker.Jo
 
 	run := fmt.Sprintf("%d", time.Now().UnixNano())
 	slug := slugPrefix + "-" + run
-	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Crash Fallback Test %s.md", run)
 
 	v := vaultgit.New(testvault.Path, "master")
 	if err := v.Sync(); err != nil {
@@ -69,7 +75,7 @@ func setupCrashTest(t *testing.T, slugPrefix, claudeBin string) (Deps, worker.Jo
 	return deps, job, v, slug
 }
 
-func assertBlocked(t *testing.T, v *vaultgit.Vault, relPath string, wantScenario Scenario, gotAlert *AlertPayload) {
+func assertBlocked(t *testing.T, v *vaultgit.Vault, relPath string, wantScenario Scenario, gotJob *worker.Job, gotAlert *AlertPayload) {
 	t.Helper()
 	note, err := v.ReadNote(relPath)
 	if err != nil {
@@ -86,6 +92,12 @@ func assertBlocked(t *testing.T, v *vaultgit.Vault, relPath string, wantScenario
 	}
 	if !hasBlocked {
 		t.Errorf("Runner Log missing a \"blocked\" entry: %+v", note.RunnerLog)
+	}
+	if gotJob == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotJob.NotePath != relPath {
+		t.Errorf("OnBlocked job.NotePath = %q, want %q (must not be reconstructed from the slug)", gotJob.NotePath, relPath)
 	}
 	if gotAlert == nil {
 		t.Fatal("OnBlocked was never called")
@@ -111,14 +123,15 @@ func TestCrashFallbackScenario1NoCopy(t *testing.T) {
 	copyName := copyFileName(slug)
 	writeStubScript(t, scriptPath, fmt.Sprintf("rm -f %q\nexit 1", filepath.Join(testTargetRepoPath, copyName)))
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
-	assertBlocked(t, v, job.NotePath, ScenarioNoCopy, gotAlert)
+	assertBlocked(t, v, job.NotePath, ScenarioNoCopy, gotJob, gotAlert)
 }
 
 // TestCrashFallbackScenario2NonTerminal forces scenario 2 (copy parses
@@ -133,14 +146,15 @@ func TestCrashFallbackScenario2NonTerminal(t *testing.T) {
 	deps, job, v, _ := setupCrashTest(t, "phase9-s2", scriptPath)
 	writeStubScript(t, scriptPath, "exit 0") // touches nothing; copy stays in_progress
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
-	assertBlocked(t, v, job.NotePath, ScenarioNonTerminal, gotAlert)
+	assertBlocked(t, v, job.NotePath, ScenarioNonTerminal, gotJob, gotAlert)
 }
 
 // TestCrashFallbackScenario4DoneWithoutPR forces scenario 4 (copy reports
@@ -160,14 +174,15 @@ func TestCrashFallbackScenario4DoneWithoutPR(t *testing.T) {
 		"printf -- '---\\nstatus: done\\nrepo: phase6-test-repo\\ncreated: \"2026-09-15\"\\npr_url: null\\n---\\nCrash-fallback test task.\\n\\n## Work Log\\n\\nDid the real work but forgot to open a PR.\\n' > %q\nexit 0",
 		filepath.Join(testTargetRepoPath, copyName)))
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
-	assertBlocked(t, v, job.NotePath, ScenarioDoneWithoutPR, gotAlert)
+	assertBlocked(t, v, job.NotePath, ScenarioDoneWithoutPR, gotJob, gotAlert)
 
 	note, err := v.ReadNote(job.NotePath)
 	if err != nil {
@@ -194,12 +209,13 @@ func TestCrashFallbackScenario3ParseFailure(t *testing.T) {
 		"printf -- '---\\nstatus: [unterminated\\n---\\nbroken\\n' > %q\nexit 0",
 		filepath.Join(testTargetRepoPath, copyName)))
 
+	var gotJob *worker.Job
 	var gotAlert *AlertPayload
-	deps.OnBlocked = func(p AlertPayload) { gotAlert = &p }
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
 
 	err := ProcessTask(deps, noopReporter{}, job)
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
-	assertBlocked(t, v, job.NotePath, ScenarioParseFailure, gotAlert)
+	assertBlocked(t, v, job.NotePath, ScenarioParseFailure, gotJob, gotAlert)
 }

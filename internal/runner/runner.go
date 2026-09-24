@@ -57,11 +57,19 @@ type Deps struct {
 	IdleTimeout time.Duration
 
 	// OnBlocked fires synchronously, right after the vault note is written
-	// to status: blocked by the crash-fallback path, with the fully-built
-	// alert payload. nil is fine (defaults to a no-op); keeping this a
-	// callback (same injectable pattern as worker.OnPanic/OnError) means
-	// this package never needs to import notify.
-	OnBlocked func(AlertPayload)
+	// to status: blocked by the crash-fallback path, with the job that was
+	// blocked and the fully-built alert payload. nil is fine (defaults to a
+	// no-op); keeping this a callback (same injectable pattern as
+	// worker.OnPanic/OnError) means this package never needs to import
+	// notify.
+	//
+	// job (not payload.Slug) is the source of truth for the vault note's
+	// path: job.NotePath is the real "(repo) Title.md" filename, while
+	// payload.Slug is a lossy kebab-case label (used only for the git
+	// branch name and the Discord attachment filename). A path must never
+	// be reconstructed from payload.Slug -- there is no way back from the
+	// slug to the real filename.
+	OnBlocked func(job worker.Job, payload AlertPayload)
 
 	// OnTerminal fires after a successful happy-path merge-back (i.e. CC's
 	// own copy already had a terminal status when the runner read it back

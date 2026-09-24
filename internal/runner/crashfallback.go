@@ -235,7 +235,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 	}
 
 	if deps.OnBlocked != nil {
-		deps.OnBlocked(payload)
+		deps.OnBlocked(job, payload)
 	}
 
 	fmt.Printf("[runner] task %s: blocked (%s) at stage %q\n", job.Slug, info.scenario, info.stage)

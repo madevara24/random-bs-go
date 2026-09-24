@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -252,5 +253,87 @@ func TestInvokeHermesFiresWithSlugAndReason(t *testing.T) {
 	}
 	if !strings.Contains(got, "needs a decision about the API design") {
 		t.Errorf("hermes argv missing reason text: %q", got)
+	}
+}
+
+// TestSendSyncSurfacesRunnerLogAppendFailure confirms that when the Runner
+// Log append fails (here: the note doesn't exist, so Vault.WriteNote's
+// os.ReadFile fails), sendSync fires a second, plain warning message
+// through the same webhook instead of just printing to stdout -- the fix
+// for the failure mode where a lost Runner Log append was invisible outside
+// the daemon's own stdout.
+func TestSendSyncSurfacesRunnerLogAppendFailure(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err == nil {
+			mu.Lock()
+			bodies = append(bodies, r.FormValue("payload_json"))
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	// Deliberately never seeded -- WriteNote's ReadFile must fail.
+	relPath := fmt.Sprintf("Tasks/phase-notify-missing-%s.md", run)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	n := &Notifier{Vault: v, WebhookURL: srv.URL}
+	n.sendSync(relPath, "test message", "test.md", "test attachment body")
+
+	mu.Lock()
+	got := append([]string(nil), bodies...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("webhook received %d requests, want exactly 2 (the alert, then the append-failure warning): %+v", len(got), got)
+	}
+	if strings.Contains(got[0], "WARNING") {
+		t.Errorf("first request looks like the warning, want the alert first: %s", got[0])
+	}
+	if !strings.Contains(got[1], "WARNING") || !strings.Contains(got[1], relPath) {
+		t.Errorf("second request isn't the expected append-failure warning: %s", got[1])
+	}
+
+	absPath := filepath.Join(testvault.Path, relPath)
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("a note was created at %s, want nothing created for a missing note", absPath)
+	}
+}
+
+// TestPostDiscordAlertWithoutAttachment confirms postDiscordAlert can send a
+// message-only alert (no attachmentName/attachmentBody) without Discord
+// rejecting an empty filename="" file part -- needed for the plain
+// append-failure warning, which must carry no attachment.
+func TestPostDiscordAlertWithoutAttachment(t *testing.T) {
+	var gotBody []byte
+	var gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := postDiscordAlert(srv.URL, "plain warning message", "", ""); err != nil {
+		t.Fatalf("postDiscordAlert returned error: %v", err)
+	}
+
+	if !strings.Contains(gotContentType, "multipart/form-data") {
+		t.Errorf("Content-Type = %q, want multipart/form-data", gotContentType)
+	}
+	if strings.Contains(string(gotBody), "file1") {
+		t.Errorf("request body contains a file1 part, want none: %s", gotBody)
+	}
+	if !strings.Contains(string(gotBody), "plain warning message") {
+		t.Errorf("request body missing message content: %s", gotBody)
 	}
 }
