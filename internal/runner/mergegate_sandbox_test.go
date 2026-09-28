@@ -143,6 +143,13 @@ func TestSandboxCleanPass(t *testing.T) {
 		exec.Command("git", "-C", sandboxRepoPath, "branch", "-D", branch).Run()
 	})
 
+	// Reproduce RBG-13: the local branch ref is gone by review time (the
+	// runner's own clone may never have checked it out, or moved on since)
+	// even though the branch is still alive on origin -- RunReview's diff
+	// fetch must not depend on the local ref surviving.
+	sbGit(t, "checkout", sandboxDefaultBranch)
+	sbGit(t, "branch", "-D", branch)
+
 	ops := &countingMergeGateOps{GhMergeGateOps: &GhMergeGateOps{
 		RepoPath:      sandboxRepoPath,
 		Branch:        branch,
