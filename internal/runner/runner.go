@@ -78,7 +78,13 @@ type Deps struct {
 	// same "blocked" treatment as a crash-detected one, just without crash
 	// diagnostics -- main.go's wiring is what decides to also invoke
 	// hermes -z for status == "blocked" here, same as OnBlocked's case.
-	OnTerminal func(job worker.Job, status, workLog string)
+	//
+	// autoMerge and prURL are the effective auto_merge and the copy's
+	// pr_url as of this merge-back, passed through so the callback can
+	// build a done message without re-reading the vault note -- this fires
+	// before runMergeGateForTask below, so for a done+auto_merge task the
+	// PR is not merged yet, only opened.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL string)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -298,11 +304,11 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 
+	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, note.Frontmatter.AutoMerge, prURL)
 	}
 
-	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 	if terminalStatus == "done" && note.Frontmatter.AutoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
 		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL)
 	}

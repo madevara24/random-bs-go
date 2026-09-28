@@ -45,17 +45,7 @@ func runRunner(cfg *config.Config) {
 				fmt.Sprintf("%s during %s", payload.Scenario, payload.Stage),
 				payload.DiscordMessage(cfg.DiscordUserID), payload.Slug+".md", payload.AttachmentMarkdown())
 		},
-		OnTerminal: func(job worker.Job, status, workLog string) {
-			if status == "blocked" {
-				notifier.SendBlocked(job.NotePath, job.Slug, "CC itself set status: blocked -- see its Work Log for what it needs",
-					fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, job.Slug, job.Repo),
-					job.Slug+".md", "# Task blocked\n\n"+workLog+"\n")
-				return
-			}
-			notifier.Send(job.NotePath,
-				fmt.Sprintf("<@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, job.Slug, job.Repo, status),
-				job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
-		},
+		OnTerminal: newTerminalHandler(cfg, notifier),
 		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) runner.MergeGateOps {
 			return &runner.GhMergeGateOps{
 				RepoPath:      repoCfg.Path,
@@ -110,6 +100,39 @@ func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runn
 		workers[key] = rw
 	}
 	return workers
+}
+
+// newTerminalHandler builds the runner.Deps.OnTerminal callback wired into
+// production. A `done` never attaches the task's .md file -- the PR is the
+// deliverable, not the work log -- and its message wording branches on
+// autoMerge: manual-merge wording when false, auto-merge-loop wording when
+// true. OnTerminal fires before the merge-gate loop runs (see
+// runMergeGateForTask in internal/runner/runner.go), so a done+auto_merge
+// message can only say the loop is running, never that the PR merged.
+// `blocked` and `failed` both keep the .md attachment so the work log is
+// there to see what went wrong.
+func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
+	return func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
+		if status == "blocked" {
+			notifier.SendBlocked(job.NotePath, job.Slug, "CC itself set status: blocked -- see its Work Log for what it needs",
+				fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, job.Slug, job.Repo),
+				job.Slug+".md", "# Task blocked\n\n"+workLog+"\n")
+			return
+		}
+		if status == "done" {
+			mergeNote := "the PR needs a manual merge"
+			if autoMerge {
+				mergeNote = "the auto-merge loop is running"
+			}
+			notifier.Send(job.NotePath,
+				fmt.Sprintf("<@%s> Task `%s` (%s) is **done**: %s -- %s.", cfg.DiscordUserID, job.Slug, job.Repo, prURL, mergeNote),
+				"", "")
+			return
+		}
+		notifier.Send(job.NotePath,
+			fmt.Sprintf("<@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, job.Slug, job.Repo, status),
+			job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
+	}
 }
 
 // newPanicHandler builds the RepoWorker.OnPanic callback wired into
