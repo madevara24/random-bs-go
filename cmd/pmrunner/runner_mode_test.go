@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +21,131 @@ import (
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
+
+// capturedDiscordAlert is what capturingDiscordServer parses out of one
+// postDiscordAlert multipart request -- the message content and whether a
+// file1 part was present, which is all newTerminalHandler's tests below
+// need to assert on.
+type capturedDiscordAlert struct {
+	content string
+	hasFile bool
+}
+
+// capturingDiscordServer stands in for the real Discord webhook: it parses
+// the payload_json + fileN multipart shape postDiscordAlert sends, and
+// signals gotAlert once one full request has been captured.
+func capturingDiscordServer(t *testing.T) (*httptest.Server, <-chan capturedDiscordAlert) {
+	t.Helper()
+	alerts := make(chan capturedDiscordAlert, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var captured capturedDiscordAlert
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Errorf("parsing multipart request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("reading multipart part: %v", err)
+				break
+			}
+			switch part.FormName() {
+			case "payload_json":
+				body, _ := io.ReadAll(part)
+				var payload struct {
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Errorf("unmarshaling payload_json: %v", err)
+				}
+				captured.content = payload.Content
+			case "file1":
+				captured.hasFile = true
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		alerts <- captured
+	}))
+	return srv, alerts
+}
+
+func waitForAlert(t *testing.T, alerts <-chan capturedDiscordAlert) capturedDiscordAlert {
+	t.Helper()
+	select {
+	case a := <-alerts:
+		return a
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the Discord alert to fire")
+		return capturedDiscordAlert{}
+	}
+}
+
+// TestTerminalHandlerDone covers this task's core behavior: a `done`
+// message must carry the PR link and drop the .md attachment entirely,
+// with wording that depends on auto_merge -- manual-merge wording when
+// false, auto-merge-loop wording when true, since OnTerminal fires before
+// the merge gate runs and can't claim the PR already merged.
+func TestTerminalHandlerDone(t *testing.T) {
+	const prURL = "https://github.com/example/repo/pull/42"
+
+	for _, tc := range []struct {
+		name       string
+		autoMerge  bool
+		wantSubstr string
+	}{
+		{name: "manual merge", autoMerge: false, wantSubstr: "manual merge"},
+		{name: "auto merge running", autoMerge: true, wantSubstr: "auto-merge loop is running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, alerts := capturingDiscordServer(t)
+			defer srv.Close()
+
+			cfg := &config.Config{DiscordUserID: "12345"}
+			notifier := &notify.Notifier{WebhookURL: srv.URL}
+			handler := newTerminalHandler(cfg, notifier)
+
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL)
+
+			got := waitForAlert(t, alerts)
+			if got.hasFile {
+				t.Errorf("done message attached a file, want none")
+			}
+			if !strings.Contains(got.content, prURL) {
+				t.Errorf("message %q missing PR URL %q", got.content, prURL)
+			}
+			if !strings.Contains(got.content, tc.wantSubstr) {
+				t.Errorf("message %q missing wording %q", got.content, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestTerminalHandlerBlockedAndFailedKeepAttachment confirms blocked/failed
+// still get the .md work-log attachment -- only `done` drops it.
+func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
+	for _, status := range []string{"blocked", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			srv, alerts := capturingDiscordServer(t)
+			defer srv.Close()
+
+			cfg := &config.Config{DiscordUserID: "12345"}
+			notifier := &notify.Notifier{WebhookURL: srv.URL, HermesCmd: []string{"true"}}
+			handler := newTerminalHandler(cfg, notifier)
+
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "")
+
+			got := waitForAlert(t, alerts)
+			if !got.hasFile {
+				t.Errorf("%s message dropped the .md attachment, want it kept", status)
+			}
+		})
+	}
+}
 
 // TestBuildWorkersWiresOnPanicAndOnError is this package's wiring test: for
 // every configured repo, buildWorkers must hand back a RepoWorker whose
