@@ -273,10 +273,18 @@ func fetchPRComments(repoPath, branch string) (string, error) {
 }
 
 // gitDiff is the review session's other input -- the actual code change.
+// Diffs against a freshly fetched origin/<branch>, never the local branch
+// ref directly: by review time the runner's own local clone may never have
+// checked the branch out, or may have since deleted/moved past it (e.g. a
+// prior round's coding session left it behind), while the branch always
+// still exists on origin as long as the PR is open.
 func gitDiff(repoPath, base, branch string) (string, error) {
-	out, err := exec.Command("git", "-C", repoPath, "diff", base+"..."+branch).CombinedOutput()
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+		return string(out), fmt.Errorf("git fetch origin %s: %w", branch, err)
+	}
+	out, err := exec.Command("git", "-C", repoPath, "diff", base+"...FETCH_HEAD").CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("git diff %s..%s: %w", base, branch, err)
+		return string(out), fmt.Errorf("git diff %s...FETCH_HEAD (branch %s): %w", base, branch, err)
 	}
 	return string(out), nil
 }

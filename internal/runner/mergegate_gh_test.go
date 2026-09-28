@@ -1,10 +1,61 @@
 package runner
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestGitDiffMissingLocalBranch confirms gitDiff still produces a diff when
+// the branch it's asked about has been pushed to origin but no longer
+// exists as a local ref -- the exact scenario from the reported bug (merge
+// gate review round runs against a local clone whose branch ref is gone),
+// reproduced here against the local-only testTargetRepoPath fixture (a real
+// origin remote, no GitHub/gh dependency needed since gitDiff itself never
+// shells out to gh).
+func TestGitDiffMissingLocalBranch(t *testing.T) {
+	branch := fmt.Sprintf("mergegate-missing-branch-test-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branch)
+
+	readme := testTargetRepoPath + "/README.md"
+	marker := fmt.Sprintf("mergegate missing-branch test line %d\n", time.Now().UnixNano())
+	f, err := os.OpenFile(readme, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("opening README: %v", err)
+	}
+	if _, err := f.WriteString(marker); err != nil {
+		f.Close()
+		t.Fatalf("writing README: %v", err)
+	}
+	f.Close()
+
+	runGit(t, testTargetRepoPath, "add", "README.md")
+	runGit(t, testTargetRepoPath, "commit", "-m", "mergegate missing-branch test commit")
+	runGit(t, testTargetRepoPath, "push", "-u", "origin", branch)
+
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branch).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+	})
+
+	// The reported bug: by review time the local branch ref is gone (a
+	// prior round moved on, or the clone never checked it out at all) even
+	// though the branch is very much still alive on origin.
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "branch", "-D", branch)
+
+	diff, err := gitDiff(testTargetRepoPath, "main", branch)
+	if err != nil {
+		t.Fatalf("gitDiff with no local branch ref: %v", err)
+	}
+	if !strings.Contains(diff, strings.TrimSpace(marker)) {
+		t.Errorf("diff = %q, want it to contain marker %q", diff, strings.TrimSpace(marker))
+	}
+}
 
 // TestWaitForCINoWorkflows checks that a repo with no
 // .github/workflows returns success immediately, without ever shelling
