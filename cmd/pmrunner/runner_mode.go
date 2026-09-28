@@ -45,7 +45,7 @@ func runRunner(cfg *config.Config) {
 				fmt.Sprintf("%s during %s", payload.Scenario, payload.Stage),
 				payload.DiscordMessage(cfg.DiscordUserID), payload.Slug+".md", payload.AttachmentMarkdown())
 		},
-		OnTerminal: func(job worker.Job, status, workLog string) {
+		OnTerminal: func(job worker.Job, status, workLog string, autoMerge bool) {
 			if status == "blocked" {
 				notifier.SendBlocked(job.NotePath, job.Slug, "CC itself set status: blocked -- see its Work Log for what it needs",
 					fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, job.Slug, job.Repo),

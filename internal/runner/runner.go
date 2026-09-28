@@ -78,7 +78,12 @@ type Deps struct {
 	// same "blocked" treatment as a crash-detected one, just without crash
 	// diagnostics -- main.go's wiring is what decides to also invoke
 	// hermes -z for status == "blocked" here, same as OnBlocked's case.
-	OnTerminal func(job worker.Job, status, workLog string)
+	//
+	// autoMerge is the *resolved* effective value (task's own auto_merge if
+	// set, else the repo's auto_merge_default) -- the same value the merge
+	// gate decision below uses, so a caller building the terminal message
+	// never has to re-derive it.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -298,12 +303,14 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 
+	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
+
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge)
 	}
 
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
-	if terminalStatus == "done" && note.Frontmatter.AutoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
+	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
 		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL)
 	}
 
@@ -343,6 +350,16 @@ func isTerminalStatus(status string) bool {
 
 func hasPRURL(s *string) bool {
 	return s != nil && *s != ""
+}
+
+// resolveAutoMerge is the effective auto_merge value for the merge-gate
+// decision: the task's own auto_merge when it set one, otherwise the
+// repo's auto_merge_default from repos.json.
+func resolveAutoMerge(taskValue *bool, repoDefault bool) bool {
+	if taskValue != nil {
+		return *taskValue
+	}
+	return repoDefault
 }
 
 func derefStr(s *string) string {
