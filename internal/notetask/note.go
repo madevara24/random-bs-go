@@ -15,12 +15,14 @@ import (
 
 // Frontmatter mirrors the task note schema exactly, field order included --
 // yaml.v3 marshals struct fields in declaration order. Nullable fields are
-// *string so an absent value round-trips as YAML `null`, not an empty
-// string.
+// pointer-typed (*string, or *bool for AutoMerge) so an absent value
+// round-trips as YAML `null`/missing key, not a zero value -- AutoMerge in
+// particular needs nil to mean "not set, fall back to the repo's
+// auto_merge_default" as distinct from an explicit `false`.
 type Frontmatter struct {
 	Status      string  `yaml:"status"`
 	Repo        string  `yaml:"repo"`
-	AutoMerge   bool    `yaml:"auto_merge"`
+	AutoMerge   *bool   `yaml:"auto_merge"`
 	SessionID   *string `yaml:"session_id"`
 	PRURL       *string `yaml:"pr_url"`
 	LastUpdated *string `yaml:"last_updated"`

@@ -79,11 +79,11 @@ type Deps struct {
 	// diagnostics -- main.go's wiring is what decides to also invoke
 	// hermes -z for status == "blocked" here, same as OnBlocked's case.
 	//
-	// autoMerge and prURL are the effective auto_merge and the copy's
-	// pr_url as of this merge-back, passed through so the callback can
-	// build a done message without re-reading the vault note -- this fires
-	// before runMergeGateForTask below, so for a done+auto_merge task the
-	// PR is not merged yet, only opened.
+	// autoMerge is the resolved effective auto_merge (the task's own value
+	// if set, else the repo's auto_merge_default), the same value the merge
+	// gate decision below uses. prURL is the copy's pr_url as of this
+	// merge-back. This fires before runMergeGateForTask below, so for a
+	// done+auto_merge task the PR is opened, not merged yet.
 	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL string)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
@@ -304,12 +304,14 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 
+	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
+
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, note.Frontmatter.AutoMerge, prURL)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL)
 	}
 
-	if terminalStatus == "done" && note.Frontmatter.AutoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
+	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
 		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL)
 	}
 
@@ -349,6 +351,16 @@ func isTerminalStatus(status string) bool {
 
 func hasPRURL(s *string) bool {
 	return s != nil && *s != ""
+}
+
+// resolveAutoMerge is the effective auto_merge value for the merge-gate
+// decision: the task's own auto_merge when it set one, otherwise the
+// repo's auto_merge_default from repos.json.
+func resolveAutoMerge(taskValue *bool, repoDefault bool) bool {
+	if taskValue != nil {
+		return *taskValue
+	}
+	return repoDefault
 }
 
 func derefStr(s *string) string {
