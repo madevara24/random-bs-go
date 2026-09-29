@@ -111,15 +111,17 @@ type AlertPayload struct {
 }
 
 // DiscordMessage is the short, one-line summary -- the attachment carries
-// the rest. mentionID is the Discord user ID to @-mention (Devara), per
-// the bash design's "always @-mentions" behavior.
-func (p AlertPayload) DiscordMessage(mentionID string) string {
+// the rest. mentionID and araDevMentionID are the Discord user IDs to
+// @-mention (Devara and Ara-Dev): one webhook post mentions both, so the
+// `dev` gateway picks up its own mention and auto-threads its reply --
+// the 2026-08-31 decision.
+func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
 	if p.Scenario == ScenarioDoneWithoutPR {
-		return fmt.Sprintf("<@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
-			mentionID, p.Slug, p.Repo)
+		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
+			mentionID, araDevMentionID, p.Slug, p.Repo)
 	}
-	return fmt.Sprintf("<@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
-		mentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
+	return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
+		mentionID, araDevMentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
 }
 
 // AttachmentMarkdown is the fuller diagnosable content: task slug/repo,

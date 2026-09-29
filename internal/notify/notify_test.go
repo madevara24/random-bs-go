@@ -122,7 +122,7 @@ func TestSendSucceedsFirstTryNotified(t *testing.T) {
 
 // TestSendAgainstRealWebhook is Phase 10's second test gate: point it at
 // the real webhook, confirm "notified" lands. Gated behind an env var
-// since it fires a real (clearly-marked test) message into #dev.
+// since it fires a real (clearly-marked test) message into #task-alert.
 func TestSendAgainstRealWebhook(t *testing.T) {
 	if os.Getenv("PMRUNNER_SEND_REAL_DISCORD_TEST") == "" {
 		t.Skip("set PMRUNNER_SEND_REAL_DISCORD_TEST=1 to actually fire this against the real Discord webhook")
@@ -220,39 +220,6 @@ func TestSendReturnsImmediately(t *testing.T) {
 	n.Send("", "msg", "a.md", "body")
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Errorf("Send blocked for %v, want it to return almost immediately", elapsed)
-	}
-}
-
-// TestInvokeHermesFiresWithSlugAndReason confirms a blocked task's hermes
-// -z call actually fires, with the right slug/reason text -- a stubbed
-// hermes binary is fine per Phase 10's test gate, this just confirms it
-// gets invoked correctly.
-func TestInvokeHermesFiresWithSlugAndReason(t *testing.T) {
-	tmpDir := t.TempDir()
-	stubPath := filepath.Join(tmpDir, "fake-hermes.sh")
-	outPath := filepath.Join(tmpDir, "hermes-argv.txt")
-
-	script := fmt.Sprintf("#!/usr/bin/env bash\nprintf '%%s\\n' \"$@\" > %q\n", outPath)
-	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stub: %v", err)
-	}
-
-	n := &Notifier{HermesCmd: []string{stubPath, "-z"}}
-	n.invokeHermes("phase10-slug-123", "needs a decision about the API design")
-
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatalf("reading hermes stub output: %v", err)
-	}
-	got := string(data)
-	if !strings.Contains(got, "-z") {
-		t.Errorf("hermes argv missing -z flag: %q", got)
-	}
-	if !strings.Contains(got, "phase10-slug-123") {
-		t.Errorf("hermes argv missing task slug: %q", got)
-	}
-	if !strings.Contains(got, "needs a decision about the API design") {
-		t.Errorf("hermes argv missing reason text: %q", got)
 	}
 }
 

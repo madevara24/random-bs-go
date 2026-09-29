@@ -76,8 +76,8 @@ type Deps struct {
 	// -- no crash involved). Covers all three of done/blocked/failed: a
 	// CC-initiated `blocked` (e.g. CC needs human input) gets exactly the
 	// same "blocked" treatment as a crash-detected one, just without crash
-	// diagnostics -- main.go's wiring is what decides to also invoke
-	// hermes -z for status == "blocked" here, same as OnBlocked's case.
+	// diagnostics -- main.go's wiring is what adds the Ara-Dev mention for
+	// status == "blocked" here, same as OnBlocked's case.
 	//
 	// autoMerge is the resolved effective auto_merge (the task's own value
 	// if set, else the repo's auto_merge_default), the same value the merge

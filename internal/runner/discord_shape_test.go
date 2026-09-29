@@ -19,7 +19,7 @@ import (
 // `payload_json` + `fileN` multipart fields against the real webhook.
 //
 // Gated behind an env var, not run as part of a normal `go test ./...`,
-// since it fires a real message into the real #dev channel -- opt in
+// since it fires a real message into the real #task-alert channel -- opt in
 // explicitly: PMRUNNER_SEND_REAL_DISCORD_TEST=1 go test ./internal/runner/
 // -run TestAlertPayloadReachesDiscordInVerifiedShape
 func TestAlertPayloadReachesDiscordInVerifiedShape(t *testing.T) {
@@ -40,7 +40,7 @@ func TestAlertPayloadReachesDiscordInVerifiedShape(t *testing.T) {
 		LogPointer: "(no real log -- test)",
 	}
 
-	content := fmt.Sprintf("[PM RUNNER GO REWRITE -- TEST FIRE, NOT A REAL TASK ALERT] %s", payload.DiscordMessage("0"))
+	content := fmt.Sprintf("[PM RUNNER GO REWRITE -- TEST FIRE, NOT A REAL TASK ALERT] %s", payload.DiscordMessage("0", "0"))
 
 	if err := postDiscordAlert(webhookURL, content, payload.Slug+".md", payload.AttachmentMarkdown()); err != nil {
 		t.Fatalf("posting alert to real Discord webhook: %v", err)

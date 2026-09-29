@@ -1,7 +1,7 @@
 // Package notify is the runner's and the watcher's shared Discord-webhook
-// + hermes -z mechanism. Own package specifically because both run modes
-// of the daemon need the same Discord-alert mechanism -- the watcher's own
-// down/hung-daemon alerts reuse this.
+// mechanism. Own package specifically because both run modes of the daemon
+// need the same Discord-alert mechanism -- the watcher's own down/hung-daemon
+// alerts reuse this.
 package notify
 
 import (
@@ -13,20 +13,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
-
-// DefaultHermesCmd is the real invocation -- no bare `hermes` binary
-// exists on PATH, this is the venv python module invocation found via the
-// hermes-gateway.service systemd unit's actual ExecStart. Callers needing
-// something else (tests, a future path change) override Notifier.HermesCmd.
-var DefaultHermesCmd = []string{
-	"/home/obsidian/.hermes/hermes-agent/venv/bin/python", "-m", "hermes_cli.main", "-z",
-}
 
 // Notifier sends alerts and records the outcome on a task note's Runner
 // Log. Vault may be nil for a caller that doesn't want the Runner Log
@@ -45,18 +36,6 @@ type Notifier struct {
 	// locks. The runner itself leaves this empty and keeps writing via
 	// Vault directly, since it already is the process that owns the clone.
 	RunnerLogURL string
-
-	// HermesCmd is the full argv minus the final message argument, e.g.
-	// {"/path/to/python", "-m", "hermes_cli.main", "-z"} -- the message
-	// text is appended as the last arg. Defaults to DefaultHermesCmd.
-	HermesCmd []string
-}
-
-func (n *Notifier) hermesCmd() []string {
-	if len(n.HermesCmd) > 0 {
-		return n.HermesCmd
-	}
-	return DefaultHermesCmd
 }
 
 // Send fires the Discord alert asynchronously (fire-and-forget goroutine)
@@ -68,20 +47,8 @@ func (n *Notifier) Send(notePath, message, attachmentName, attachmentBody string
 	go n.sendSync(notePath, message, attachmentName, attachmentBody)
 }
 
-// SendBlocked does everything Send does, and additionally invokes hermes
-// -z as a real first-responder call -- a `blocked`-specific
-// two-notification pattern (most Discord bots, Hermes likely included,
-// filter out webhook/bot-authored messages, so the Discord mention alone
-// probably wouldn't register as input for Hermes).
-func (n *Notifier) SendBlocked(notePath, slug, reason, message, attachmentName, attachmentBody string) {
-	go func() {
-		n.sendSync(notePath, message, attachmentName, attachmentBody)
-		n.invokeHermes(slug, reason)
-	}()
-}
-
-// sendSync is the synchronous core -- exported behavior via Send/
-// SendBlocked's goroutine wrapper, called directly (not via a goroutine)
+// sendSync is the synchronous core -- exported behavior via Send's
+// goroutine wrapper, called directly (not via a goroutine)
 // by this package's own tests for deterministic assertions on the retry
 // count and the resulting Runner Log line.
 func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody string) {
@@ -112,7 +79,7 @@ func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody st
 	})
 	if werr != nil {
 		fmt.Printf("[notify] failed to append %q to Runner Log for %s: %v\n", event, notePath, werr)
-		// Called directly, not via Send/SendBlocked -- those would attempt
+		// Called directly, not via Send -- that would attempt
 		// another Runner Log append and recurse into this same failure. No
 		// attachment, no @-mention: the alert this append was meant to
 		// record already carried the mention.
@@ -151,23 +118,11 @@ func (n *Notifier) postRunnerLog(notePath, event string) {
 		respBody, _ := io.ReadAll(resp.Body)
 		fmt.Printf("[notify] POST %s for %s returned status %d: %s\n", n.RunnerLogURL, notePath, resp.StatusCode, respBody)
 		// Same rule as sendSync's own append-failure warning above: called
-		// directly, not via Send/SendBlocked, to avoid recursing into
+		// directly, not via Send, to avoid recursing into
 		// another Runner Log append. No attachment, no @-mention.
 		_ = postDiscordAlert(n.WebhookURL,
 			fmt.Sprintf("[runner] WARNING: could not append %q to the Runner Log for `%s`: runner-log endpoint returned status %d: %s", event, notePath, resp.StatusCode, respBody),
 			"", "")
-	}
-}
-
-func (n *Notifier) invokeHermes(slug, reason string) {
-	argv := n.hermesCmd()
-	text := fmt.Sprintf("Task %s is blocked: %s. Post an update in #dev and help if you can before escalating.", slug, reason)
-	args := append(append([]string{}, argv[1:]...), text)
-	cmd := exec.Command(argv[0], args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("[notify] hermes -z invocation for %s failed: %v\n", slug, err)
 	}
 }
 
