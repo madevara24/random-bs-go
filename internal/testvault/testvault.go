@@ -30,13 +30,28 @@ const defaultPath = "/home/obsidian/pmrunner-go-test-vault"
 // repo, on-disk, per checkout, at defaultPath unless pathEnvVar overrides
 // it. Its Tasks/ directory is scratch space: tests seed uniquely-named
 // notes per run and never assume a clean slate.
-var Path = resolvePath()
+var Path = resolveEnv(pathEnvVar, defaultPath)
 
-func resolvePath() string {
-	if v := os.Getenv(pathEnvVar); v != "" {
+// targetRepoPathEnvVar overrides TargetRepoPath's location, same rationale
+// as pathEnvVar.
+const targetRepoPathEnvVar = "PMRUNNER_TEST_TARGET_REPO_PATH"
+
+const defaultTargetRepoPath = "/home/obsidian/repos/phase6-test-repo"
+
+// TargetRepoPath is a second throwaway local-only git repo (bare + working
+// clone) -- a stand-in for a downstream project repo the runner operates
+// on, as opposed to Path (the PM vault). internal/runner and
+// internal/watcher's tests exercise real branch/checkout/push operations
+// against it. Originally introduced because a discovered GitHub credential
+// permission gap blocked real push/PR against GitHub in tests; see the
+// PM Runner Go Rewrite project notes for that provenance.
+var TargetRepoPath = resolveEnv(targetRepoPathEnvVar, defaultTargetRepoPath)
+
+func resolveEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return defaultPath
+	return fallback
 }
 
 var lockFilePath = Path + ".git/test-suite.lock"

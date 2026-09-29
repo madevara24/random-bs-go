@@ -14,15 +14,19 @@
 #
 # Set DRY_RUN=1 to print what `deploy` would do without doing it.
 #
-# `test-fixture` builds a throwaway bare+working git clone pair shaped
-# like a PM vault, for internal/runner and internal/watcher's integration
-# tests (see internal/testvault). Override its location with
-# PMRUNNER_TEST_VAULT_PATH=/some/path -- the tests read the same variable.
+# `test-fixture` builds two throwaway bare+working git clone pairs: one
+# shaped like a PM vault, one standing in for a downstream project repo --
+# internal/runner, internal/watcher, and internal/vaultgit's integration
+# tests exercise real git operations against them (see internal/testvault).
+# Override their locations with PMRUNNER_TEST_VAULT_PATH=/some/path and
+# PMRUNNER_TEST_TARGET_REPO_PATH=/some/other/path -- the tests read the
+# same two variables.
 
 BINARY := pmrunner
 DEPLOY_DIR ?= /home/obsidian/pm-runner-go
 DRY_RUN ?= 0
 PMRUNNER_TEST_VAULT_PATH ?= /home/obsidian/pmrunner-go-test-vault
+PMRUNNER_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
 
 .PHONY: build deploy test-fixture
 
@@ -69,3 +73,17 @@ test-fixture:
 	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" add -A && \
 	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" commit -q -m "test-fixture: initial commit" && \
 	git -C "$$work" push -q origin HEAD:master
+	@work="$(PMRUNNER_TEST_TARGET_REPO_PATH)"; \
+	bare="$$work.git"; \
+	if [ -d "$$work/.git" ]; then \
+		echo "test-fixture: $$work already exists, skipping"; \
+		exit 0; \
+	fi; \
+	echo "test-fixture: creating throwaway target repo at $$work (bare: $$bare)"; \
+	git init --bare "$$bare" && \
+	git clone "$$bare" "$$work" && \
+	echo "throwaway target repo -- see internal/testvault and internal/runner's tests" > "$$work/README.md" && \
+	git -C "$$work" checkout -B main && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" add -A && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" commit -q -m "test-fixture: initial commit" && \
+	git -C "$$work" push -q origin HEAD:main
