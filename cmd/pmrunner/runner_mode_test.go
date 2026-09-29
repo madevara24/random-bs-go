@@ -6,10 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,7 +102,7 @@ func TestTerminalHandlerDone(t *testing.T) {
 			srv, alerts := capturingDiscordServer(t)
 			defer srv.Close()
 
-			cfg := &config.Config{DiscordUserID: "12345"}
+			cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier)
 
@@ -121,6 +118,12 @@ func TestTerminalHandlerDone(t *testing.T) {
 			if !strings.Contains(got.content, tc.wantSubstr) {
 				t.Errorf("message %q missing wording %q", got.content, tc.wantSubstr)
 			}
+			if !strings.Contains(got.content, "<@12345>") {
+				t.Errorf("message %q missing Devara mention", got.content)
+			}
+			if !strings.Contains(got.content, "<@67890>") {
+				t.Errorf("message %q missing Ara-Dev mention", got.content)
+			}
 		})
 	}
 }
@@ -133,8 +136,8 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 			srv, alerts := capturingDiscordServer(t)
 			defer srv.Close()
 
-			cfg := &config.Config{DiscordUserID: "12345"}
-			notifier := &notify.Notifier{WebhookURL: srv.URL, HermesCmd: []string{"true"}}
+			cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
+			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier)
 
 			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "")
@@ -142,6 +145,12 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 			got := waitForAlert(t, alerts)
 			if !got.hasFile {
 				t.Errorf("%s message dropped the .md attachment, want it kept", status)
+			}
+			if !strings.Contains(got.content, "<@12345>") {
+				t.Errorf("message %q missing Devara mention", got.content)
+			}
+			if !strings.Contains(got.content, "<@67890>") {
+				t.Errorf("message %q missing Ara-Dev mention", got.content)
 			}
 		})
 	}
@@ -189,18 +198,8 @@ func TestPanicHandlerWritesBlockedAndAlerts(t *testing.T) {
 	testvault.SkipIfAbsent(t)
 	t.Cleanup(testvault.Lock(t))
 
-	var hitCount atomic.Int32
-	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hitCount.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
+	discord, alerts := capturingDiscordServer(t)
 	defer discord.Close()
-
-	tmpDir := t.TempDir()
-	stubHermes := filepath.Join(tmpDir, "fake-hermes.sh")
-	if err := os.WriteFile(stubHermes, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("writing hermes stub: %v", err)
-	}
 
 	run := fmt.Sprintf("%d", time.Now().UnixNano())
 	slug := "onpanic-" + run
@@ -213,37 +212,30 @@ func TestPanicHandlerWritesBlockedAndAlerts(t *testing.T) {
 	if err := v.Sync(); err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
-	// Deliberately no Vault on the notifier: SendBlocked's own async
-	// follow-up write (appending "notified" to the Runner Log) goes through
-	// a raw, unsynchronized git call in testvault's cleanup once this test
-	// returns, and racing that fire-and-forget goroutine's git commit/push
-	// against cleanup's git rm is exactly the kind of flake this test
-	// doesn't need -- the blocked write below (the thing this test actually
-	// verifies) happens synchronously, before SendBlocked is even called.
-	notifier := &notify.Notifier{WebhookURL: discord.URL, HermesCmd: []string{stubHermes}}
+	// Deliberately no Vault on the notifier: Send's own async follow-up
+	// write (appending "notified" to the Runner Log) goes through a raw,
+	// unsynchronized git call in testvault's cleanup once this test returns,
+	// and racing that fire-and-forget goroutine's git commit/push against
+	// cleanup's git rm is exactly the kind of flake this test doesn't need
+	// -- the blocked write below (the thing this test actually verifies)
+	// happens synchronously, before Send is even called.
+	notifier := &notify.Notifier{WebhookURL: discord.URL}
 
 	globalSlots := worker.NewGlobalSlots(1)
 	rw := worker.New("phase6-test-repo", globalSlots, func(job worker.Job) error {
 		panic("boom: simulated ProcessTask panic")
 	})
-	rw.OnPanic = newPanicHandler(v, notifier, "12345")
+	rw.OnPanic = newPanicHandler(v, notifier, "12345", "67890")
 
 	go rw.Run()
 	rw.Enqueue(worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug})
 
-	deadline := time.After(5 * time.Second)
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-waitLoop:
-	for {
-		select {
-		case <-tick.C:
-			if hitCount.Load() > 0 {
-				break waitLoop
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the Discord alert to fire")
-		}
+	got := waitForAlert(t, alerts)
+	if !strings.Contains(got.content, "<@12345>") {
+		t.Errorf("message %q missing Devara mention", got.content)
+	}
+	if !strings.Contains(got.content, "<@67890>") {
+		t.Errorf("message %q missing Ara-Dev mention", got.content)
 	}
 
 	note, err := v.ReadNote(relPath)

@@ -107,6 +107,32 @@ func assertBlocked(t *testing.T, v *vaultgit.Vault, relPath string, wantScenario
 	}
 }
 
+// TestAlertPayloadDiscordMessageMentionsBoth confirms DiscordMessage
+// includes both the Devara and Ara-Dev mentions on every scenario branch --
+// the 2026-08-31 decision replaced the old default-profile `hermes -z`
+// first-responder call with a single webhook post mentioning both, so the
+// `dev` gateway's own mention must land on every crash-fallback message
+// shape, not just the common one.
+func TestAlertPayloadDiscordMessageMentionsBoth(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload AlertPayload
+	}{
+		{name: "blocked", payload: AlertPayload{Slug: "task-1", Repo: "repo-a", Scenario: ScenarioNoCopy, Stage: "result read-back"}},
+		{name: "done without PR", payload: AlertPayload{Slug: "task-1", Repo: "repo-a", Scenario: ScenarioDoneWithoutPR}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.payload.DiscordMessage("12345", "67890")
+			if !strings.Contains(got, "<@12345>") {
+				t.Errorf("message %q missing Devara mention", got)
+			}
+			if !strings.Contains(got, "<@67890>") {
+				t.Errorf("message %q missing Ara-Dev mention", got)
+			}
+		})
+	}
+}
+
 // TestCrashFallbackScenario1NoCopy forces scenario 1 (copy absent at
 // read-back) by having the stub remove the copy the runner wrote before
 // invocation, then exit -- functionally the same end state the doc's
