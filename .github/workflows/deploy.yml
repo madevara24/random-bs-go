@@ -1,0 +1,94 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: Build, Vet, Lint, Test (Gate)
+    runs-on: ubuntu-latest
+    env:
+      PMRUNNER_TEST_VAULT_PATH: /tmp/pmrunner-go-test-vault-ci
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+
+      - name: Build test fixture
+        run: make test-fixture
+
+      - name: Test
+        run: go test ./...
+
+  deploy:
+    name: Deploy
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: GOOS=linux GOARCH=amd64 go build -o pmrunner ./cmd/pmrunner
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      # VPS_KNOWN_HOST must contain the output of `ssh-keyscan <vps-host>` stored as a GitHub Secret.
+      # Using a pre-verified secret avoids TOFU (trust-on-first-use) risk from ssh-keyscan at runtime.
+      - name: Add VPS to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_KNOWN_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy binary to VPS
+        run: scp pmrunner ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/home/obsidian/pm-runner-go/.pmrunner.new
+
+      - name: Install binary and restart services
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} '
+            set -e
+            cd /home/obsidian/pm-runner-go
+            cp -a pmrunner pmrunner.prev
+            chmod 755 .pmrunner.new
+            mv .pmrunner.new pmrunner
+            sudo -n systemctl restart pmrunner-runner pmrunner-watcher
+          '
+
+      - name: Poll health endpoint
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} '
+            for i in $(seq 1 30); do
+              if curl -sf http://127.0.0.1:8420/health; then
+                echo "Deployment healthy"
+                exit 0
+              fi
+              echo "Attempt $i/30 -- waiting 2s"
+              sleep 2
+            done
+            echo "Deployment verification timed out after 60s"
+            exit 1
+          '

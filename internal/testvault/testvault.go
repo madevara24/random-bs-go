@@ -19,12 +19,27 @@ import (
 	"github.com/madevara24/random-bs-go/internal/notetask"
 )
 
-// Path is the throwaway test vault's working clone -- set up outside the
-// repo, on-disk, per checkout. Its Tasks/ directory is scratch space:
-// tests seed uniquely-named notes per run and never assume a clean slate.
-const Path = "/home/obsidian/pmrunner-go-test-vault"
+// pathEnvVar overrides the throwaway test vault's location, e.g. on a CI
+// runner with no access to the VPS filesystem that provisions its own
+// scratch fixture (see `make test-fixture`).
+const pathEnvVar = "PMRUNNER_TEST_VAULT_PATH"
 
-const lockFilePath = "/home/obsidian/pmrunner-go-test-vault.git/test-suite.lock"
+const defaultPath = "/home/obsidian/pmrunner-go-test-vault"
+
+// Path is the throwaway test vault's working clone -- set up outside the
+// repo, on-disk, per checkout, at defaultPath unless pathEnvVar overrides
+// it. Its Tasks/ directory is scratch space: tests seed uniquely-named
+// notes per run and never assume a clean slate.
+var Path = resolvePath()
+
+func resolvePath() string {
+	if v := os.Getenv(pathEnvVar); v != "" {
+		return v
+	}
+	return defaultPath
+}
+
+var lockFilePath = Path + ".git/test-suite.lock"
 
 // SkipIfAbsent skips the calling test if the throwaway vault isn't present
 // on this machine (e.g. a future CI run with no VPS filesystem access).

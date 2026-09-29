@@ -21,7 +21,7 @@ import (
 // test) bare+working clone pair"). Never the real PM vault -- see
 // Storage & Repos.md for why a second, unrelated clone shouldn't touch
 // production task notes.
-const testVaultPath = testvault.Path
+var testVaultPath = testvault.Path
 
 func skipIfNoTestVault(t *testing.T) {
 	t.Helper()

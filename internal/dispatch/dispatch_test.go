@@ -15,7 +15,7 @@ import (
 
 // Same throwaway test vault used by internal/vaultgit's integration tests --
 // never the real PM vault. See that package's comment for why.
-const testVaultPath = testvault.Path
+var testVaultPath = testvault.Path
 
 // TestSlugFromPathMatchesRealBranchConvention pins slugify against the
 // exact shape of an already-existing real MDC task branch name, so the
