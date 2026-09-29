@@ -19,12 +19,42 @@ import (
 	"github.com/madevara24/random-bs-go/internal/notetask"
 )
 
-// Path is the throwaway test vault's working clone -- set up outside the
-// repo, on-disk, per checkout. Its Tasks/ directory is scratch space:
-// tests seed uniquely-named notes per run and never assume a clean slate.
-const Path = "/home/obsidian/pmrunner-go-test-vault"
+// pathEnvVar overrides the throwaway test vault's location, e.g. on a CI
+// runner with no access to the VPS filesystem that provisions its own
+// scratch fixture (see `make test-fixture`).
+const pathEnvVar = "PMRUNNER_TEST_VAULT_PATH"
 
-const lockFilePath = "/home/obsidian/pmrunner-go-test-vault.git/test-suite.lock"
+const defaultPath = "/home/obsidian/pmrunner-go-test-vault"
+
+// Path is the throwaway test vault's working clone -- set up outside the
+// repo, on-disk, per checkout, at defaultPath unless pathEnvVar overrides
+// it. Its Tasks/ directory is scratch space: tests seed uniquely-named
+// notes per run and never assume a clean slate.
+var Path = resolveEnv(pathEnvVar, defaultPath)
+
+// targetRepoPathEnvVar overrides TargetRepoPath's location, same rationale
+// as pathEnvVar.
+const targetRepoPathEnvVar = "PMRUNNER_TEST_TARGET_REPO_PATH"
+
+const defaultTargetRepoPath = "/home/obsidian/repos/phase6-test-repo"
+
+// TargetRepoPath is a second throwaway local-only git repo (bare + working
+// clone) -- a stand-in for a downstream project repo the runner operates
+// on, as opposed to Path (the PM vault). internal/runner and
+// internal/watcher's tests exercise real branch/checkout/push operations
+// against it. Originally introduced because a discovered GitHub credential
+// permission gap blocked real push/PR against GitHub in tests; see the
+// PM Runner Go Rewrite project notes for that provenance.
+var TargetRepoPath = resolveEnv(targetRepoPathEnvVar, defaultTargetRepoPath)
+
+func resolveEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+var lockFilePath = Path + ".git/test-suite.lock"
 
 // SkipIfAbsent skips the calling test if the throwaway vault isn't present
 // on this machine (e.g. a future CI run with no VPS filesystem access).

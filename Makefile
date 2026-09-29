@@ -7,18 +7,28 @@
 #
 #   make deploy DEPLOY_DIR=/path/to/other/dir
 #
-# Neither runner nor watcher runs under systemd today; both are launched
-# by hand with nohup. `deploy` finds their PIDs itself (matched by
-# command line and working directory) rather than assuming a service
-# manager.
+# Both runner and watcher run under systemd (the pmrunner-runner and
+# pmrunner-watcher units) since 2026-09-25. `deploy` only installs the new
+# binary and restarts those units through the scoped sudoers rule -- it no
+# longer manages processes itself.
 #
 # Set DRY_RUN=1 to print what `deploy` would do without doing it.
+#
+# `test-fixture` builds two throwaway bare+working git clone pairs: one
+# shaped like a PM vault, one standing in for a downstream project repo --
+# internal/runner, internal/watcher, and internal/vaultgit's integration
+# tests exercise real git operations against them (see internal/testvault).
+# Override their locations with PMRUNNER_TEST_VAULT_PATH=/some/path and
+# PMRUNNER_TEST_TARGET_REPO_PATH=/some/other/path -- the tests read the
+# same two variables.
 
 BINARY := pmrunner
 DEPLOY_DIR ?= /home/obsidian/pm-runner-go
 DRY_RUN ?= 0
+PMRUNNER_TEST_VAULT_PATH ?= /home/obsidian/pmrunner-go-test-vault
+PMRUNNER_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
 
-.PHONY: build deploy
+.PHONY: build deploy test-fixture
 
 build:
 	go build -o $(BINARY) ./cmd/pmrunner
@@ -29,40 +39,51 @@ deploy: build
 		echo "deploy: $$deploy_dir does not exist" >&2; \
 		exit 1; \
 	fi; \
-	stopped=0; \
-	for mode in runner watcher; do \
-		pids=""; \
-		for pid in $$(pgrep -f "pmrunner $$mode\$$"); do \
-			pid_cwd=$$(readlink -f "/proc/$$pid/cwd" 2>/dev/null); \
-			if [ "$$pid_cwd" = "$$deploy_dir" ]; then \
-				pids="$$pids $$pid"; \
-			fi; \
-		done; \
-		if [ -n "$$pids" ]; then \
-			echo "deploy: stopping $$mode (pid:$$pids)"; \
-			if [ "$(DRY_RUN)" = "1" ]; then \
-				echo "[dry-run] kill$$pids"; \
-			else \
-				kill $$pids; \
-				stopped=1; \
-			fi; \
-		else \
-			echo "deploy: no running $$mode found in $$deploy_dir"; \
-		fi; \
-	done; \
-	if [ "$$stopped" = "1" ]; then sleep 2; fi; \
 	echo "deploy: installing $(BINARY) into $$deploy_dir"; \
 	if [ "$(DRY_RUN)" = "1" ]; then \
-		echo "[dry-run] cp $(BINARY) $$deploy_dir/.$(BINARY).new && mv $$deploy_dir/.$(BINARY).new $$deploy_dir/$(BINARY)"; \
+		echo "[dry-run] cp $(BINARY) $$deploy_dir/.$(BINARY).new"; \
+		echo "[dry-run] cp -a $$deploy_dir/$(BINARY) $$deploy_dir/$(BINARY).prev"; \
+		echo "[dry-run] chmod 755 $$deploy_dir/.$(BINARY).new"; \
+		echo "[dry-run] mv $$deploy_dir/.$(BINARY).new $$deploy_dir/$(BINARY)"; \
+		echo "[dry-run] sudo -n systemctl restart pmrunner-runner pmrunner-watcher"; \
 	else \
-		cp $(BINARY) "$$deploy_dir/.$(BINARY).new" && \
-		mv "$$deploy_dir/.$(BINARY).new" "$$deploy_dir/$(BINARY)"; \
+		cp "$(BINARY)" "$$deploy_dir/.$(BINARY).new" && \
+		if [ -f "$$deploy_dir/$(BINARY)" ]; then \
+			cp -a "$$deploy_dir/$(BINARY)" "$$deploy_dir/$(BINARY).prev"; \
+		fi && \
+		chmod 755 "$$deploy_dir/.$(BINARY).new" && \
+		mv "$$deploy_dir/.$(BINARY).new" "$$deploy_dir/$(BINARY)" && \
+		sudo -n systemctl restart pmrunner-runner pmrunner-watcher; \
+	fi
+
+test-fixture:
+	@work="$(PMRUNNER_TEST_VAULT_PATH)"; \
+	bare="$$work.git"; \
+	if [ -d "$$work/.git" ]; then \
+		echo "test-fixture: $$work already exists, skipping"; \
+		exit 0; \
 	fi; \
-	for mode in runner watcher; do \
-		echo "deploy: starting $$mode"; \
-		if [ "$(DRY_RUN)" = "1" ]; then \
-			echo "[dry-run] (cd $$deploy_dir && nohup ./$(BINARY) $$mode >> $$mode.log 2>&1 &)"; \
-		else \
-			(cd "$$deploy_dir" && nohup ./$(BINARY) $$mode >> "$$mode.log" 2>&1 &); \
-		fi; \
-	done
+	echo "test-fixture: creating throwaway vault at $$work (bare: $$bare)"; \
+	git init --bare "$$bare" && \
+	git clone "$$bare" "$$work" && \
+	echo "throwaway test vault -- see internal/testvault" > "$$work/README.md" && \
+	mkdir -p "$$work/Tasks" && \
+	touch "$$work/Tasks/.gitkeep" && \
+	git -C "$$work" checkout -B master && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" add -A && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" commit -q -m "test-fixture: initial commit" && \
+	git -C "$$work" push -q origin HEAD:master
+	@work="$(PMRUNNER_TEST_TARGET_REPO_PATH)"; \
+	bare="$$work.git"; \
+	if [ -d "$$work/.git" ]; then \
+		echo "test-fixture: $$work already exists, skipping"; \
+		exit 0; \
+	fi; \
+	echo "test-fixture: creating throwaway target repo at $$work (bare: $$bare)"; \
+	git init --bare "$$bare" && \
+	git clone "$$bare" "$$work" && \
+	echo "throwaway target repo -- see internal/testvault and internal/runner's tests" > "$$work/README.md" && \
+	git -C "$$work" checkout -B main && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" add -A && \
+	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" commit -q -m "test-fixture: initial commit" && \
+	git -C "$$work" push -q origin HEAD:main

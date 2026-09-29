@@ -24,8 +24,9 @@ import (
 // blocks real push/PR against GitHub; local-only exercises everything
 // Phase 6 itself is actually responsible for: branch creation, the
 // note-copy mechanism, and claude invocation + session_id capture, none of
-// which need GitHub at all).
-const testTargetRepoPath = "/home/obsidian/repos/phase6-test-repo"
+// which need GitHub at all). Configurable via testvault.TargetRepoPath
+// (PMRUNNER_TEST_TARGET_REPO_PATH) so CI can point it at a scratch fixture.
+var testTargetRepoPath = testvault.TargetRepoPath
 
 type noopReporter struct{}
 

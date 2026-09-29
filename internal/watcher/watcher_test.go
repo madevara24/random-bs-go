@@ -21,7 +21,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
-const testTargetRepoPath = "/home/obsidian/repos/phase6-test-repo"
+var testTargetRepoPath = testvault.TargetRepoPath
 
 // TestCheckHealthConnectionRefused kills the "runner" entirely (a
 // listener bound then immediately closed, so nothing answers) and confirms
