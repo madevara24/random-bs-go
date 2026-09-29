@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PMRUNNER_TEST_VAULT_PATH: /tmp/pmrunner-go-test-vault-ci
+      GIT_AUTHOR_NAME: pmrunner-ci
+      GIT_AUTHOR_EMAIL: pmrunner-ci@users.noreply.github.com
+      GIT_COMMITTER_NAME: pmrunner-ci
+      GIT_COMMITTER_EMAIL: pmrunner-ci@users.noreply.github.com
     steps:
       - uses: actions/checkout@v6
 
