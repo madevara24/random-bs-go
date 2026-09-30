@@ -107,9 +107,12 @@ func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runn
 // autoMerge: manual-merge wording when false, auto-merge-loop wording when
 // true. OnTerminal fires before the merge-gate loop runs (see
 // runMergeGateForTask in internal/runner/runner.go), so a done+auto_merge
-// message can only say the loop is running, never that the PR merged.
-// `blocked` and `failed` both keep the .md attachment so the work log is
-// there to see what went wrong.
+// message can only say the loop is running, never that the PR merged. A
+// `done` message mentions only Devara, not Ara-Dev: the Ara-Dev mention
+// exists so the `dev` Hermes gateway auto-threads a reply to help unblock,
+// and a done task needs no help. `blocked` and `failed` both keep the .md
+// attachment so the work log is there to see what went wrong, and both
+// keep mentioning Ara-Dev.
 func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
 	return func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
 		if status == "blocked" {
@@ -124,7 +127,7 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job 
 				mergeNote = "the auto-merge loop is running"
 			}
 			notifier.Send(job.NotePath,
-				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **done**: %s -- %s.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL, mergeNote),
+				fmt.Sprintf("<@%s> Task `%s` (%s) is **done**: %s -- %s.", cfg.DiscordUserID, job.Slug, job.Repo, prURL, mergeNote),
 				"", "")
 			return
 		}
