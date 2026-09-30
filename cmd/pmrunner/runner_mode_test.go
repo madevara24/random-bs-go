@@ -86,7 +86,9 @@ func waitForAlert(t *testing.T, alerts <-chan capturedDiscordAlert) capturedDisc
 // message must carry the PR link and drop the .md attachment entirely,
 // with wording that depends on auto_merge -- manual-merge wording when
 // false, auto-merge-loop wording when true, since OnTerminal fires before
-// the merge gate runs and can't claim the PR already merged.
+// the merge gate runs and can't claim the PR already merged. It must also
+// mention only Devara, not Ara-Dev -- a done task needs no help, so there's
+// no reason for the `dev` Hermes gateway to auto-thread a reply to it.
 func TestTerminalHandlerDone(t *testing.T) {
 	const prURL = "https://github.com/example/repo/pull/42"
 
@@ -121,8 +123,8 @@ func TestTerminalHandlerDone(t *testing.T) {
 			if !strings.Contains(got.content, "<@12345>") {
 				t.Errorf("message %q missing Devara mention", got.content)
 			}
-			if !strings.Contains(got.content, "<@67890>") {
-				t.Errorf("message %q missing Ara-Dev mention", got.content)
+			if strings.Contains(got.content, "<@67890>") {
+				t.Errorf("message %q has Ara-Dev mention, want none for a done task", got.content)
 			}
 		})
 	}
