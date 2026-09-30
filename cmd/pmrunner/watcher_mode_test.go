@@ -44,7 +44,9 @@ func emptyVault(t *testing.T) *vaultgit.Vault {
 // TestRunOneWatchCycleHealthCheckFailedMentionsBoth confirms the Tier 1
 // /health-check-failed alert mentions both Devara and Ara-Dev -- the `dev`
 // gateway auto-threads its reply off its own mention, so every alert shape
-// runOneWatchCycle can fire needs it, not just task-blocked ones.
+// runOneWatchCycle can fire needs it, not just task-blocked ones. It has to
+// drive the cycle healthAlertThreshold times since a single failed cycle no
+// longer alerts on its own.
 func TestRunOneWatchCycleHealthCheckFailedMentionsBoth(t *testing.T) {
 	badRunner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -56,8 +58,11 @@ func TestRunOneWatchCycleHealthCheckFailedMentionsBoth(t *testing.T) {
 
 	w := &watcher.Watcher{BaseURL: badRunner.URL, Vault: emptyVault(t), HealthHTTPTimeout: 2 * time.Second}
 	notifier := &notify.Notifier{WebhookURL: discord.URL}
+	healthAlerts := &healthAlertDebouncer{}
 
-	runOneWatchCycle(w, notifier, watcherTestCfg())
+	for i := 0; i < healthAlertThreshold; i++ {
+		runOneWatchCycle(w, notifier, watcherTestCfg(), healthAlerts)
+	}
 
 	got := waitForAlert(t, alerts)
 	assertBothMentions(t, got.content)
@@ -99,7 +104,7 @@ func TestRunOneWatchCycleStaleTaskMentionsBoth(t *testing.T) {
 	}
 	notifier := &notify.Notifier{WebhookURL: discord.URL}
 
-	runOneWatchCycle(w, notifier, watcherTestCfg())
+	runOneWatchCycle(w, notifier, watcherTestCfg(), &healthAlertDebouncer{})
 
 	got := waitForAlert(t, alerts)
 	assertBothMentions(t, got.content)
@@ -144,8 +149,71 @@ func TestRunOneWatchCycleUnnotifiedNoteMentionsBoth(t *testing.T) {
 	}
 	notifier := &notify.Notifier{WebhookURL: discord.URL}
 
-	runOneWatchCycle(w, notifier, watcherTestCfg())
+	runOneWatchCycle(w, notifier, watcherTestCfg(), &healthAlertDebouncer{})
 
 	got := waitForAlert(t, alerts)
 	assertBothMentions(t, got.content)
+}
+
+// TestHealthAlertDebouncer covers the debounce contract runOneWatchCycle
+// relies on: a lone failure stays quiet, healthAlertThreshold consecutive
+// failures alert exactly once, and a success in between resets the streak
+// so the next alert again needs a full healthAlertThreshold run.
+func TestHealthAlertDebouncer(t *testing.T) {
+	d := &healthAlertDebouncer{}
+
+	if d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("a single failure must not alert")
+	}
+	if d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("two consecutive failures must not alert (threshold is 3)")
+	}
+	if !d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("the 3rd consecutive failure must alert")
+	}
+	if d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("a 4th consecutive failure must not alert again on its own")
+	}
+
+	if d.Observe(watcher.HealthOK) {
+		t.Fatal("HealthOK must never alert")
+	}
+
+	if d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("after a reset, 1 failure must not alert")
+	}
+	if d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("after a reset, 2 failures must not alert")
+	}
+	if !d.Observe(watcher.HealthConnectionRefused) {
+		t.Fatal("after a reset, the 3rd consecutive failure must alert again")
+	}
+}
+
+// TestRunOneWatchCycleHealthCheckFailedDoesNotAlertBelowThreshold confirms
+// runOneWatchCycle stays quiet on the webhook through the first
+// healthAlertThreshold-1 failed cycles -- this is the deploy-restart race
+// the debounce exists for.
+func TestRunOneWatchCycleHealthCheckFailedDoesNotAlertBelowThreshold(t *testing.T) {
+	badRunner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badRunner.Close()
+
+	discord, alerts := capturingDiscordServer(t)
+	defer discord.Close()
+
+	w := &watcher.Watcher{BaseURL: badRunner.URL, Vault: emptyVault(t), HealthHTTPTimeout: 2 * time.Second}
+	notifier := &notify.Notifier{WebhookURL: discord.URL}
+	healthAlerts := &healthAlertDebouncer{}
+
+	for i := 0; i < healthAlertThreshold-1; i++ {
+		runOneWatchCycle(w, notifier, watcherTestCfg(), healthAlerts)
+	}
+
+	select {
+	case got := <-alerts:
+		t.Fatalf("unexpected alert before threshold reached: %q", got.content)
+	case <-time.After(200 * time.Millisecond):
+	}
 }

@@ -15,6 +15,35 @@ import (
 // catch a dead pipeline promptly.
 const pollInterval = 60 * time.Second
 
+// healthAlertThreshold is how many consecutive failed /health cycles must
+// happen before the watcher sends a webhook. A deploy restarts
+// pmrunner-runner and pmrunner-watcher together, so the watcher's very
+// first cycle routinely loses the race against the runner binding its
+// port; 3 cycles (3 minutes at pollInterval=60s) rides that out without
+// staying quiet through a real outage for long.
+const healthAlertThreshold = 3
+
+// healthAlertDebouncer tracks consecutive Tier 1 /health failures across
+// watch cycles and decides when the failure streak is long enough to
+// alert. It holds no notifier or HTTP client, so it stays trivially
+// testable independent of how the alert is actually sent.
+type healthAlertDebouncer struct {
+	consecutiveFailures int
+}
+
+// Observe records one cycle's health result and reports whether this
+// cycle should alert. It returns true exactly once per failure streak --
+// on the cycle where consecutive failures first reach
+// healthAlertThreshold -- and resets the streak to zero on HealthOK.
+func (d *healthAlertDebouncer) Observe(health watcher.HealthResult) bool {
+	if health == watcher.HealthOK {
+		d.consecutiveFailures = 0
+		return false
+	}
+	d.consecutiveFailures++
+	return d.consecutiveFailures == healthAlertThreshold
+}
+
 // runWatcher is the entrypoint for `pmrunner watcher` (pmwatch): runs three
 // checks every pollInterval, forever -- Tier 1 /health, Tier 2
 // /status/tasks (only if Tier 1 succeeded), and an independent direct
@@ -36,19 +65,23 @@ func runWatcher(cfg *config.Config) {
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
 	}
 
+	healthAlerts := &healthAlertDebouncer{}
 	for {
-		runOneWatchCycle(w, notifier, cfg)
+		runOneWatchCycle(w, notifier, cfg, healthAlerts)
 		time.Sleep(pollInterval)
 	}
 }
 
-func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config.Config) {
+func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config.Config, healthAlerts *healthAlertDebouncer) {
 	health, err := w.CheckHealth()
 	if health != watcher.HealthOK {
 		fmt.Printf("[watcher] /health check failed: %v (%v)\n", health, err)
-		notifier.Send("", fmt.Sprintf("<@%s> <@%s> pmwatch: runner daemon health check failed -- %v (%v)", cfg.DiscordUserID, cfg.DiscordAraDevUserID, health, err),
-			"health-check.md", fmt.Sprintf("# Runner health check failed\n\n- Result: %v\n- Error: %v\n", health, err))
+		if healthAlerts.Observe(health) {
+			notifier.Send("", fmt.Sprintf("<@%s> <@%s> pmwatch: runner daemon health check failed -- %v (%v)", cfg.DiscordUserID, cfg.DiscordAraDevUserID, health, err),
+				"health-check.md", fmt.Sprintf("# Runner health check failed\n\n- Result: %v\n- Error: %v\n", health, err))
+		}
 	} else {
+		healthAlerts.Observe(health)
 		_, stale, err := w.CheckStatusTasks()
 		if err != nil {
 			fmt.Printf("[watcher] /status/tasks check failed: %v\n", err)
