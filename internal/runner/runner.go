@@ -50,6 +50,16 @@ type Deps struct {
 	// point it at a fake stub script instead of the real binary.
 	ClaudeBin string
 
+	// PostClaim, if non-nil, posts a fresh task's Discord forum claim
+	// message (thread_name + content, no mentions) and returns the new
+	// thread's ID -- nil means DISCORD_TASK_FORUM_WEBHOOK_URL is unset, so
+	// no claim post happens and every later message for this task falls
+	// back to the plain top-level webhook. Injected (rather than this
+	// package importing notify directly) for the same reason as every
+	// other Deps callback: main.go is the only place that wires concrete
+	// Discord behavior in.
+	PostClaim func(threadName, content string) (threadID string, err error)
+
 	// IdleTimeout is how long the stream-json output may go silent before
 	// the watchdog kills the process group. Same shared setting as the
 	// watcher's own staleness threshold -- one config key
@@ -83,8 +93,10 @@ type Deps struct {
 	// if set, else the repo's auto_merge_default), the same value the merge
 	// gate decision below uses. prURL is the copy's pr_url as of this
 	// merge-back. This fires before runMergeGateForTask below, so for a
-	// done+auto_merge task the PR is opened, not merged yet.
-	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL string)
+	// done+auto_merge task the PR is opened, not merged yet. discordThreadID
+	// is the task's discord_thread_id if it has one (empty otherwise) --
+	// the caller routes the message there instead of the top-level webhook.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -94,8 +106,9 @@ type Deps struct {
 
 	// OnRoundLimitHit fires if the merge-gate loop exhausts its round
 	// budget without a clean merge -- the PR stays open, status stays
-	// "done", this is purely the alert.
-	OnRoundLimitHit func(job worker.Job, prURL string)
+	// "done", this is purely the alert. discordThreadID is the same value
+	// OnTerminal saw for this task.
+	OnRoundLimitHit func(job worker.Job, prURL, discordThreadID string)
 }
 
 func (d Deps) claudeBin() string {
@@ -160,16 +173,23 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 				repoCfg: repoCfg,
 			})
 		}
+
+		if deps.PostClaim != nil {
+			postTaskClaim(deps, job, note)
+		}
 	}
+
+	discordThreadID := threadIDOf(note)
 
 	branchName := fmt.Sprintf("task/%s-%s", job.Slug, time.Now().Format("2006-01-02"))
 	if !resume {
 		if err := pullAndBranch(repoCfg, branchName); err != nil {
 			return handleSetupFailure(deps, job, setupFailureInfo{
-				stage:      setupStagePullAndBranch,
-				err:        fmt.Errorf("setting up branch for %s: %w", job.Slug, err),
-				repoCfg:    repoCfg,
-				branchName: branchName,
+				stage:           setupStagePullAndBranch,
+				err:             fmt.Errorf("setting up branch for %s: %w", job.Slug, err),
+				repoCfg:         repoCfg,
+				branchName:      branchName,
+				discordThreadID: discordThreadID,
 			})
 		}
 	}
@@ -178,22 +198,24 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	copyPath := filepath.Join(repoCfg.Path, copyName)
 	if err := writeNoteCopy(note, copyPath); err != nil {
 		return handleSetupFailure(deps, job, setupFailureInfo{
-			stage:      setupStageWriteNoteCopy,
-			err:        fmt.Errorf("writing note-copy for %s: %w", job.Slug, err),
-			repoCfg:    repoCfg,
-			branchName: branchName,
-			copyPath:   copyPath,
-			resume:     resume,
+			stage:           setupStageWriteNoteCopy,
+			err:             fmt.Errorf("writing note-copy for %s: %w", job.Slug, err),
+			repoCfg:         repoCfg,
+			branchName:      branchName,
+			copyPath:        copyPath,
+			resume:          resume,
+			discordThreadID: discordThreadID,
 		})
 	}
 	if err := excludeFromGit(repoCfg.Path, copyName); err != nil {
 		return handleSetupFailure(deps, job, setupFailureInfo{
-			stage:      setupStageExcludeFromGit,
-			err:        fmt.Errorf("excluding note-copy for %s: %w", job.Slug, err),
-			repoCfg:    repoCfg,
-			branchName: branchName,
-			copyPath:   copyPath,
-			resume:     resume,
+			stage:           setupStageExcludeFromGit,
+			err:             fmt.Errorf("excluding note-copy for %s: %w", job.Slug, err),
+			repoCfg:         repoCfg,
+			branchName:      branchName,
+			copyPath:        copyPath,
+			resume:          resume,
+			discordThreadID: discordThreadID,
 		})
 	}
 
@@ -238,13 +260,14 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			scenario = ScenarioParseFailure
 		}
 		return handleCrashFallback(deps, job, crashInfo{
-			scenario:   scenario,
-			stage:      "result read-back",
-			exitErr:    exitErr,
-			stderrTail: stderrTail,
-			repoPath:   repoCfg.Path,
-			branchName: branchName,
-			sessionID:  sessionID,
+			scenario:        scenario,
+			stage:           "result read-back",
+			exitErr:         exitErr,
+			stderrTail:      stderrTail,
+			repoPath:        repoCfg.Path,
+			branchName:      branchName,
+			sessionID:       sessionID,
+			discordThreadID: discordThreadID,
 		})
 
 	case !isTerminalStatus(copyAfter.Frontmatter.Status):
@@ -252,15 +275,16 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		// Per the same trust rule, the runner *can* still fold in whatever
 		// did parse (e.g. partial Work Log content) before marking blocked.
 		return handleCrashFallback(deps, job, crashInfo{
-			scenario:      ScenarioNonTerminal,
-			stage:         "result read-back",
-			exitErr:       exitErr,
-			stderrTail:    stderrTail,
-			repoPath:      repoCfg.Path,
-			branchName:    branchName,
-			sessionID:     sessionID,
-			partialCopy:   copyAfter,
-			haveCopyToUse: true,
+			scenario:        ScenarioNonTerminal,
+			stage:           "result read-back",
+			exitErr:         exitErr,
+			stderrTail:      stderrTail,
+			repoPath:        repoCfg.Path,
+			branchName:      branchName,
+			sessionID:       sessionID,
+			partialCopy:     copyAfter,
+			haveCopyToUse:   true,
+			discordThreadID: discordThreadID,
 		})
 
 	case copyAfter.Frontmatter.Status == "done" && !hasPRURL(copyAfter.Frontmatter.PRURL):
@@ -269,15 +293,16 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		// non-terminal case above: fold in whatever did parse before marking
 		// blocked, rather than merging in a false "clean done".
 		return handleCrashFallback(deps, job, crashInfo{
-			scenario:      ScenarioDoneWithoutPR,
-			stage:         "result read-back",
-			exitErr:       exitErr,
-			stderrTail:    stderrTail,
-			repoPath:      repoCfg.Path,
-			branchName:    branchName,
-			sessionID:     sessionID,
-			partialCopy:   copyAfter,
-			haveCopyToUse: true,
+			scenario:        ScenarioDoneWithoutPR,
+			stage:           "result read-back",
+			exitErr:         exitErr,
+			stderrTail:      stderrTail,
+			repoPath:        repoCfg.Path,
+			branchName:      branchName,
+			sessionID:       sessionID,
+			partialCopy:     copyAfter,
+			haveCopyToUse:   true,
+			discordThreadID: discordThreadID,
 		})
 	}
 
@@ -308,11 +333,11 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID)
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
-		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL)
+		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID)
 	}
 
 	return nil
@@ -322,7 +347,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 // just landed on done+auto_merge+a real pr_url. Failures here are logged
 // and (on round exhaustion specifically) alerted -- they never change the
 // vault note's status, which stays "done" even when the loop exhausts.
-func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) {
+func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, discordThreadID string) {
 	reporter.SetStage("review/CI merge-gate loop")
 
 	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL)
@@ -333,7 +358,7 @@ func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.Re
 	case errors.Is(err, ErrRoundLimitHit):
 		fmt.Printf("[runner] task %s: merge-gate loop hit its round limit without merging\n", job.Slug)
 		if deps.OnRoundLimitHit != nil {
-			deps.OnRoundLimitHit(job, prURL)
+			deps.OnRoundLimitHit(job, prURL, discordThreadID)
 		}
 	default:
 		fmt.Printf("[runner] task %s: merge-gate loop ended with an error: %v\n", job.Slug, err)
@@ -368,6 +393,65 @@ func derefStr(s *string) string {
 		return "<nil>"
 	}
 	return *s
+}
+
+// threadIDOf is note's discord_thread_id, or "" if it doesn't have one yet
+// (claimed before per-task threads existed, or its claim post failed) --
+// the routing value every later Discord message for this task carries.
+func threadIDOf(note *notetask.Note) string {
+	if note == nil || note.Frontmatter.DiscordThreadID == nil {
+		return ""
+	}
+	return *note.Frontmatter.DiscordThreadID
+}
+
+// taskTitle is the task's title as used in its Discord thread: the note's
+// filename without ".md", e.g. "MDC-10 Commit SHA in Health and Deploy
+// Poll" for "Tasks/MDC-10 Commit SHA in Health and Deploy Poll.md".
+func taskTitle(notePath string) string {
+	return strings.TrimSuffix(filepath.Base(notePath), ".md")
+}
+
+// discordThreadNameLimit is Discord's own cap on a forum post's
+// thread_name.
+const discordThreadNameLimit = 100
+
+func truncateThreadName(s string) string {
+	r := []rune(s)
+	if len(r) <= discordThreadNameLimit {
+		return s
+	}
+	return string(r[:discordThreadNameLimit])
+}
+
+// postTaskClaim posts a fresh task's Discord forum claim message and, on
+// success, persists the returned thread ID to the vault note's
+// discord_thread_id -- and to note itself, so the rest of this ProcessTask
+// call sees it immediately without a further vault read. Best-effort: a
+// failure here (the post itself, or saving the frontmatter) is logged and
+// the task proceeds -- a Discord outage must never block a task, and its
+// later messages simply fall back to the plain top-level webhook. The
+// claim's Runner Log entry is "claim_notified", deliberately distinct from
+// "notified"/"notify_failed", so the watcher's "no Discord notification
+// ever recorded" scan (which only checks for those two) keeps firing if a
+// later, real terminal message fails even though the claim succeeded.
+func postTaskClaim(deps Deps, job worker.Job, note *notetask.Note) {
+	title := taskTitle(job.NotePath)
+	threadID, err := deps.PostClaim(truncateThreadName(title), fmt.Sprintf("Task `%s` is claimed", title))
+	if err != nil {
+		fmt.Printf("[runner] task %s: forum claim post failed, later messages fall back to the top-level webhook: %v\n", job.Slug, err)
+		return
+	}
+	werr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: claim thread %s", job.Slug), func(n *notetask.Note) error {
+		n.Frontmatter.DiscordThreadID = &threadID
+		notetask.AppendRunnerLog(n, "claim_notified", time.Now())
+		return nil
+	})
+	if werr != nil {
+		fmt.Printf("[runner] task %s: forum claim post succeeded (thread %s) but saving discord_thread_id failed, later messages fall back to the top-level webhook: %v\n", job.Slug, threadID, werr)
+		return
+	}
+	note.Frontmatter.DiscordThreadID = &threadID
 }
 
 // readNoteCopy reads and parses the note-copy from the target repo.

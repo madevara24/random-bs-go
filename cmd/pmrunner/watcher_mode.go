@@ -55,8 +55,9 @@ func runWatcher(cfg *config.Config) {
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
 	notifier := &notify.Notifier{
-		RunnerLogURL: fmt.Sprintf("http://127.0.0.1:%d/runner-log", cfg.HTTPPort),
-		WebhookURL:   cfg.DiscordWebhookURL,
+		RunnerLogURL:    fmt.Sprintf("http://127.0.0.1:%d/runner-log", cfg.HTTPPort),
+		WebhookURL:      cfg.DiscordWebhookURL,
+		ForumWebhookURL: cfg.DiscordTaskForumWebhookURL,
 	}
 
 	w := &watcher.Watcher{
@@ -77,7 +78,7 @@ func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config
 	if health != watcher.HealthOK {
 		fmt.Printf("[watcher] /health check failed: %v (%v)\n", health, err)
 		if healthAlerts.Observe(health) {
-			notifier.Send("", fmt.Sprintf("<@%s> <@%s> pmwatch: runner daemon health check failed -- %v (%v)", cfg.DiscordUserID, cfg.DiscordAraDevUserID, health, err),
+			notifier.Send("", "", fmt.Sprintf("<@%s> <@%s> pmwatch: runner daemon health check failed -- %v (%v)", cfg.DiscordUserID, cfg.DiscordAraDevUserID, health, err),
 				"health-check.md", fmt.Sprintf("# Runner health check failed\n\n- Result: %v\n- Error: %v\n", health, err))
 		}
 	} else {
@@ -88,7 +89,7 @@ func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config
 		}
 		for _, s := range stale {
 			fmt.Printf("[watcher] stale task detected: repo=%s slug=%s idle_for=%v\n", s.RepoKey, s.Slug, s.IdleFor)
-			notifier.Send("", fmt.Sprintf("<@%s> <@%s> pmwatch: task `%s` (%s) looks wedged -- idle for %v.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, s.Slug, s.RepoKey, s.IdleFor),
+			notifier.Send("", s.DiscordThreadID, fmt.Sprintf("<@%s> <@%s> pmwatch: task `%s` (%s) looks wedged -- idle for %v.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, s.Slug, s.RepoKey, s.IdleFor),
 				s.Slug+"-stale.md", fmt.Sprintf("# Stale task detected\n\n- Repo: %s\n- Slug: %s\n- Stage: %s\n- Idle for: %v\n", s.RepoKey, s.Slug, s.Stage, s.IdleFor))
 		}
 	}
@@ -100,7 +101,7 @@ func runOneWatchCycle(w *watcher.Watcher, notifier *notify.Notifier, cfg *config
 	}
 	for _, u := range unnotified {
 		fmt.Printf("[watcher] unnotified terminal note detected: %s status=%s age=%v\n", u.RelPath, u.Status, u.Age)
-		notifier.Send(u.RelPath, fmt.Sprintf("<@%s> <@%s> pmwatch: task `%s` reached status `%s` %v ago with no Discord notification ever recorded.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, u.Slug, u.Status, u.Age),
+		notifier.Send(u.RelPath, u.DiscordThreadID, fmt.Sprintf("<@%s> <@%s> pmwatch: task `%s` reached status `%s` %v ago with no Discord notification ever recorded.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, u.Slug, u.Status, u.Age),
 			u.Slug+"-unnotified.md", fmt.Sprintf("# Lost notification detected\n\n- Note: %s\n- Status: %s\n- Age: %v\n", u.RelPath, u.Status, u.Age))
 	}
 }

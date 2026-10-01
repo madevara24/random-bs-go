@@ -35,6 +35,12 @@ type Config struct {
 	VaultDefaultBranch  string
 	HTTPPort            int
 
+	// DiscordTaskForumWebhookURL is optional -- a forum-channel webhook
+	// used to give each task its own Discord thread. Empty means the
+	// rollout switch is off: every message behaves exactly as before,
+	// posted top-level via DiscordWebhookURL.
+	DiscordTaskForumWebhookURL string
+
 	// From repos.json
 	Repos map[string]RepoConfig
 
@@ -173,6 +179,10 @@ func Load(envPath, reposPath string) (*Config, error) {
 			return nil, fmt.Errorf("config: HTTP_PORT must be a valid port number, got %q (in %s)", v, envPath)
 		}
 		cfg.HTTPPort = n
+	}
+
+	if v, ok := raw["DISCORD_TASK_FORUM_WEBHOOK_URL"]; ok && v != "" {
+		cfg.DiscordTaskForumWebhookURL = v
 	}
 
 	repos, err := loadRepos(reposPath)

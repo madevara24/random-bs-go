@@ -51,7 +51,7 @@ func TestSendRetriesExactlyOnceThenNotifyFailed(t *testing.T) {
 	}
 
 	n := &Notifier{Vault: v, WebhookURL: srv.URL}
-	n.sendSync(relPath, "test message", "test.md", "test attachment body")
+	n.sendSync(relPath, "", "test message", "test.md", "test attachment body")
 
 	if got := hitCount.Load(); got != 2 {
 		t.Errorf("webhook hit %d times, want exactly 2 (1 attempt + 1 retry)", got)
@@ -99,7 +99,7 @@ func TestSendSucceedsFirstTryNotified(t *testing.T) {
 	}
 
 	n := &Notifier{Vault: v, WebhookURL: srv.URL}
-	n.sendSync(relPath, "test message", "test.md", "test attachment body")
+	n.sendSync(relPath, "", "test message", "test.md", "test attachment body")
 
 	if got := hitCount.Load(); got != 1 {
 		t.Errorf("webhook hit %d times, want exactly 1 (no retry needed)", got)
@@ -145,7 +145,7 @@ func TestSendAgainstRealWebhook(t *testing.T) {
 	}
 
 	n := &Notifier{Vault: v, WebhookURL: webhookURL}
-	n.sendSync(relPath,
+	n.sendSync(relPath, "",
 		"[PM RUNNER GO REWRITE -- TEST FIRE, NOT A REAL TASK ALERT] Phase 10 notify.Send test.",
 		"phase10-test.md", "# Phase 10 test\n\nThis is a disposable test fire from the Go rewrite's test suite, not a real task alert.\n")
 
@@ -187,7 +187,7 @@ func TestSendWithRunnerLogURLPostsInsteadOfWritingVault(t *testing.T) {
 	defer discord.Close()
 
 	n := &Notifier{RunnerLogURL: srv.URL, WebhookURL: discord.URL}
-	n.sendSync("Tasks/some-note.md", "test message", "test.md", "test attachment body")
+	n.sendSync("Tasks/some-note.md", "", "test message", "test.md", "test attachment body")
 
 	if !hit.Load() {
 		t.Fatal("RunnerLogURL was never called")
@@ -217,7 +217,7 @@ func TestSendReturnsImmediately(t *testing.T) {
 
 	n := &Notifier{WebhookURL: srv.URL}
 	start := time.Now()
-	n.Send("", "msg", "a.md", "body")
+	n.Send("", "", "msg", "a.md", "body")
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Errorf("Send blocked for %v, want it to return almost immediately", elapsed)
 	}
@@ -255,7 +255,7 @@ func TestSendSyncSurfacesRunnerLogAppendFailure(t *testing.T) {
 	}
 
 	n := &Notifier{Vault: v, WebhookURL: srv.URL}
-	n.sendSync(relPath, "test message", "test.md", "test attachment body")
+	n.sendSync(relPath, "", "test message", "test.md", "test attachment body")
 
 	mu.Lock()
 	got := append([]string(nil), bodies...)
@@ -290,7 +290,7 @@ func TestPostDiscordAlertWithoutAttachment(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := postDiscordAlert(srv.URL, "plain warning message", "", ""); err != nil {
+	if err := postDiscordAlert(srv.URL, "", "plain warning message", "", ""); err != nil {
 		t.Fatalf("postDiscordAlert returned error: %v", err)
 	}
 

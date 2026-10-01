@@ -58,11 +58,12 @@ func (r HealthResult) String() string {
 // though today they're compiled into the same binary) -- decodes the same
 // JSON shape independently.
 type TaskStatus struct {
-	Slug           string    `json:"slug"`
-	Repo           string    `json:"repo"`
-	StartedAt      time.Time `json:"started_at"`
-	LastActivityAt time.Time `json:"last_activity_at"`
-	Stage          string    `json:"stage"`
+	Slug            string    `json:"slug"`
+	Repo            string    `json:"repo"`
+	StartedAt       time.Time `json:"started_at"`
+	LastActivityAt  time.Time `json:"last_activity_at"`
+	Stage           string    `json:"stage"`
+	DiscordThreadID string    `json:"discord_thread_id"`
 }
 
 // StaleTask is a task flagged by gap 2 -- wedged session.
@@ -74,10 +75,11 @@ type StaleTask struct {
 
 // UnnotifiedNote is a note flagged by gap 3 -- lost success notice.
 type UnnotifiedNote struct {
-	RelPath string
-	Slug    string
-	Status  string
-	Age     time.Duration
+	RelPath         string
+	Slug            string
+	Status          string
+	Age             time.Duration
+	DiscordThreadID string
 }
 
 // Watcher holds everything the pmwatch checks need.
@@ -234,11 +236,16 @@ func (w *Watcher) ScanForUnnotified(ageThreshold time.Duration) ([]UnnotifiedNot
 		if relErr != nil {
 			relPath = m
 		}
+		threadID := ""
+		if note.Frontmatter.DiscordThreadID != nil {
+			threadID = *note.Frontmatter.DiscordThreadID
+		}
 		out = append(out, UnnotifiedNote{
-			RelPath: relPath,
-			Slug:    slugFromPath(relPath),
-			Status:  note.Frontmatter.Status,
-			Age:     age,
+			RelPath:         relPath,
+			Slug:            slugFromPath(relPath),
+			Status:          note.Frontmatter.Status,
+			Age:             age,
+			DiscordThreadID: threadID,
 		})
 	}
 	return out, nil

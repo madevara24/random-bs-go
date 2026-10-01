@@ -84,6 +84,11 @@ type setupFailureInfo struct {
 	// the only two of the five steps that still run when resuming; cleanup
 	// must never delete that branch in that case.
 	resume bool
+
+	// discordThreadID is the task's discord_thread_id, if it has one by
+	// this stage -- empty for the first two stages (the claim post, if
+	// any, hasn't happened yet at that point).
+	discordThreadID string
 }
 
 // handleSetupFailure is ProcessTask's error path for the five setup steps
@@ -117,14 +122,15 @@ func handleSetupFailure(deps Deps, job worker.Job, info setupFailureInfo) error 
 	}
 
 	payload := AlertPayload{
-		Slug:        job.Slug,
-		Repo:        job.Repo,
-		Scenario:    ScenarioSetupFailure,
-		Stage:       "setup: " + info.stage.String(),
-		ExitCode:    -1,
-		ExitErrText: info.err.Error(),
-		PRState:     "unknown (task never reached invocation)",
-		LogPointer:  "(per-task transcript logging not yet built -- see Design - Runner.md's Open section)",
+		Slug:            job.Slug,
+		Repo:            job.Repo,
+		Scenario:        ScenarioSetupFailure,
+		Stage:           "setup: " + info.stage.String(),
+		DiscordThreadID: info.discordThreadID,
+		ExitCode:        -1,
+		ExitErrText:     info.err.Error(),
+		PRState:         "unknown (task never reached invocation)",
+		LogPointer:      "(per-task transcript logging not yet built -- see Design - Runner.md's Open section)",
 	}
 	if info.stage.repoTouched() {
 		payload.BranchExists, payload.HasUncommittedChanges = inspectRepoState(info.repoCfg.Path, info.branchName)

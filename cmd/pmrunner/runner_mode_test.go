@@ -108,7 +108,7 @@ func TestTerminalHandlerDone(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier)
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL)
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "")
 
 			got := waitForAlert(t, alerts)
 			if got.hasFile {
@@ -142,7 +142,7 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier)
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "")
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "")
 
 			got := waitForAlert(t, alerts)
 			if !got.hasFile {

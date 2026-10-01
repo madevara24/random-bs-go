@@ -20,14 +20,15 @@ import (
 // particular needs nil to mean "not set, fall back to the repo's
 // auto_merge_default" as distinct from an explicit `false`.
 type Frontmatter struct {
-	Status      string  `yaml:"status"`
-	Repo        string  `yaml:"repo"`
-	AutoMerge   *bool   `yaml:"auto_merge"`
-	SessionID   *string `yaml:"session_id"`
-	PRURL       *string `yaml:"pr_url"`
-	LastUpdated *string `yaml:"last_updated"`
-	Created     string  `yaml:"created"`
-	ReadyAt     *string `yaml:"ready_at"`
+	Status          string  `yaml:"status"`
+	Repo            string  `yaml:"repo"`
+	AutoMerge       *bool   `yaml:"auto_merge"`
+	SessionID       *string `yaml:"session_id"`
+	PRURL           *string `yaml:"pr_url"`
+	LastUpdated     *string `yaml:"last_updated"`
+	Created         string  `yaml:"created"`
+	ReadyAt         *string `yaml:"ready_at"`
+	DiscordThreadID *string `yaml:"discord_thread_id"`
 }
 
 // RunnerLogEntry is one line of the "## Runner Log" section.

@@ -136,6 +136,58 @@ func TestStatusTasksReportsOnlyBusyRepos(t *testing.T) {
 	}
 }
 
+// TestStatusTasksReportsDiscordThreadID confirms /status/tasks looks up
+// the busy task's discord_thread_id via a plain read-only Vault.ReadNote --
+// how the watcher (a separate process with no vault clone of its own)
+// learns which thread its own "looks wedged" alert belongs in.
+func TestStatusTasksReportsDiscordThreadID(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/httpapi-threadid-%s.md", run)
+	threadID := "thread-xyz-789"
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "in_progress", Repo: "busy-repo", Created: "2026-09-15", DiscordThreadID: &threadID,
+	}, "Status-tasks discord_thread_id test task.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	globalSlots := worker.NewGlobalSlots(1)
+	busyWorker := worker.New("busy-repo", globalSlots, func(job worker.Job) error {
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	})
+	workers := worker.Workers{"busy-repo": busyWorker}
+	workers.StartAll()
+	busyWorker.Enqueue(worker.Job{Repo: "busy-repo", Slug: "busy-slug", NotePath: relPath})
+	time.Sleep(20 * time.Millisecond) // let it actually start
+
+	s := New(make(chan struct{}, 1), workers, v)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	var got map[string]TaskStatusWire
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	busy, ok := got["busy-repo"]
+	if !ok {
+		t.Fatalf("busy-repo missing from response: %+v", got)
+	}
+	if busy.DiscordThreadID != threadID {
+		t.Errorf("DiscordThreadID = %q, want %q", busy.DiscordThreadID, threadID)
+	}
+}
+
 func TestRunnerLogRejectsNonPost(t *testing.T) {
 	s := New(make(chan struct{}, 1), nil, nil)
 	ts := httptest.NewServer(s)
