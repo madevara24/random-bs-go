@@ -85,6 +85,11 @@ type crashInfo struct {
 	// to fold into the vault note before marking blocked.
 	haveCopyToUse bool
 	partialCopy   *notetask.Note
+
+	// discordThreadID is the task's discord_thread_id, if it has one --
+	// carried through to AlertPayload so the blocked alert routes into the
+	// task's own thread instead of the top-level webhook.
+	discordThreadID string
 }
 
 // AlertPayload is the crash-fallback alert's content -- a short Discord
@@ -97,6 +102,10 @@ type AlertPayload struct {
 	Repo     string
 	Scenario Scenario
 	Stage    string
+
+	// DiscordThreadID is the task's discord_thread_id, if it has one --
+	// the caller routes this alert there instead of the top-level webhook.
+	DiscordThreadID string
 
 	WatchdogKilled bool
 	ExitCode       int // -1 if unknown/signal-terminated
@@ -224,6 +233,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		Repo:                  job.Repo,
 		Scenario:              info.scenario,
 		Stage:                 info.stage,
+		DiscordThreadID:       info.discordThreadID,
 		WatchdogKilled:        errorIsIdleTimeout(info.exitErr),
 		ExitCode:              exitCodeOf(info.exitErr),
 		StderrTail:            info.stderrTail,

@@ -86,11 +86,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // TaskStatusWire is GET /status/tasks's per-repo JSON shape.
 type TaskStatusWire struct {
-	Slug           string    `json:"slug"`
-	Repo           string    `json:"repo"`
-	StartedAt      time.Time `json:"started_at"`
-	LastActivityAt time.Time `json:"last_activity_at"`
-	Stage          string    `json:"stage"`
+	Slug            string    `json:"slug"`
+	Repo            string    `json:"repo"`
+	StartedAt       time.Time `json:"started_at"`
+	LastActivityAt  time.Time `json:"last_activity_at"`
+	Stage           string    `json:"stage"`
+	DiscordThreadID string    `json:"discord_thread_id"`
 }
 
 // handleStatusTasks reads every RepoWorker.currentTask under its own
@@ -99,6 +100,14 @@ type TaskStatusWire struct {
 // Tier 2 of the watcher's checks, only called after Tier 1 (/health)
 // already succeeded, so a real delay here specifically means "stuck on a
 // per-repo lock," not "daemon down."
+//
+// DiscordThreadID is looked up here, via a plain read-only Vault.ReadNote
+// of the task's own note -- the watcher runs in a separate OS process with
+// no vault clone of its own (see notify.Notifier.RunnerLogURL's doc
+// comment for the two-process git-lock collision that already ruled out
+// giving it one), so this is how it learns which thread its own "looks
+// wedged" alert belongs in without reintroducing that collision:
+// ReadNote never takes Vault's write mutex, only WriteNote does.
 func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 	out := map[string]TaskStatusWire{}
 	for repoKey, rw := range s.Workers {
@@ -107,16 +116,33 @@ func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out[repoKey] = TaskStatusWire{
-			Slug:           ts.Slug,
-			Repo:           ts.Repo,
-			StartedAt:      ts.StartedAt,
-			LastActivityAt: ts.LastActivityAt,
-			Stage:          ts.Stage,
+			Slug:            ts.Slug,
+			Repo:            ts.Repo,
+			StartedAt:       ts.StartedAt,
+			LastActivityAt:  ts.LastActivityAt,
+			Stage:           ts.Stage,
+			DiscordThreadID: s.discordThreadIDFor(ts.NotePath),
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// discordThreadIDFor best-effort reads notePath's discord_thread_id --
+// empty on a nil Vault, an empty notePath, a read failure, or a note that
+// never got a thread (claimed before per-task threads existed, or whose
+// claim post failed). Never an error: a missing thread ID just means the
+// caller falls back to the plain top-level webhook, same as always.
+func (s *Server) discordThreadIDFor(notePath string) string {
+	if s.Vault == nil || notePath == "" {
+		return ""
+	}
+	note, err := s.Vault.ReadNote(notePath)
+	if err != nil || note.Frontmatter.DiscordThreadID == nil {
+		return ""
+	}
+	return *note.Frontmatter.DiscordThreadID
 }
 
 // runnerLogRequest is POST /runner-log's JSON body.

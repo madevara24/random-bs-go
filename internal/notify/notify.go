@@ -26,6 +26,16 @@ type Notifier struct {
 	Vault      *vaultgit.Vault
 	WebhookURL string
 
+	// ForumWebhookURL, if set, is a forum-channel webhook used to route a
+	// task's messages into its own Discord thread. Optional -- empty means
+	// every message goes to WebhookURL at the top level, same as before
+	// per-task threads existed. Even when set, a given Send call only uses
+	// it if that call's own threadID is non-empty (see resolveTarget):
+	// a forum webhook can't post without either thread_name or thread_id,
+	// so anything not tied to one task's thread must still go to
+	// WebhookURL.
+	ForumWebhookURL string
+
 	// RunnerLogURL, if set, takes precedence over Vault: instead of
 	// writing the Runner Log outcome directly against the vault clone,
 	// sendSync POSTs it to the runner daemon's own /runner-log endpoint.
@@ -42,21 +52,37 @@ type Notifier struct {
 // and returns immediately -- doesn't block the caller's own per-repo
 // goroutine from popping its next task. If notePath is non-empty, the
 // outcome ("notified" or, after exhausting one retry, "notify_failed") is
-// appended to that note's Runner Log once the attempt(s) finish.
-func (n *Notifier) Send(notePath, message, attachmentName, attachmentBody string) {
-	go n.sendSync(notePath, message, attachmentName, attachmentBody)
+// appended to that note's Runner Log once the attempt(s) finish. threadID
+// is the task's discord_thread_id, if it has one -- see resolveTarget for
+// how it decides where the message actually goes.
+func (n *Notifier) Send(notePath, threadID, message, attachmentName, attachmentBody string) {
+	go n.sendSync(notePath, threadID, message, attachmentName, attachmentBody)
+}
+
+// resolveTarget decides which webhook a message actually goes to: the
+// forum webhook, posted into the task's own thread, only when both a
+// threadID and a configured ForumWebhookURL are present -- otherwise the
+// plain top-level webhook, exactly as before per-task threads existed.
+// Returns an empty threadID alongside the top-level URL so callers never
+// need a second check.
+func (n *Notifier) resolveTarget(threadID string) (url, effectiveThreadID string) {
+	if threadID != "" && n.ForumWebhookURL != "" {
+		return n.ForumWebhookURL, threadID
+	}
+	return n.WebhookURL, ""
 }
 
 // sendSync is the synchronous core -- exported behavior via Send's
 // goroutine wrapper, called directly (not via a goroutine)
 // by this package's own tests for deterministic assertions on the retry
 // count and the resulting Runner Log line.
-func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody string) {
-	err := postDiscordAlert(n.WebhookURL, message, attachmentName, attachmentBody)
+func (n *Notifier) sendSync(notePath, threadID, message, attachmentName, attachmentBody string) {
+	targetURL, effectiveThreadID := n.resolveTarget(threadID)
+	err := postDiscordAlert(targetURL, effectiveThreadID, message, attachmentName, attachmentBody)
 	event := "notified"
 	if err != nil {
 		fmt.Printf("[notify] first attempt failed, retrying once: %v\n", err)
-		err = postDiscordAlert(n.WebhookURL, message, attachmentName, attachmentBody)
+		err = postDiscordAlert(targetURL, effectiveThreadID, message, attachmentName, attachmentBody)
 		if err != nil {
 			fmt.Printf("[notify] retry also failed, giving up: %v\n", err)
 			event = "notify_failed"
@@ -83,7 +109,7 @@ func (n *Notifier) sendSync(notePath, message, attachmentName, attachmentBody st
 		// another Runner Log append and recurse into this same failure. No
 		// attachment, no @-mention: the alert this append was meant to
 		// record already carried the mention.
-		_ = postDiscordAlert(n.WebhookURL,
+		_ = postDiscordAlert(n.WebhookURL, "",
 			fmt.Sprintf("[runner] WARNING: could not append %q to the Runner Log for `%s`: %v", event, notePath, werr),
 			"", "")
 	}
@@ -120,7 +146,7 @@ func (n *Notifier) postRunnerLog(notePath, event string) {
 		// Same rule as sendSync's own append-failure warning above: called
 		// directly, not via Send, to avoid recursing into
 		// another Runner Log append. No attachment, no @-mention.
-		_ = postDiscordAlert(n.WebhookURL,
+		_ = postDiscordAlert(n.WebhookURL, "",
 			fmt.Sprintf("[runner] WARNING: could not append %q to the Runner Log for `%s`: runner-log endpoint returned status %d: %s", event, notePath, resp.StatusCode, respBody),
 			"", "")
 	}
@@ -128,7 +154,9 @@ func (n *Notifier) postRunnerLog(notePath, event string) {
 
 // postDiscordAlert sends one short message + one .md attachment on a
 // single Discord message, via the payload_json + fileN multipart shape.
-func postDiscordAlert(webhookURL, content, attachmentName, attachmentBody string) error {
+// threadID, if non-empty, routes the message into that existing Discord
+// thread (?thread_id=) instead of posting at the channel's top level.
+func postDiscordAlert(webhookURL, threadID, content, attachmentName, attachmentBody string) error {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 
@@ -156,7 +184,11 @@ func postDiscordAlert(webhookURL, content, attachmentName, attachmentBody string
 		return fmt.Errorf("closing multipart writer: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, webhookURL+"?wait=true", &buf)
+	url := webhookURL + "?wait=true"
+	if threadID != "" {
+		url += "&thread_id=" + threadID
+	}
+	req, err := http.NewRequest(http.MethodPost, url, &buf)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
@@ -172,6 +204,57 @@ func postDiscordAlert(webhookURL, content, attachmentName, attachmentBody string
 		return fmt.Errorf("discord returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// PostForumClaim creates a new Discord forum post (thread_name in the
+// body) via a forum-channel webhook -- the claim message that gives a
+// freshly claimed task its own thread. Synchronous, with a short timeout
+// and exactly one retry: callers need the returned thread ID (the starter
+// message's channel_id) before they can route anything else into it, and
+// a setup failure can fire seconds later needing that same ID. content
+// carries no @-mentions -- unlike every other alert this package sends,
+// a bare claim needs no one's attention yet.
+func PostForumClaim(forumWebhookURL, threadName, content string) (string, error) {
+	threadID, err := postForumClaimOnce(forumWebhookURL, threadName, content)
+	if err != nil {
+		fmt.Printf("[notify] forum claim post failed, retrying once: %v\n", err)
+		threadID, err = postForumClaimOnce(forumWebhookURL, threadName, content)
+	}
+	return threadID, err
+}
+
+func postForumClaimOnce(forumWebhookURL, threadName, content string) (string, error) {
+	body, err := json.Marshal(map[string]string{"thread_name": threadName, "content": content})
+	if err != nil {
+		return "", fmt.Errorf("marshaling forum claim payload: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, forumWebhookURL+"?wait=true", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("building forum claim request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("posting forum claim to discord: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("discord returned status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var decoded struct {
+		ChannelID string `json:"channel_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", fmt.Errorf("decoding forum claim response: %w", err)
+	}
+	if decoded.ChannelID == "" {
+		return "", fmt.Errorf("discord forum claim response missing channel_id")
+	}
+	return decoded.ChannelID, nil
 }
 
 // ReadWebhookURLFromEnvFile is a small convenience for tests/tools that

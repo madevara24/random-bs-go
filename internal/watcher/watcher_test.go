@@ -139,6 +139,66 @@ func TestScanForUnnotifiedIgnoresAlreadyNotified(t *testing.T) {
 	}
 }
 
+// TestScanForUnnotifiedFlagsClaimNotifiedOnlyNote confirms a note whose
+// Runner Log has only "claim_notified" (the forum claim post's own event,
+// never "notified"/"notify_failed") still gets flagged -- the claim
+// succeeding must never satisfy this check, so a terminal message that
+// really did fail to send keeps surfacing here even though the task got a
+// thread. Also confirms discord_thread_id round-trips onto the flagged
+// UnnotifiedNote, which is how the watcher learns which thread its own
+// alert belongs in.
+func TestScanForUnnotifiedFlagsClaimNotifiedOnlyNote(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/phase-rbg19-claimonly-%s.md", run)
+	threadID := "thread-abc-123"
+	note := &notetask.Note{
+		Frontmatter: notetask.Frontmatter{
+			Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+			DiscordThreadID: &threadID,
+		},
+		Prompt: "Claimed (thread created), but the later blocked message never sent.",
+	}
+	notetask.AppendRunnerLog(note, "in_progress", time.Now())
+	notetask.AppendRunnerLog(note, "claim_notified", time.Now())
+	notetask.AppendRunnerLog(note, "blocked", time.Now())
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("serializing: %v", err)
+	}
+	absPath := filepath.Join(testvault.Path, relPath)
+	if err := os.WriteFile(absPath, out, 0o644); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+	runGitSeed(t, relPath)
+	t.Cleanup(func() { runGitCleanup(t, relPath) })
+
+	w := &Watcher{Vault: v}
+	found, err := w.ScanForUnnotified(0)
+	if err != nil {
+		t.Fatalf("ScanForUnnotified: %v", err)
+	}
+	var match *UnnotifiedNote
+	for i := range found {
+		if found[i].RelPath == relPath {
+			match = &found[i]
+		}
+	}
+	if match == nil {
+		t.Fatalf("note %s with only claim_notified was not flagged as unnotified; got: %+v", relPath, found)
+	}
+	if match.DiscordThreadID != threadID {
+		t.Errorf("DiscordThreadID = %q, want %q", match.DiscordThreadID, threadID)
+	}
+}
+
 // TestCheckStatusTasksFlagsStaleBeforeRunnerWatchdog runs a real task
 // against a fake claude stub that goes silent forever (Phase 8-style),
 // with the *runner's own* idle watchdog set to a long window (so it won't

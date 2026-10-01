@@ -33,15 +33,23 @@ func runRunner(cfg *config.Config) {
 	fmt.Printf("[runner] GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE present in daemon env: %+v\n", vaultgit.EnvSnapshot())
 
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
-	notifier := &notify.Notifier{Vault: vault, WebhookURL: cfg.DiscordWebhookURL}
+	notifier := &notify.Notifier{Vault: vault, WebhookURL: cfg.DiscordWebhookURL, ForumWebhookURL: cfg.DiscordTaskForumWebhookURL}
+
+	var postClaim func(threadName, content string) (string, error)
+	if cfg.DiscordTaskForumWebhookURL != "" {
+		postClaim = func(threadName, content string) (string, error) {
+			return notify.PostForumClaim(cfg.DiscordTaskForumWebhookURL, threadName, content)
+		}
+	}
 
 	runnerDeps := runner.Deps{
 		Vault:       vault,
 		Repos:       cfg.Repos,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
+		PostClaim:   postClaim,
 		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.Send(
-				job.NotePath,
+				job.NotePath, payload.DiscordThreadID,
 				payload.DiscordMessage(cfg.DiscordUserID, cfg.DiscordAraDevUserID), payload.Slug+".md", payload.AttachmentMarkdown())
 		},
 		OnTerminal: newTerminalHandler(cfg, notifier),
@@ -54,8 +62,8 @@ func runRunner(cfg *config.Config) {
 				CodingSession: sessionID,
 			}
 		},
-		OnRoundLimitHit: func(job worker.Job, prURL string) {
-			notifier.Send(job.NotePath,
+		OnRoundLimitHit: func(job worker.Job, prURL, discordThreadID string) {
+			notifier.Send(job.NotePath, discordThreadID,
 				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit the review/CI round limit without merging -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
 				job.Slug+"-round-limit.md", fmt.Sprintf("# Merge-gate round limit hit\n\n- PR: %s\n- Repo: %s\n\nThe review/CI loop used all %d rounds without a clean merge. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, runner.MaxMergeGateRounds))
 		},
@@ -113,10 +121,10 @@ func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runn
 // and a done task needs no help. `blocked` and `failed` both keep the .md
 // attachment so the work log is there to see what went wrong, and both
 // keep mentioning Ara-Dev.
-func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
-	return func(job worker.Job, status, workLog string, autoMerge bool, prURL string) {
+func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string) {
+	return func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string) {
 		if status == "blocked" {
-			notifier.Send(job.NotePath,
+			notifier.Send(job.NotePath, discordThreadID,
 				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo),
 				job.Slug+".md", "# Task blocked\n\n"+workLog+"\n")
 			return
@@ -126,12 +134,12 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job 
 			if autoMerge {
 				mergeNote = "the auto-merge loop is running"
 			}
-			notifier.Send(job.NotePath,
+			notifier.Send(job.NotePath, discordThreadID,
 				fmt.Sprintf("<@%s> Task `%s` (%s) is **done**: %s -- %s.", cfg.DiscordUserID, job.Slug, job.Repo, prURL, mergeNote),
 				"", "")
 			return
 		}
-		notifier.Send(job.NotePath,
+		notifier.Send(job.NotePath, discordThreadID,
 			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, status),
 			job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
 	}
@@ -147,7 +155,11 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier) func(job 
 func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUserID, araDevUserID string) func(job worker.Job, recovered any) {
 	return func(job worker.Job, recovered any) {
 		entry := fmt.Sprintf("%s: recovered from panic in repo %s: %v", time.Now().UTC().Format(time.RFC3339), job.Repo, recovered)
+		var discordThreadID string
 		writeErr := vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (panic)", job.Slug), func(n *notetask.Note) error {
+			if n.Frontmatter.DiscordThreadID != nil {
+				discordThreadID = *n.Frontmatter.DiscordThreadID
+			}
 			n.Frontmatter.Status = "blocked"
 			if strings.TrimSpace(n.WorkLog) == "" {
 				n.WorkLog = entry
@@ -165,7 +177,7 @@ func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUs
 		// Always fires, independent of writeErr above -- Discord must not
 		// depend on the vault being writable, same rule as
 		// handleSetupFailure's Discord call.
-		notifier.Send(job.NotePath,
+		notifier.Send(job.NotePath, discordThreadID,
 			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- panic recovered: %v", discordUserID, araDevUserID, job.Slug, job.Repo, recovered),
 			job.Slug+".md",
 			fmt.Sprintf("# Task blocked: panic\n\n- **Repo**: %s\n- **Recovered panic**: %v\n", job.Repo, recovered))

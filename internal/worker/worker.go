@@ -23,6 +23,7 @@ type Job struct {
 // idle. LastActivityAt is stamped by the runner's stream-json reader --
 // one write path, two consumers (the idle watchdog and the watcher).
 type TaskStatus struct {
+	NotePath       string
 	Slug           string
 	Repo           string
 	StartedAt      time.Time
@@ -188,7 +189,7 @@ func (w *RepoWorker) runOne(job Job) {
 	defer func() { <-w.globalSlots }()
 
 	now := time.Now()
-	w.setCurrentTask(&TaskStatus{Slug: job.Slug, Repo: job.Repo, StartedAt: now, LastActivityAt: now, Stage: "starting"})
+	w.setCurrentTask(&TaskStatus{NotePath: job.NotePath, Slug: job.Slug, Repo: job.Repo, StartedAt: now, LastActivityAt: now, Stage: "starting"})
 	defer w.setCurrentTask(nil)
 
 	defer func() {
