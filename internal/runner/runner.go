@@ -109,6 +109,14 @@ type Deps struct {
 	// "done", this is purely the alert. discordThreadID is the same value
 	// OnTerminal saw for this task.
 	OnRoundLimitHit func(job worker.Job, prURL, discordThreadID string)
+
+	// OnMergeGateError fires if the merge-gate loop returns any other
+	// error (gh/git/claude failures, never ErrRoundLimitHit -- that has
+	// its own OnRoundLimitHit above). Without this, a non-round-limit
+	// error was previously only logged to stdout: the PR sits unmerged
+	// with status still "done" in the vault note and no signal anywhere
+	// else that the loop never finished.
+	OnMergeGateError func(job worker.Job, prURL, discordThreadID string, err error)
 }
 
 func (d Deps) claudeBin() string {
@@ -362,6 +370,9 @@ func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.Re
 		}
 	default:
 		fmt.Printf("[runner] task %s: merge-gate loop ended with an error: %v\n", job.Slug, err)
+		if deps.OnMergeGateError != nil {
+			deps.OnMergeGateError(job, prURL, discordThreadID, err)
+		}
 	}
 }
 

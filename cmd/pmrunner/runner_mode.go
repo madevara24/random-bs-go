@@ -56,7 +56,7 @@ func runRunner(cfg *config.Config) {
 		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) runner.MergeGateOps {
 			return &runner.GhMergeGateOps{
 				RepoPath:      repoCfg.Path,
-				Branch:        branchName,
+				PRURL:         prURL,
 				DefaultBranch: repoCfg.DefaultBranch,
 				ClaudeBin:     "claude",
 				CodingSession: sessionID,
@@ -66,6 +66,11 @@ func runRunner(cfg *config.Config) {
 			notifier.Send(job.NotePath, discordThreadID,
 				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit the review/CI round limit without merging -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
 				job.Slug+"-round-limit.md", fmt.Sprintf("# Merge-gate round limit hit\n\n- PR: %s\n- Repo: %s\n\nThe review/CI loop used all %d rounds without a clean merge. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, runner.MaxMergeGateRounds))
+		},
+		OnMergeGateError: func(job worker.Job, prURL, discordThreadID string, err error) {
+			notifier.Send(job.NotePath, discordThreadID,
+				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit an error in the review/CI merge-gate loop -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
+				job.Slug+"-mergegate-error.md", fmt.Sprintf("# Merge-gate loop error\n\n- PR: %s\n- Repo: %s\n- Error: %v\n\nThe review/CI loop ended with an error before reaching a clean merge or exhausting its round budget. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, err))
 		},
 	}
 

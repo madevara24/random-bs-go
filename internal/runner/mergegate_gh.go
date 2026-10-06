@@ -16,8 +16,15 @@ import (
 // per the bash design's own hard-won finding), and gh pr merge executed
 // by the runner itself.
 type GhMergeGateOps struct {
-	RepoPath      string
-	Branch        string
+	RepoPath string
+
+	// PRURL is the PR's own URL (the task note's real pr_url) -- every
+	// `gh pr` call (view/comment/merge) is keyed off this, never a branch
+	// name: the runner's own constructed branch name is only ever a guess
+	// (see ProcessTask's branchName in runner.go) and regularly doesn't
+	// match the branch the PR was actually opened from, e.g. after a
+	// resume that skipped pullAndBranch entirely.
+	PRURL         string
 	DefaultBranch string
 	ClaudeBin     string
 	CodingSession string // the original coding session's session_id, to resume with feedback
@@ -26,6 +33,12 @@ type GhMergeGateOps struct {
 	// covered by the coding session's own idle watchdog, so it needs its
 	// own bound against a hang. Defaults to 5 minutes if zero.
 	ReviewTimeout time.Duration
+
+	// headRef caches the PR's actual head branch name, resolved once from
+	// PRURL via `gh pr view --json headRefName` -- needed anywhere a real
+	// git ref is required (gh run list --branch, gitDiff), since PRURL
+	// itself isn't a ref git or the Actions API understands.
+	headRef string
 }
 
 func (g *GhMergeGateOps) reviewTimeout() time.Duration {
@@ -45,16 +58,36 @@ func (g *GhMergeGateOps) runGh(args ...string) (string, error) {
 	return string(out), nil
 }
 
+// headBranch resolves and caches the PR's actual head branch name --
+// resolved once per GhMergeGateOps (it's reused across every round of the
+// same loop), so repeated calls across a round's RunReview+WaitForCI don't
+// each pay for their own `gh pr view`.
+func (g *GhMergeGateOps) headBranch() (string, error) {
+	if g.headRef != "" {
+		return g.headRef, nil
+	}
+	out, err := g.runGh("pr", "view", g.PRURL, "--json", "headRefName", "--jq", ".headRefName")
+	if err != nil {
+		return "", fmt.Errorf("resolving head branch for %s: %w", g.PRURL, err)
+	}
+	g.headRef = strings.TrimSpace(out)
+	return g.headRef, nil
+}
+
 // RunReview implements MergeGateOps -- fetches the PR body, current diff,
 // and (round 2+) the existing comment thread fresh on every call, so a
 // later round genuinely sees whatever an earlier round's resumed coding
 // session pushed, not a stale pre-fix snapshot.
 func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
-	prBody, err := fetchPRBody(g.RepoPath, g.Branch)
+	prBody, err := fetchPRBody(g.RepoPath, g.PRURL)
 	if err != nil {
 		return "", "", fmt.Errorf("fetching PR body: %w", err)
 	}
-	diff, err := gitDiff(g.RepoPath, g.DefaultBranch, g.Branch)
+	branch, err := g.headBranch()
+	if err != nil {
+		return "", "", fmt.Errorf("resolving head branch: %w", err)
+	}
+	diff, err := gitDiff(g.RepoPath, g.DefaultBranch, branch)
 	if err != nil {
 		return "", "", fmt.Errorf("fetching diff: %w", err)
 	}
@@ -64,7 +97,7 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 		// Best-effort -- reading the thread failing shouldn't block the
 		// review itself, it just loses this round's "was my feedback
 		// addressed" framing.
-		priorComments, _ = fetchPRComments(g.RepoPath, g.Branch)
+		priorComments, _ = fetchPRComments(g.RepoPath, g.PRURL)
 	}
 
 	verdict, feedback, err := reviewOnce(g.ClaudeBin, g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
@@ -75,7 +108,7 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 	// Post the verdict as a real PR comment -- best-effort: a comment-post
 	// failure shouldn't fail the review itself (the verdict was still
 	// genuinely reached), but is worth surfacing.
-	if _, err := g.runGh("pr", "comment", g.Branch, "--body", fmt.Sprintf("**Round %d review: %s**\n\n%s", round, verdict, feedback)); err != nil {
+	if _, err := g.runGh("pr", "comment", g.PRURL, "--body", fmt.Sprintf("**Round %d review: %s**\n\n%s", round, verdict, feedback)); err != nil {
 		fmt.Printf("[runner] mergegate: posting review comment failed (round %d): %v\n", round, err)
 	}
 
@@ -185,9 +218,13 @@ func (g *GhMergeGateOps) WaitForCI() (string, string, error) {
 	if !hasCIWorkflows(g.RepoPath) {
 		return "success", "", nil
 	}
+	branch, err := g.headBranch()
+	if err != nil {
+		return "", "", fmt.Errorf("resolving head branch: %w", err)
+	}
 	deadline := time.Now().Add(30 * time.Minute)
 	for {
-		out, err := g.runGh("run", "list", "--branch", g.Branch, "--json", "databaseId,status,conclusion", "--limit", "1")
+		out, err := g.runGh("run", "list", "--branch", branch, "--json", "databaseId,status,conclusion", "--limit", "1")
 		if err != nil {
 			return "", "", fmt.Errorf("gh run list: %w", err)
 		}
@@ -197,7 +234,7 @@ func (g *GhMergeGateOps) WaitForCI() (string, string, error) {
 		}
 		if len(runs) == 0 {
 			if time.Now().After(deadline) {
-				return "", "", fmt.Errorf("no CI run ever appeared for branch %s within the wait window", g.Branch)
+				return "", "", fmt.Errorf("no CI run ever appeared for branch %s within the wait window", branch)
 			}
 			time.Sleep(10 * time.Second)
 			continue
@@ -205,7 +242,7 @@ func (g *GhMergeGateOps) WaitForCI() (string, string, error) {
 		run := runs[0]
 		if run.Status != "completed" {
 			if time.Now().After(deadline) {
-				return "", "", fmt.Errorf("CI run %d for branch %s did not complete within the wait window", run.DatabaseID, g.Branch)
+				return "", "", fmt.Errorf("CI run %d for branch %s did not complete within the wait window", run.DatabaseID, branch)
 			}
 			time.Sleep(10 * time.Second)
 			continue
@@ -220,7 +257,7 @@ func (g *GhMergeGateOps) WaitForCI() (string, string, error) {
 
 // Merge implements MergeGateOps.
 func (g *GhMergeGateOps) Merge() error {
-	_, err := g.runGh("pr", "merge", g.Branch, "--squash")
+	_, err := g.runGh("pr", "merge", g.PRURL, "--squash")
 	return err
 }
 
@@ -234,7 +271,7 @@ func (g *GhMergeGateOps) ResumeWithFeedback(text string) error {
 
 // AlertRoundLimitHit implements MergeGateOps.
 func (g *GhMergeGateOps) AlertRoundLimitHit() {
-	fmt.Printf("[runner] mergegate: hit round limit (%d) on branch %s without a clean merge\n", MaxMergeGateRounds, g.Branch)
+	fmt.Printf("[runner] mergegate: hit round limit (%d) on PR %s without a clean merge\n", MaxMergeGateRounds, g.PRURL)
 }
 
 func claudeBinOrDefault(bin string) string {
@@ -249,12 +286,12 @@ func claudeBinOrDefault(bin string) string {
 // never the task note or its copy. Returns an error (caller falls back to
 // the Work Log) if gh isn't functional here at all, e.g. a local-only
 // disposable repo with no GitHub remote.
-func fetchPRBody(repoPath, branch string) (string, error) {
-	cmd := exec.Command("gh", "pr", "view", branch, "--json", "body", "--jq", ".body")
+func fetchPRBody(repoPath, prURL string) (string, error) {
+	cmd := exec.Command("gh", "pr", "view", prURL, "--json", "body", "--jq", ".body")
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("gh pr view %s: %w\n%s", branch, err, out)
+		return "", fmt.Errorf("gh pr view %s: %w\n%s", prURL, err, out)
 	}
 	return string(out), nil
 }
@@ -262,12 +299,12 @@ func fetchPRBody(repoPath, branch string) (string, error) {
 // fetchPRComments reads the PR's existing comment thread -- used from
 // round 2+ so the reviewer can check whether its own prior feedback was
 // actually addressed.
-func fetchPRComments(repoPath, branch string) (string, error) {
-	cmd := exec.Command("gh", "pr", "view", branch, "--json", "comments", "--jq", ".comments[].body")
+func fetchPRComments(repoPath, prURL string) (string, error) {
+	cmd := exec.Command("gh", "pr", "view", prURL, "--json", "comments", "--jq", ".comments[].body")
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("gh pr view %s (comments): %w\n%s", branch, err, out)
+		return "", fmt.Errorf("gh pr view %s (comments): %w\n%s", prURL, err, out)
 	}
 	return string(out), nil
 }
