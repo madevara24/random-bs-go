@@ -546,6 +546,13 @@ func excludeFromGit(repoPath, name string) error {
 	return nil
 }
 
+// prCompletionContract is the deliverable every session is held to,
+// restated identically in both the fresh and resume prompts so the two
+// branches can't drift apart on what "done" requires. A resumed session is
+// the one most likely to be sitting on an uncommitted tree, so it needs
+// this just as much as a fresh one.
+const prCompletionContract = "The task is only done once your work is committed on the task branch, pushed to `origin`, and opened as a pull request, with the PR's URL recorded in `pr_url`. Setting `status` to `done` with an empty `pr_url` is treated as blocked, not done. If you genuinely cannot open a PR, set `status` to `blocked` and explain why in the Work Log."
+
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
 // vault access, so it's pointed at the note-copy instead for anything it
 // needs to read or write about task state.
@@ -553,12 +560,13 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
 	var b strings.Builder
 	if resume {
 		b.WriteString(fmt.Sprintf(
-			"This is a resumed session for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). Re-read that file now, including your own prior Work Log entries, to reconstruct context, then continue the task.\n\n", copyName))
+			"This is a resumed session for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). Re-read that file now, including your own prior Work Log entries, to reconstruct context, then continue the task.\n\n%s\n\n", copyName, prCompletionContract))
 	} else {
 		b.WriteString(fmt.Sprintf(
 			"You are working on a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). It holds your task's frontmatter (status/repo/auto_merge/pr_url/session_id/etc.) and body (the task prompt below, plus a \"## Work Log\" section for your own narrative).\n\n"+
-				"As you work, append entries to its \"## Work Log\" section describing what you did. When finished, update its frontmatter: set `status` to `done` if you succeeded (and set `pr_url` if you opened one), `blocked` if you need human input (explain what you need in the Work Log), or `failed` if you're giving up. Never touch `session_id` -- that field is managed externally.\n\n"+
-				"Task:\n%s\n", copyName, note.Prompt))
+				"As you work, append entries to its \"## Work Log\" section describing what you did. When finished, update its frontmatter: set `status` to `done` if you succeeded, `blocked` if you need human input (explain what you need in the Work Log), or `failed` if you're giving up. Never touch `session_id` -- that field is managed externally.\n\n"+
+				"%s\n\n"+
+				"Task:\n%s\n", copyName, prCompletionContract, note.Prompt))
 	}
 	return b.String()
 }
