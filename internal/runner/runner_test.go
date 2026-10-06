@@ -97,9 +97,9 @@ func TestProcessTaskSetupAndInvocation(t *testing.T) {
 	}
 
 	// Branch was created.
-	branches := runGit(t, testTargetRepoPath, "branch", "--list", fmt.Sprintf("task/%s-*", slug))
+	branches := runGit(t, testTargetRepoPath, "branch", "--list", fmt.Sprintf("task/%s", slug))
 	if strings.TrimSpace(branches) == "" {
-		t.Fatalf("no branch matching task/%s-* found; branches:\n%s", slug, runGit(t, testTargetRepoPath, "branch", "-a"))
+		t.Fatalf("no branch matching task/%s found; branches:\n%s", slug, runGit(t, testTargetRepoPath, "branch", "-a"))
 	}
 	branchName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(branches), "*"))
 	t.Cleanup(func() {
@@ -212,7 +212,7 @@ func TestProcessTaskMergeBack(t *testing.T) {
 		t.Fatalf("ProcessTask: %v", err)
 	}
 
-	branchName := "task/" + slug + "-" + time.Now().Format("2006-01-02")
+	branchName := "task/" + slug
 	t.Cleanup(func() {
 		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
 		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()

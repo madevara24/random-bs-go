@@ -20,10 +20,12 @@ type GhMergeGateOps struct {
 
 	// PRURL is the PR's own URL (the task note's real pr_url) -- every
 	// `gh pr` call (view/comment/merge) is keyed off this, never a branch
-	// name: the runner's own constructed branch name is only ever a guess
-	// (see ProcessTask's branchName in runner.go) and regularly doesn't
-	// match the branch the PR was actually opened from, e.g. after a
-	// resume that skipped pullAndBranch entirely.
+	// name: the runner's own constructed branch name (see ProcessTask's
+	// branchName in runner.go) is stable per task, but still only tracks
+	// what the runner itself last fetched/checked out -- the PR's actual
+	// head could have moved past that if a resumed session rebased or
+	// reconciled it against the default branch (see
+	// resumeReconciliationNotice) before this merge-gate loop ever ran.
 	PRURL         string
 	DefaultBranch string
 	ClaudeBin     string

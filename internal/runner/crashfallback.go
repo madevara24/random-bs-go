@@ -227,6 +227,10 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		return fmt.Errorf("runner: writing blocked status for %s (%s): %w", job.Slug, info.scenario, writeErr)
 	}
 
+	if err := preserveBlockedWork(info.repoPath, info.branchName); err != nil {
+		fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
+	}
+
 	branchExists, hasUncommitted := inspectRepoState(info.repoPath, info.branchName)
 	payload := AlertPayload{
 		Slug:                  job.Slug,

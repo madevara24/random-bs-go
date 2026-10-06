@@ -49,7 +49,7 @@ func TestSetupFailurePullAndBranchRestoresRepoAndAlerts(t *testing.T) {
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
 
-	branchName := "task/" + slug + "-" + time.Now().Format("2006-01-02")
+	branchName := "task/" + slug
 
 	// Pre-create the colliding branch (without checking it out) -- this is
 	// what makes pullAndBranch's `checkout -b branchName` fail.
