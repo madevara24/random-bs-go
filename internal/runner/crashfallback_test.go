@@ -222,6 +222,63 @@ func TestCrashFallbackScenario4DoneWithoutPR(t *testing.T) {
 	}
 }
 
+// TestCheckPRStateRunsInRepoPath confirms checkPRState invokes `gh` with
+// its working directory set to repoPath, not the test process's own cwd --
+// the RBG-23 bug: a missing cmd.Dir meant every blocked alert's "PR state"
+// line read "not a git repository" regardless of what the clone looked
+// like, since gh always ran wherever the runner process happened to start.
+func TestCheckPRStateRunsInRepoPath(t *testing.T) {
+	binDir := t.TempDir()
+	pwdFile := filepath.Join(binDir, "pwd.txt")
+	script := fmt.Sprintf("#!/bin/sh\npwd > %q\necho '{\"state\":\"OPEN\",\"url\":\"https://example.com/pr/1\"}'\n", pwdFile)
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake gh script: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	repoPath := t.TempDir()
+	got := checkPRState(repoPath, "some-branch")
+	if strings.Contains(got, "unknown") {
+		t.Errorf("checkPRState = %q, want it not to report unknown", got)
+	}
+
+	recorded, err := os.ReadFile(pwdFile)
+	if err != nil {
+		t.Fatalf("reading recorded pwd: %v", err)
+	}
+	// Resolve symlinks on both sides -- t.TempDir() can live under a
+	// symlinked path (e.g. /tmp -> /private/tmp on macOS) that `pwd`
+	// reports fully resolved.
+	wantDir, err := filepath.EvalSymlinks(repoPath)
+	if err != nil {
+		t.Fatalf("resolving repoPath: %v", err)
+	}
+	gotDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(recorded)))
+	if err != nil {
+		t.Fatalf("resolving recorded pwd: %v", err)
+	}
+	if gotDir != wantDir {
+		t.Errorf("gh ran in %q, want %q", gotDir, wantDir)
+	}
+}
+
+// TestCheckPRStateFallbackOnGhFailure confirms the "unknown (...)" fallback
+// still fires when gh itself fails (e.g. a local-only repo with no GitHub
+// remote) -- the Dir fix above must not change this behavior.
+func TestCheckPRStateFallbackOnGhFailure(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\necho 'no pull requests found for branch \"some-branch\"' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake gh script: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := checkPRState(t.TempDir(), "some-branch")
+	if !strings.HasPrefix(got, "unknown (gh check failed or unavailable:") {
+		t.Errorf("checkPRState = %q, want it to start with the unknown(...) fallback prefix", got)
+	}
+}
+
 // TestCrashFallbackScenario3ParseFailure forces scenario 3 (copy exists
 // but fails to parse) by having the stub overwrite the copy with malformed
 // YAML.
