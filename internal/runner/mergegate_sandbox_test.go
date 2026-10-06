@@ -135,7 +135,8 @@ func TestSandboxCleanPass(t *testing.T) {
 
 	prOut := sbGh(t, "pr", "create", "--title", "Phase 11 test: clean pass", "--body",
 		"Adds one harmless line to README.md. Expected: real review APPROVE, real CI green, real merge.", "--head", branch, "--base", sandboxDefaultBranch)
-	t.Logf("PR created: %s", strings.TrimSpace(prOut))
+	prURL := strings.TrimSpace(prOut)
+	t.Logf("PR created: %s", prURL)
 
 	t.Cleanup(func() {
 		exec.Command("git", "-C", sandboxRepoPath, "push", "origin", "--delete", branch).Run()
@@ -152,7 +153,7 @@ func TestSandboxCleanPass(t *testing.T) {
 
 	ops := &countingMergeGateOps{GhMergeGateOps: &GhMergeGateOps{
 		RepoPath:      sandboxRepoPath,
-		Branch:        branch,
+		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
 		ClaudeBin:     "claude",
 	}}
@@ -205,7 +206,8 @@ func TestSandboxConcernsThenFix(t *testing.T) {
 
 	prOut := sbGh(t, "pr", "create", "--title", "Phase 11 test: CONCERNS then fix", "--body",
 		"Adds a small utility function.", "--head", branch, "--base", sandboxDefaultBranch)
-	t.Logf("PR created: %s", strings.TrimSpace(prOut))
+	prURL := strings.TrimSpace(prOut)
+	t.Logf("PR created: %s", prURL)
 
 	t.Cleanup(func() {
 		exec.Command("git", "-C", sandboxRepoPath, "push", "origin", "--delete", branch).Run()
@@ -215,7 +217,7 @@ func TestSandboxConcernsThenFix(t *testing.T) {
 
 	ops := &countingMergeGateOps{GhMergeGateOps: &GhMergeGateOps{
 		RepoPath:      sandboxRepoPath,
-		Branch:        branch,
+		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
 		ClaudeBin:     "claude",
 		CodingSession: sessionID,
@@ -264,7 +266,8 @@ func TestSandboxRoundExhaustion(t *testing.T) {
 
 	prOut := sbGh(t, "pr", "create", "--title", "Phase 11 test: forced round exhaustion", "--body",
 		"Adds a small utility function.", "--head", branch, "--base", sandboxDefaultBranch)
-	t.Logf("PR created: %s", strings.TrimSpace(prOut))
+	prURL := strings.TrimSpace(prOut)
+	t.Logf("PR created: %s", prURL)
 
 	t.Cleanup(func() {
 		exec.Command("gh", "-C", sandboxRepoPath, "pr", "close", branch).Run()
@@ -275,7 +278,7 @@ func TestSandboxRoundExhaustion(t *testing.T) {
 
 	ops := &noResumeMergeGateOps{countingMergeGateOps{GhMergeGateOps: &GhMergeGateOps{
 		RepoPath:      sandboxRepoPath,
-		Branch:        branch,
+		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
 		ClaudeBin:     "claude",
 	}}}
