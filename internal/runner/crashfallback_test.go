@@ -64,7 +64,7 @@ func setupCrashTest(t *testing.T, slugPrefix, claudeBin string) (Deps, worker.Jo
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
 
-	branchName := "task/" + slug + "-" + time.Now().Format("2006-01-02")
+	branchName := "task/" + slug
 	t.Cleanup(func() {
 		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
 		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()

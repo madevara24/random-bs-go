@@ -20,7 +20,7 @@ func TestBuildPromptCarriesPRContract(t *testing.T) {
 	}
 
 	for _, resume := range []bool{false, true} {
-		prompt := buildPrompt(note, "copy.md", resume)
+		prompt := buildPrompt(note, "copy.md", resume, "main")
 
 		if !strings.Contains(prompt, "pushed to `origin`") || !strings.Contains(prompt, "pull request") {
 			t.Errorf("resume=%v: prompt missing commit/push/PR requirement:\n%s", resume, prompt)
@@ -36,7 +36,7 @@ func TestBuildPromptCarriesPRContract(t *testing.T) {
 
 func TestBuildPromptResumeStillMentionsTaskFile(t *testing.T) {
 	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
-	prompt := buildPrompt(note, "copy.md", true)
+	prompt := buildPrompt(note, "copy.md", true, "main")
 
 	if !strings.Contains(prompt, "copy.md") {
 		t.Errorf("resume prompt missing copy file name:\n%s", prompt)
@@ -46,9 +46,37 @@ func TestBuildPromptResumeStillMentionsTaskFile(t *testing.T) {
 	}
 }
 
+// TestBuildPromptResumeCarriesReconciliationNotice guards RBG-22's resume
+// contract: a resumed session must be told explicitly that origin/<default>
+// may have advanced while the task sat blocked, and that reconciling it
+// into the task branch (and resolving any conflicts) is its own job -- the
+// runner's resume git surface is fetch+checkout only, never merge/rebase.
+func TestBuildPromptResumeCarriesReconciliationNotice(t *testing.T) {
+	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
+	prompt := buildPrompt(note, "copy.md", true, "main")
+
+	if !strings.Contains(prompt, "origin/main") {
+		t.Errorf("resume prompt missing the default branch it must reconcile against:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "may have advanced") {
+		t.Errorf("resume prompt missing the \"main may have advanced\" notice:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "resolve any conflicts") {
+		t.Errorf("resume prompt missing the conflict-resolution-is-your-job instruction:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "never merges, rebases") {
+		t.Errorf("resume prompt missing confirmation that the runner itself never merges/rebases:\n%s", prompt)
+	}
+
+	freshPrompt := buildPrompt(note, "copy.md", false, "main")
+	if strings.Contains(freshPrompt, "may have advanced") {
+		t.Errorf("fresh prompt should not carry the resume-only reconciliation notice:\n%s", freshPrompt)
+	}
+}
+
 func TestBuildPromptFreshIncludesTaskBody(t *testing.T) {
 	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
-	prompt := buildPrompt(note, "copy.md", false)
+	prompt := buildPrompt(note, "copy.md", false, "main")
 
 	if !strings.Contains(prompt, "Do the thing.") {
 		t.Errorf("fresh prompt missing task body:\n%s", prompt)

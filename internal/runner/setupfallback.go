@@ -40,6 +40,10 @@ const (
 	setupStagePullAndBranch
 	setupStageWriteNoteCopy
 	setupStageExcludeFromGit
+	// setupStageCheckoutTaskBranch is resume-only: checkoutTaskBranch's
+	// fetch+checkout of the preserved task branch failing, e.g. the branch
+	// was never pushed to origin and isn't local either.
+	setupStageCheckoutTaskBranch
 )
 
 func (s setupStage) String() string {
@@ -54,6 +58,8 @@ func (s setupStage) String() string {
 		return "writing note-copy into target repo"
 	case setupStageExcludeFromGit:
 		return "excluding note-copy from git"
+	case setupStageCheckoutTaskBranch:
+		return "checking out preserved task branch for resume"
 	default:
 		return "unknown setup stage"
 	}

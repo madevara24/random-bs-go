@@ -303,6 +303,22 @@ func TestProcessTaskResumeDoesNotRepostClaim(t *testing.T) {
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
 
+	// A resume's entire git surface is checking out this exact branch from
+	// origin (checkoutTaskBranch) -- push one for real first, as if a prior
+	// run had already created and preserved it, so this exercises the real
+	// resume path rather than failing at setup before PostClaim is even a
+	// question.
+	branchName := "task/" + slug
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branchName)
+	runGit(t, testTargetRepoPath, "push", "-u", "origin", branchName)
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
 	copyName := copyFileName(slug)
 	t.Cleanup(func() {
 		exec.Command("rm", "-f", filepath.Join(testTargetRepoPath, copyName)).Run()
@@ -331,5 +347,12 @@ func TestProcessTaskResumeDoesNotRepostClaim(t *testing.T) {
 	}
 	if gotAlert.DiscordThreadID != existingThreadID {
 		t.Errorf("alert DiscordThreadID = %q, want the pre-existing thread %q", gotAlert.DiscordThreadID, existingThreadID)
+	}
+	// Confirms the resumed session actually reached invocation on the
+	// preserved branch (checkoutTaskBranch succeeded) and was blocked by the
+	// stub leaving the copy non-terminal -- not by some earlier setup
+	// failure that would also happen to leave claimAttempts at 0.
+	if gotAlert.Scenario != ScenarioNonTerminal {
+		t.Errorf("alert scenario = %v, want %v (resume should have reached invocation)", gotAlert.Scenario, ScenarioNonTerminal)
 	}
 }

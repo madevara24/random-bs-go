@@ -189,8 +189,23 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	discordThreadID := threadIDOf(note)
 
-	branchName := fmt.Sprintf("task/%s-%s", job.Slug, time.Now().Format("2006-01-02"))
-	if !resume {
+	// Stable, deterministic per task (no date suffix) -- job.Slug is
+	// re-derived identically from the note's path on every run (see
+	// dispatch.slugFromPath), so a resume can check out exactly this same
+	// branch rather than guessing at whatever suffix a prior run computed.
+	branchName := fmt.Sprintf("task/%s", job.Slug)
+	if resume {
+		if err := checkoutTaskBranch(repoCfg, branchName); err != nil {
+			return handleSetupFailure(deps, job, setupFailureInfo{
+				stage:           setupStageCheckoutTaskBranch,
+				err:             fmt.Errorf("checking out task branch for resumed %s: %w", job.Slug, err),
+				repoCfg:         repoCfg,
+				branchName:      branchName,
+				resume:          resume,
+				discordThreadID: discordThreadID,
+			})
+		}
+	} else {
 		if err := pullAndBranch(repoCfg, branchName); err != nil {
 			return handleSetupFailure(deps, job, setupFailureInfo{
 				stage:           setupStagePullAndBranch,
@@ -229,7 +244,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	reporter.SetStage("invocation")
 
-	prompt := buildPrompt(note, copyName, resume)
+	prompt := buildPrompt(note, copyName, resume, repoCfg.DefaultBranch)
 	var priorSessionID string
 	if resume {
 		priorSessionID = *note.Frontmatter.SessionID
@@ -336,6 +351,16 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
+
+	if terminalStatus == "blocked" {
+		// Self-reported blocked (CC itself set status: blocked and exited
+		// cleanly) -- same preserve-on-block treatment as the crash-fallback
+		// path in handleCrashFallback, just reached via the happy exit rather
+		// than a scenario switch.
+		if err := preserveBlockedWork(repoCfg.Path, branchName); err != nil {
+			fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
+		}
+	}
 
 	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
@@ -480,6 +505,16 @@ func readNoteCopy(copyPath string) (*notetask.Note, error) {
 	return note, nil
 }
 
+// pullAndBranch starts the clone from a known-clean copy of the default
+// branch before creating the task branch -- fetch, force-checkout the
+// default branch (so a dirty tree left behind by whatever this clone was
+// doing before can never block the checkout itself), reset --hard to
+// origin's tip, clean -fd to drop any untracked debris, then branch. Without
+// this, a prior task's uncommitted or untracked leftovers (e.g. MLT-27's
+// uncommitted deploy.yml edit) ride along into the next task's working
+// tree -- git carries an uncommitted change across a checkout whenever the
+// target branch's version of that file happens to match, so a plain
+// `checkout <default>` is not enough on its own.
 func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 	run := func(args ...string) error {
 		cmd := exec.Command("git", args...)
@@ -491,16 +526,55 @@ func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 		}
 		return nil
 	}
-	if err := run("checkout", repoCfg.DefaultBranch); err != nil {
+	if err := run("fetch", "origin", repoCfg.DefaultBranch); err != nil {
 		return err
 	}
-	if err := run("pull", "origin", repoCfg.DefaultBranch); err != nil {
+	if err := run("checkout", "-f", repoCfg.DefaultBranch); err != nil {
+		return err
+	}
+	if err := run("reset", "--hard", "origin/"+repoCfg.DefaultBranch); err != nil {
+		return err
+	}
+	if err := run("clean", "-fd"); err != nil {
 		return err
 	}
 	if err := run("checkout", "-b", branchName); err != nil {
 		return err
 	}
 	return nil
+}
+
+// checkoutTaskBranch is a resume's entire git surface: fetch the task
+// branch and check it out -- tracking origin/<branchName> if it isn't
+// already local (a fresh/different clone picking the task back up) --
+// never resetting, cleaning, merging, or rebasing anything. A resumed
+// task's branch already holds exactly whatever that session committed (plus
+// anything preserveBlockedWork pushed when it last went blocked), and must
+// be picked up as-is; reconciling origin/<default> into it is left to the
+// resumed session itself (see resumeReconciliationNotice), never the
+// runner.
+func checkoutTaskBranch(repoCfg config.RepoConfig, branchName string) error {
+	run := func(args ...string) error {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoCfg.Path
+		cmd.Env = vaultgit.CleanGitEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), repoCfg.Path, err, out)
+		}
+		return nil
+	}
+	if err := run("fetch", "origin", branchName); err != nil {
+		return err
+	}
+	if localBranchExists(repoCfg.Path, branchName) {
+		return run("checkout", branchName)
+	}
+	return run("checkout", "-b", branchName, "--track", "origin/"+branchName)
+}
+
+func localBranchExists(repoPath, branchName string) bool {
+	return exec.Command("git", "-C", repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName).Run() == nil
 }
 
 // writeNoteCopy writes the note's content into the target repo, minus the
@@ -553,14 +627,26 @@ func excludeFromGit(repoPath, name string) error {
 // this just as much as a fresh one.
 const prCompletionContract = "The task is only done once your work is committed on the task branch, pushed to `origin`, and opened as a pull request, with the PR's URL recorded in `pr_url`. Setting `status` to `done` with an empty `pr_url` is treated as blocked, not done. If you genuinely cannot open a PR, set `status` to `blocked` and explain why in the Work Log."
 
+// resumeReconciliationNotice tells a resumed session that the runner's own
+// git surface for resume is deterministic-only (fetch + checkout the
+// preserved task branch, nothing else -- see checkoutTaskBranch): it never
+// merges, rebases, or resolves anything against the default branch, because
+// that isn't deterministic. defaultBranch may have advanced during however
+// long this task sat blocked, so reconciling it into the task branch --
+// merge or rebase, whichever this repo's convention is -- and resolving any
+// conflicts is explicitly the session's own job, not something it can skip
+// or assume the runner already did.
+const resumeReconciliationNotice = "The runner only fetched and checked out your preserved branch for this resume -- it never merges, rebases, or touches `origin/%s` itself. `origin/%s` may have advanced while this task was blocked, so before continuing the task itself, reconcile `origin/%s` into your branch (merge or rebase, whichever this repo's convention is) and resolve any conflicts yourself.\n\n"
+
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
 // vault access, so it's pointed at the note-copy instead for anything it
 // needs to read or write about task state.
-func buildPrompt(note *notetask.Note, copyName string, resume bool) string {
+func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranch string) string {
 	var b strings.Builder
 	if resume {
 		b.WriteString(fmt.Sprintf(
 			"This is a resumed session for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). Re-read that file now, including your own prior Work Log entries, to reconstruct context, then continue the task.\n\n%s\n\n", copyName, prCompletionContract))
+		b.WriteString(fmt.Sprintf(resumeReconciliationNotice, defaultBranch, defaultBranch, defaultBranch))
 	} else {
 		b.WriteString(fmt.Sprintf(
 			"You are working on a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). It holds your task's frontmatter (status/repo/auto_merge/pr_url/session_id/etc.) and body (the task prompt below, plus a \"## Work Log\" section for your own narrative).\n\n"+
