@@ -184,7 +184,9 @@ func inspectRepoState(repoPath, branchName string) (branchExists, hasUncommitted
 // than erroring the whole alert if gh isn't available/functional (e.g. a
 // local-only test repo with no GitHub remote at all).
 func checkPRState(repoPath, branchName string) string {
-	out, err := exec.Command("gh", "pr", "view", branchName, "--json", "state,url").CombinedOutput()
+	cmd := exec.Command("gh", "pr", "view", branchName, "--json", "state,url")
+	cmd.Dir = repoPath
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "unknown (gh check failed or unavailable: " + strings.TrimSpace(string(out)) + ")"
 	}
