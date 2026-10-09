@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
+	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
@@ -31,8 +31,6 @@ type Enqueuer interface {
 	Enqueue(repoKey string, job Job)
 }
 
-const tasksDir = "Tasks"
-
 func claimableStatus(s string) bool {
 	return s == "ready" || s == "blocker_resolved"
 }
@@ -43,7 +41,7 @@ type scannedNote struct {
 }
 
 func scanTasks(vaultPath string) ([]scannedNote, error) {
-	pattern := filepath.Join(vaultPath, tasksDir, "*.md")
+	pattern := filepath.Join(vaultPath, taskmeta.TasksDir, "*.md")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: scanning %s: %w", pattern, err)
@@ -68,39 +66,6 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 		out = append(out, scannedNote{relPath: relPath, note: note})
 	}
 	return out, nil
-}
-
-func slugFromPath(relPath string) string {
-	base := filepath.Base(relPath)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
-	return slugify(name)
-}
-
-// slugify turns an arbitrary task-note title into the git-ref-safe,
-// filename-safe form every existing MDC task branch already uses (e.g.
-// "(MDC) PR35 Review Follow-up R2 (Fold ask TestMain, delete main_test.go)"
-// -> "mdc-pr35-review-follow-up-r2-fold-ask-testmain-delete-main_test-go"):
-// lowercase, any run of characters outside [a-z0-9_] collapsed to one
-// hyphen, leading/trailing hyphens trimmed. Found missing 2026-09-17 when
-// the first note ever processed by the Go runner in production (title had
-// spaces and parens) produced an invalid `git checkout -b` branch name --
-// every prior MDC task had gone through the old bash pipeline, which did
-// slugify, so this gap had never been exercised before.
-func slugify(s string) string {
-	var b strings.Builder
-	prevHyphen := false
-	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			b.WriteRune(r)
-			prevHyphen = false
-			continue
-		}
-		if !prevHyphen {
-			b.WriteByte('-')
-			prevHyphen = true
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }
 
 // RunDispatchPass syncs the vault, scans Tasks/ for ready/blocker_resolved
@@ -149,7 +114,7 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
 		}
 		relPath := candidates[i].relPath
 		stampedNow := now
-		err := v.WriteNote(relPath, fmt.Sprintf("dispatch: stamp ready_at for %s", slugFromPath(relPath)), func(n *notetask.Note) error {
+		err := v.WriteNote(relPath, fmt.Sprintf("dispatch: stamp ready_at for %s", taskmeta.SlugFromPath(relPath)), func(n *notetask.Note) error {
 			if n.Frontmatter.ReadyAt != nil && *n.Frontmatter.ReadyAt != "" {
 				return nil // someone else stamped it between scan and write; leave it
 			}
@@ -176,7 +141,7 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
 
 	for _, note := range notesOnly {
 		relPath := relPathOf[note]
-		slug := slugFromPath(relPath)
+		slug := taskmeta.SlugFromPath(relPath)
 		repoKey := note.Frontmatter.Repo
 
 		claimErr := v.WriteNote(relPath, fmt.Sprintf("dispatch: claim %s", slug), func(n *notetask.Note) error {
@@ -229,7 +194,7 @@ func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer) error {
 
 	for _, note := range notesOnly {
 		relPath := relPathOf[note]
-		slug := slugFromPath(relPath)
+		slug := taskmeta.SlugFromPath(relPath)
 		enq.Enqueue(note.Frontmatter.Repo, Job{NotePath: relPath, Repo: note.Frontmatter.Repo, Slug: slug})
 	}
 	return nil
