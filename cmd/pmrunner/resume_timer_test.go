@@ -137,3 +137,65 @@ func TestResumeTimerCancelStopsPendingTimer(t *testing.T) {
 		t.Error("handleTrip(nil) after cancel didn't set unknownSent -- cancel should reset it")
 	}
 }
+
+// TestResumeTimerArmsAfterUnknownTripThenKnownResetsAt is the RBG-25 Gap 1
+// regression: the stderr fallback trips first with no resetsAt (sends the
+// "unknown" message), and a later trip for the same pause episode does
+// carry a real resetsAt. The timer must still arm -- an already-sent
+// "unknown" message must not permanently block auto-resume -- and the
+// "unknown" message must fire exactly once.
+func TestResumeTimerArmsAfterUnknownTripThenKnownResetsAt(t *testing.T) {
+	srv, alerts := capturingDiscordServer(t)
+	defer srv.Close()
+
+	cfg := &config.Config{DiscordUserID: "12345", UsageLimitResumeGraceSeconds: 0}
+	notifier := &notify.Notifier{WebhookURL: srv.URL}
+
+	var doResumeCalls int
+	done := make(chan struct{}, 1)
+	mgr := newResumeTimerMgr(cfg, notifier, func() ([]string, error) {
+		doResumeCalls++
+		done <- struct{}{}
+		return nil, nil
+	})
+
+	mgr.handleTrip(nil)
+	got := waitForAlert(t, alerts)
+	if !strings.Contains(got.content, "unknown") {
+		t.Errorf("message %q missing \"unknown\" wording", got.content)
+	}
+	if !mgr.unknownSent {
+		t.Fatal("unknownSent not set after the first (unknown) trip")
+	}
+
+	resetsAt := time.Now().Add(100 * time.Millisecond)
+	mgr.handleTrip(&resetsAt)
+
+	if mgr.timer == nil {
+		t.Fatal("handleTrip with a real resetsAt after an unknown trip didn't arm the timer")
+	}
+	if mgr.unknownSent {
+		t.Error("unknownSent still true after the timer armed, want it cleared")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the auto-resume timer to fire")
+	}
+	if doResumeCalls != 1 {
+		t.Errorf("doResume called %d times, want 1", doResumeCalls)
+	}
+
+	// Exactly one more alert -- the timer's own "reset passed, resuming"
+	// message -- should have fired, not a second "unknown" message.
+	resumeAlert := waitForAlert(t, alerts)
+	if strings.Contains(resumeAlert.content, "unknown") {
+		t.Errorf("second alert %q repeats the \"unknown\" message, want it sent at most once per pause episode", resumeAlert.content)
+	}
+	select {
+	case a := <-alerts:
+		t.Errorf("unexpected third alert sent: %q", a.content)
+	default:
+	}
+}

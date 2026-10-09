@@ -162,6 +162,42 @@ func TestInvokeClaudeFallbackDetectsStderrMessage(t *testing.T) {
 	}
 }
 
+// TestInvokeClaudeUsageLimitBeforeIdleTimeoutWins is the RBG-25 Gap 2
+// regression: claude reports the limit via rate_limit_event and then hangs
+// (never exits) until the idle watchdog kills it. The real usage-limit
+// signal, reported before the process went silent, must win over
+// ErrIdleTimeout -- otherwise a mid-session limit hit gets masked as a plain
+// idle timeout and the pause never trips.
+func TestInvokeClaudeUsageLimitBeforeIdleTimeoutWins(t *testing.T) {
+	tmpDir := t.TempDir()
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+echo %s
+echo %s
+sleep 999999
+`, shQuote(initLine), shQuote(limitedRateLimitEventLine))
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake claude stub: %v", err)
+	}
+
+	const idleTimeout = 2 * time.Second
+	sessionID, _, err := invokeClaude(scriptPath, tmpDir, "irrelevant prompt", "", idleTimeout, nil)
+
+	var usageLimitErr *UsageLimitError
+	if !errors.As(err, &usageLimitErr) {
+		t.Fatalf("invokeClaude error = %v, want a *UsageLimitError even though the idle watchdog also fired", err)
+	}
+	if errors.Is(err, ErrIdleTimeout) {
+		t.Error("errors.Is(err, ErrIdleTimeout) = true, want the usage-limit error reported instead")
+	}
+	if usageLimitErr.ResetsAt == nil || !usageLimitErr.ResetsAt.Equal(time.Unix(1791552000, 0)) {
+		t.Errorf("ResetsAt = %v, want %v", usageLimitErr.ResetsAt, time.Unix(1791552000, 0))
+	}
+	if sessionID != "fake-usagelimit-session" {
+		t.Errorf("sessionID = %q, want it captured from the init line", sessionID)
+	}
+}
+
 // TestNormalBlockedNeverTripsPause confirms an ordinary crash-fallback
 // block (no usage-limit error from invokeClaude at all) never calls
 // pause.State.Trip/AddBlockedNote -- the pause is exactly as specific as

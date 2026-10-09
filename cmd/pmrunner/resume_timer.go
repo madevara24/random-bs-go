@@ -37,24 +37,33 @@ func newResumeTimerMgr(cfg *config.Config, notifier *notify.Notifier, doResume f
 // handleTrip is called every time a usage-limit block fires -- OnBlocked's
 // ScenarioUsageLimit case, or OnTerminal's self-reported-blocked-while-
 // tripped case. Idempotent by design: several concurrent tasks can all hit
-// the same global limit around the same time, and only the first such call
-// should either arm the timer or send the "reset time unknown" message --
-// every later call while either of those is still outstanding is a silent
-// no-op, re-armable again only once cancel() (a resume, manual or
-// automatic) has run.
+// the same global limit around the same time, and only the first call with
+// no usable resetsAt should send the "reset time unknown" message -- every
+// later call while a timer is already armed is a silent no-op, re-armable
+// again only once cancel() (a resume, manual or automatic) has run. But a
+// call that does carry a real resetsAt always arms the timer, even after an
+// earlier call already sent the "unknown" message, since that's the gap
+// this would otherwise leave: the first trip to land might have no
+// resetsAt (e.g. the stderr fallback) while a later one does, and the
+// pipeline must not stay stuck waiting on a manual resume once a real
+// reset time is known.
 func (m *resumeTimerMgr) handleTrip(resetsAt *time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.timer != nil || m.unknownSent {
+	if m.timer != nil {
 		return
 	}
 	if resetsAt == nil || !resetsAt.After(time.Now()) {
+		if m.unknownSent {
+			return
+		}
 		m.unknownSent = true
 		m.notifier.Send("", "", fmt.Sprintf(
 			"<@%s> The Claude usage limit's reset time is unknown -- the pipeline is **paused**; a manual `POST /resume` is needed once it clears.",
 			m.cfg.DiscordUserID), "", "")
 		return
 	}
+	m.unknownSent = false
 	grace := time.Duration(m.cfg.UsageLimitResumeGraceSeconds) * time.Second
 	d := time.Until(*resetsAt) + grace
 	m.timer = time.AfterFunc(d, func() {

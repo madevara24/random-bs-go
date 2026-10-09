@@ -54,10 +54,15 @@ func (s *State) Snapshot() Snapshot {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var resetsAt *time.Time
+	if s.resetsAt != nil {
+		t := *s.resetsAt
+		resetsAt = &t
+	}
 	return Snapshot{
 		Paused:       s.paused,
 		Reason:       s.reason,
-		ResetsAt:     s.resetsAt,
+		ResetsAt:     resetsAt,
 		BlockedNotes: append([]string(nil), s.blockedNotes...),
 	}
 }
