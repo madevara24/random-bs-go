@@ -19,6 +19,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
@@ -30,6 +31,47 @@ import (
 // particular) can say "the runner killed it for going idle," not just show
 // a bare exit code.
 var ErrIdleTimeout = errors.New("runner: idle timeout exceeded, process group killed")
+
+// ErrUsageLimit is the sentinel invokeClaude's returned error wraps (via
+// Unwrap, so errors.Is(err, ErrUsageLimit) works) when it detects the
+// claude CLI hit its Claude usage limit -- verified live 2026-10-09 against
+// claude 2.1.278: a dedicated rate_limit_event line with
+// rate_limit_info.status != "allowed", corroborated by a result event with
+// is_error == true and api_error_status == 429. Never keyed on
+// result.subtype (stays "success" even on the limit) or on overageStatus
+// (reads "rejected" in both the healthy and limited state).
+var ErrUsageLimit = errors.New("runner: claude usage limit hit")
+
+// UsageLimitError is the concrete error invokeClaude returns on a detected
+// usage limit -- a type (not a bare sentinel) so the resetsAt epoch
+// rate_limit_info reported can ride along with it. Use errors.As to recover
+// one from a wrapped error.
+type UsageLimitError struct {
+	// ResetsAt is rate_limit_info.resetsAt, converted from its Unix epoch --
+	// nil if the event never arrived with one (e.g. the stderr-tail
+	// fallback matched instead) or claude didn't report one.
+	ResetsAt *time.Time
+}
+
+func (e *UsageLimitError) Error() string {
+	if e.ResetsAt != nil {
+		return fmt.Sprintf("%s (resets at %s)", ErrUsageLimit, e.ResetsAt.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("%s (reset time unknown)", ErrUsageLimit)
+}
+
+func (e *UsageLimitError) Unwrap() error { return ErrUsageLimit }
+
+// UsageLimitInfo is threaded through AlertPayload and Deps.OnTerminal
+// whenever a blocked (or, in principle, failed/done) task's outcome was
+// caused by hitting the Claude usage limit on this very invocation -- nil
+// everywhere else. A pointer, not a bool, specifically so "tripped, but
+// resetsAt unknown" (ResetsAt == nil, UsageLimitInfo != nil) is
+// distinguishable from "not usage-limit-related at all" (UsageLimitInfo ==
+// nil).
+type UsageLimitInfo struct {
+	ResetsAt *time.Time
+}
 
 // ActivityReporter is the subset of worker.RepoWorker that ProcessTask
 // needs to report progress -- an interface so this package doesn't need
@@ -66,6 +108,16 @@ type Deps struct {
 	// (IDLE_TIMEOUT_MINUTES), read by both run modes.
 	IdleTimeout time.Duration
 
+	// Pause is the shared pipeline-pause flag -- nil is valid (every usage-
+	// limit-detection branch below is nil-safe) for any caller that doesn't
+	// wire one in, which is every existing test unless it specifically
+	// means to exercise this. Production always sets it: a single
+	// *pause.State constructed once in cmd/pmrunner/runner_mode.go and
+	// shared with dispatch.RunDispatchPass (via daemon.NewRunner) and every
+	// RepoWorker (via worker.New), so a trip here is visible everywhere
+	// else in the pipeline that needs to stop claiming/popping work.
+	Pause *pause.State
+
 	// OnBlocked fires synchronously, right after the vault note is written
 	// to status: blocked by the crash-fallback path, with the job that was
 	// blocked and the fully-built alert payload. nil is fine (defaults to a
@@ -96,7 +148,16 @@ type Deps struct {
 	// done+auto_merge task the PR is opened, not merged yet. discordThreadID
 	// is the task's discord_thread_id if it has one (empty otherwise) --
 	// the caller routes the message there instead of the top-level webhook.
-	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string)
+	//
+	// usageLimit is non-nil only when status == "blocked" and this very
+	// invocation's claude process hit the usage limit -- the "self-
+	// reported blocked while a limit is tripped" case: the copy still
+	// parsed fine with CC's own status: blocked, but invokeClaude's exit
+	// error says why. main.go's wiring uses this to mention Devara only
+	// (never Ara-Dev -- there's nothing for that gateway to unblock) and to
+	// arm/re-arm the auto-resume timer. nil for every other status and for
+	// an ordinary blocked with no usage-limit involvement.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -260,6 +321,18 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		fmt.Printf("[runner] task %s: claude exited cleanly\n", job.Slug)
 	}
 
+	// A usage-limit hit on this very invocation trips the shared pause
+	// regardless of what the copy read-back below finds -- the limit was
+	// genuinely hit either way, and dispatch/every repo worker need to stop
+	// claiming/popping work before the next task repeats the same 429.
+	var usageLimitErr *UsageLimitError
+	if errors.As(exitErr, &usageLimitErr) {
+		fmt.Printf("[runner] task %s: claude hit the usage limit\n", job.Slug)
+		if deps.Pause != nil {
+			deps.Pause.Trip(pause.ReasonUsageLimit, usageLimitErr.ResetsAt)
+		}
+	}
+
 	reporter.SetStage("result read-back")
 
 	// Delete the copy unconditionally at the end, regardless of which path
@@ -282,6 +355,12 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		if _, statErr := os.Stat(copyPath); statErr == nil {
 			scenario = ScenarioParseFailure
 		}
+		// A usage-limit hit on this invocation is the more specific, known
+		// cause -- it takes priority over the generic no-copy/parse-failure
+		// scenario, since we know exactly why the copy was never written.
+		if usageLimitErr != nil {
+			scenario = ScenarioUsageLimit
+		}
 		return handleCrashFallback(deps, job, crashInfo{
 			scenario:        scenario,
 			stage:           "result read-back",
@@ -291,14 +370,19 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			branchName:      branchName,
 			sessionID:       sessionID,
 			discordThreadID: discordThreadID,
+			usageLimit:      usageLimitInfoOf(usageLimitErr),
 		})
 
 	case !isTerminalStatus(copyAfter.Frontmatter.Status):
 		// Scenario 2: parsed fine, but CC never reached done/blocked/failed.
 		// Per the same trust rule, the runner *can* still fold in whatever
 		// did parse (e.g. partial Work Log content) before marking blocked.
+		scenario := ScenarioNonTerminal
+		if usageLimitErr != nil {
+			scenario = ScenarioUsageLimit
+		}
 		return handleCrashFallback(deps, job, crashInfo{
-			scenario:        ScenarioNonTerminal,
+			scenario:        scenario,
 			stage:           "result read-back",
 			exitErr:         exitErr,
 			stderrTail:      stderrTail,
@@ -308,6 +392,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			partialCopy:     copyAfter,
 			haveCopyToUse:   true,
 			discordThreadID: discordThreadID,
+			usageLimit:      usageLimitInfoOf(usageLimitErr),
 		})
 
 	case copyAfter.Frontmatter.Status == "done" && !hasPRURL(copyAfter.Frontmatter.PRURL):
@@ -315,8 +400,12 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		// done implies a PR was opened. Same partial-credit treatment as the
 		// non-terminal case above: fold in whatever did parse before marking
 		// blocked, rather than merging in a false "clean done".
+		scenario := ScenarioDoneWithoutPR
+		if usageLimitErr != nil {
+			scenario = ScenarioUsageLimit
+		}
 		return handleCrashFallback(deps, job, crashInfo{
-			scenario:        ScenarioDoneWithoutPR,
+			scenario:        scenario,
 			stage:           "result read-back",
 			exitErr:         exitErr,
 			stderrTail:      stderrTail,
@@ -326,6 +415,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			partialCopy:     copyAfter,
 			haveCopyToUse:   true,
 			discordThreadID: discordThreadID,
+			usageLimit:      usageLimitInfoOf(usageLimitErr),
 		})
 	}
 
@@ -352,6 +442,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 
+	var selfReportedUsageLimit *UsageLimitInfo
 	if terminalStatus == "blocked" {
 		// Self-reported blocked (CC itself set status: blocked and exited
 		// cleanly) -- same preserve-on-block treatment as the crash-fallback
@@ -360,13 +451,25 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		if err := preserveBlockedWork(repoCfg.Path, branchName); err != nil {
 			fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
 		}
+		// This invocation hit the usage limit, but CC still got a valid
+		// copy write in with its own status: blocked before claude exited --
+		// the "self-reported blocked while a limit is tripped" case: tag it
+		// the same as a crash-detected usage-limit block (Devara-only
+		// mention, recorded for auto-resume), via OnTerminal rather than
+		// OnBlocked since no crash-fallback path fired here.
+		if usageLimitErr != nil {
+			selfReportedUsageLimit = usageLimitInfoOf(usageLimitErr)
+			if deps.Pause != nil {
+				deps.Pause.AddBlockedNote(job.NotePath)
+			}
+		}
 	}
 
 	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit)
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
@@ -669,8 +772,10 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranc
 //
 // Returns the captured session_id (best-effort -- the crash-fallback path
 // handles the case where the process died before ever emitting one), the
-// last portion of stderr (for crash-fallback alert content), and either
-// the process's own exit error, or ErrIdleTimeout if the watchdog fired.
+// last portion of stderr (for crash-fallback alert content), and either the
+// process's own exit error, ErrIdleTimeout if the watchdog fired, or a
+// *UsageLimitError if a rate_limit_event/result line (or, as a fallback,
+// the stderr tail) says claude hit its usage limit.
 func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, string, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if resumeSessionID != "" {
@@ -715,6 +820,8 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 	}()
 
 	var sessionID string
+	var usageLimitHit bool
+	var usageLimitResetsAt *time.Time
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -743,6 +850,35 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 				sessionID = sid
 			}
 		}
+
+		// Detected inline as events stream, not deferred until after exit --
+		// a rate_limit_event line arrives well before claude's own process
+		// exit, and the primary discriminator is rate_limit_info.status:
+		// "allowed" is healthy, anything else (captured live: "rejected")
+		// is the limit. Deliberately never keyed on overageStatus (reads
+		// "rejected" in both the healthy and limited state) or on
+		// result.subtype (stays "success" even on the limit).
+		switch evt["type"] {
+		case "rate_limit_event":
+			if info, ok := evt["rate_limit_info"].(map[string]any); ok {
+				if status, _ := info["status"].(string); status != "" && status != "allowed" {
+					usageLimitHit = true
+					if ra, ok := info["resetsAt"].(float64); ok {
+						t := time.Unix(int64(ra), 0)
+						usageLimitResetsAt = &t
+					}
+				}
+			}
+		case "result":
+			// Corroborating signal, independent of the rate_limit_event
+			// above in case a future version ever omits it: is_error with a
+			// 429 api_error_status.
+			if isErr, _ := evt["is_error"].(bool); isErr {
+				if code, ok := evt["api_error_status"].(float64); ok && int(code) == 429 {
+					usageLimitHit = true
+				}
+			}
+		}
 	}
 
 	waitErr := cmd.Wait()
@@ -751,7 +887,36 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 	if watchdogFired.Load() {
 		return sessionID, stderrTail.String(), ErrIdleTimeout
 	}
+	if usageLimitHit {
+		return sessionID, stderrTail.String(), &UsageLimitError{ResetsAt: usageLimitResetsAt}
+	}
+	// Fallback: a future claude version could exit before ever emitting the
+	// structured event -- if the process errored out and its stderr tail
+	// still reads like a usage-limit message, treat it the same way, just
+	// without a known resetsAt.
+	if waitErr != nil && looksLikeUsageLimitMessage(stderrTail.String()) {
+		return sessionID, stderrTail.String(), &UsageLimitError{}
+	}
 	return sessionID, stderrTail.String(), waitErr
+}
+
+// looksLikeUsageLimitMessage is invokeClaude's fallback detector, for a
+// future claude version that exits before ever emitting a structured
+// rate_limit_event/result line -- a best-effort substring match against
+// the wording captured live 2026-10-09 ("You've hit your session limit").
+func looksLikeUsageLimitMessage(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "usage limit") || strings.Contains(s, "session limit") || strings.Contains(s, "rate limit")
+}
+
+// usageLimitInfoOf converts invokeClaude's error-typed usage-limit signal
+// into the plain data struct AlertPayload/OnTerminal carry -- nil in, nil
+// out.
+func usageLimitInfoOf(e *UsageLimitError) *UsageLimitInfo {
+	if e == nil {
+		return nil
+	}
+	return &UsageLimitInfo{ResetsAt: e.ResetsAt}
 }
 
 // tailWriter keeps only the last max bytes written to it -- a bounded

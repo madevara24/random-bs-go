@@ -155,10 +155,19 @@ func (w *Watcher) CheckStatusTasks() (map[string]TaskStatus, []StaleTask, error)
 		return nil, nil, fmt.Errorf("watcher: GET /status/tasks: unexpected status %d", resp.StatusCode)
 	}
 
-	var raw map[string]TaskStatus
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	// Mirrors httpapi.StatusTasksResponse -- see the same note on TaskStatus
+	// above about watcher deliberately decoding its own copy of the shape
+	// rather than importing httpapi. Paused/ResetsAt aren't consumed here
+	// yet (nothing in the watcher currently reacts to the pause), but
+	// decoding into the wrapper, not a bare map, is what keeps this in
+	// sync with the real response shape.
+	var wrapper struct {
+		Tasks map[string]TaskStatus `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
 		return nil, nil, fmt.Errorf("watcher: decoding /status/tasks response: %w", err)
 	}
+	raw := wrapper.Tasks
 
 	now := time.Now()
 	var stale []StaleTask

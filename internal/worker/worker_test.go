@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/pause"
 )
 
 // TestRepoWorkerFIFOConcurrencyAndPanicRecovery pushes several jobs across
@@ -130,5 +132,63 @@ waitLoop:
 	}
 	if maxAtOnce < 2 {
 		t.Logf("warning: never observed 2 concurrent tasks (maxAtOnce=%d) -- concurrency assertion is weak on this run", maxAtOnce)
+	}
+}
+
+// TestRepoWorkerDoesNotPopWhilePaused is the worker-side half of RBG-24's
+// pause guard: with a job already queued and Pause tripped, Run's drain
+// loop must leave it in the queue (never pop it) until the pause clears --
+// otherwise a usage-limit event on one task wouldn't stop the very next
+// queued job on this same repo from immediately hitting the same limit.
+func TestRepoWorkerDoesNotPopWhilePaused(t *testing.T) {
+	var processed []string
+	var mu sync.Mutex
+	globalSlots := NewGlobalSlots(1)
+	w := New("repo-a", globalSlots, func(job Job) error {
+		mu.Lock()
+		processed = append(processed, job.Slug)
+		mu.Unlock()
+		return nil
+	})
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	w.Pause = &p
+
+	go w.Run()
+	w.Enqueue(Job{Repo: "repo-a", Slug: "repo-a-1", NotePath: "Tasks/a1.md"})
+
+	// Give the drain loop every chance to (incorrectly) pop the job.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	gotWhilePaused := append([]string(nil), processed...)
+	mu.Unlock()
+	if len(gotWhilePaused) != 0 {
+		t.Fatalf("processed %v while paused, want nothing popped", gotWhilePaused)
+	}
+	if n := w.QueueLen(); n != 1 {
+		t.Fatalf("QueueLen() while paused = %d, want 1 (job left queued, not popped)", n)
+	}
+
+	// Clearing the pause alone isn't enough to wake a goroutine blocked on
+	// <-w.wake -- confirms Wake is the real unstick mechanism main.go's
+	// resume path relies on.
+	p.Clear()
+	w.Wake()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		done := len(processed) == 1
+		mu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the queued job to drain after resume")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }

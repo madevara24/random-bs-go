@@ -41,6 +41,13 @@ type Config struct {
 	// posted top-level via DiscordWebhookURL.
 	DiscordTaskForumWebhookURL string
 
+	// UsageLimitResumeGraceSeconds is how long after rate_limit_info's
+	// resetsAt the auto-resume timer waits before actually resuming --
+	// resuming exactly at the reset second can race clock drift between
+	// this host and Anthropic's, so a grace buffer absorbs that. Optional,
+	// defaults to 60.
+	UsageLimitResumeGraceSeconds int
+
 	// From repos.json
 	Repos map[string]RepoConfig
 
@@ -84,6 +91,10 @@ var requiredKeys = []requiredEnvKey{
 // HTTP_PORT is optional, with a default -- not load-bearing enough to
 // require, unlike the keys above.
 const defaultHTTPPort = 8420
+
+// defaultUsageLimitResumeGraceSeconds is USAGE_LIMIT_RESUME_GRACE_SECONDS's
+// default when unset.
+const defaultUsageLimitResumeGraceSeconds = 60
 
 // parseEnvFile reads a simple KEY=VALUE .env file: blank lines and lines
 // starting with '#' are ignored, no quoting/escaping support (matches the
@@ -158,9 +169,10 @@ func Load(envPath, reposPath string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTPPort:  defaultHTTPPort,
-		EnvPath:   envPath,
-		ReposPath: reposPath,
+		HTTPPort:                     defaultHTTPPort,
+		UsageLimitResumeGraceSeconds: defaultUsageLimitResumeGraceSeconds,
+		EnvPath:                      envPath,
+		ReposPath:                    reposPath,
 	}
 
 	for _, rk := range requiredKeys {
@@ -183,6 +195,14 @@ func Load(envPath, reposPath string) (*Config, error) {
 
 	if v, ok := raw["DISCORD_TASK_FORUM_WEBHOOK_URL"]; ok && v != "" {
 		cfg.DiscordTaskForumWebhookURL = v
+	}
+
+	if v, ok := raw["USAGE_LIMIT_RESUME_GRACE_SECONDS"]; ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("config: USAGE_LIMIT_RESUME_GRACE_SECONDS must be a non-negative integer, got %q (in %s)", v, envPath)
+		}
+		cfg.UsageLimitResumeGraceSeconds = n
 	}
 
 	repos, err := loadRepos(reposPath)

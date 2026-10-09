@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
@@ -109,7 +110,16 @@ func slugify(s string) string {
 // dedicated goroutine at a time, with wake-channel coalescing handled one
 // layer up in the daemon boot code, so that only one pass ever runs at a
 // time.
-func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer) error {
+//
+// p is the shared pipeline-pause flag -- nil is valid (treated as never
+// paused) for any caller that doesn't wire one in. While paused, this
+// returns immediately before syncing or claiming anything: every
+// ready/blocker_resolved note stays exactly as it is (ready stays ready,
+// not queued) until a human or the auto-resume timer clears the pause.
+func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
+	if p.IsPaused() {
+		return nil
+	}
 	if err := v.Sync(); err != nil {
 		return fmt.Errorf("dispatch: sync: %w", err)
 	}

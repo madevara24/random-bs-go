@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/madevara24/random-bs-go/internal/dispatch"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
@@ -23,12 +24,17 @@ type Runner struct {
 	// DispatchWake is the size-1 buffered channel the HTTP /dispatch
 	// handler sends into. RunDispatchLoop is the consumer.
 	DispatchWake chan struct{}
+
+	// Pause is the shared pipeline-pause flag, forwarded to every
+	// dispatch.RunDispatchPass call below -- nil means never paused, same
+	// default as every other package that takes one.
+	Pause *pause.State
 }
 
 // NewRunner constructs a Runner. Does not touch disk or start any
 // goroutines.
-func NewRunner(vault *vaultgit.Vault, workers worker.Workers) *Runner {
-	return &Runner{Vault: vault, Workers: workers, DispatchWake: make(chan struct{}, 1)}
+func NewRunner(vault *vaultgit.Vault, workers worker.Workers, p *pause.State) *Runner {
+	return &Runner{Vault: vault, Workers: workers, DispatchWake: make(chan struct{}, 1), Pause: p}
 }
 
 // Boot runs the startup sequence required before the daemon may accept any
@@ -53,7 +59,7 @@ func (r *Runner) Boot() error {
 // RunDispatchPass runs one full dispatch pass (sync -> scan -> claim ->
 // enqueue) against this Runner's vault and workers.
 func (r *Runner) RunDispatchPass() error {
-	return dispatch.RunDispatchPass(r.Vault, r.Workers)
+	return dispatch.RunDispatchPass(r.Vault, r.Workers, r.Pause)
 }
 
 // RunDispatchLoop blocks forever, running exactly one dispatch pass each

@@ -53,6 +53,18 @@ const (
 // collision a plain sequential iota would hide.
 const ScenarioDoneWithoutPR Scenario = 4
 
+// ScenarioUsageLimit: this invocation's claude process hit the Claude usage
+// limit (see runner.go's UsageLimitError/ErrUsageLimit) -- takes priority
+// over whichever of the scenarios above the copy read-back would otherwise
+// have picked, since the real cause is known rather than merely inferred
+// from the copy's state. Distinct from every other scenario in one more
+// way: handleCrashFallback also records this task's note in the shared
+// pause state for main.go's later auto-resume, and the mention set this
+// scenario's DiscordMessage uses is Devara-only (see that method) --
+// there's nothing for the `dev` Ara-Dev gateway to unblock, the cause
+// clears on its own.
+const ScenarioUsageLimit Scenario = 5
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -65,6 +77,8 @@ func (s Scenario) String() string {
 		return "done_without_pr"
 	case ScenarioSetupFailure:
 		return "setup_failure"
+	case ScenarioUsageLimit:
+		return "usage_limit"
 	default:
 		return "unknown"
 	}
@@ -90,6 +104,13 @@ type crashInfo struct {
 	// carried through to AlertPayload so the blocked alert routes into the
 	// task's own thread instead of the top-level webhook.
 	discordThreadID string
+
+	// usageLimit is non-nil only when this invocation's claude process hit
+	// the usage limit -- carried through to AlertPayload.UsageLimit
+	// regardless of which scenario fires, so a future caller could in
+	// principle inspect it even on a scenario the override logic in
+	// ProcessTask didn't retag as ScenarioUsageLimit.
+	usageLimit *UsageLimitInfo
 }
 
 // AlertPayload is the crash-fallback alert's content -- a short Discord
@@ -106,6 +127,12 @@ type AlertPayload struct {
 	// DiscordThreadID is the task's discord_thread_id, if it has one --
 	// the caller routes this alert there instead of the top-level webhook.
 	DiscordThreadID string
+
+	// UsageLimit is non-nil exactly when Scenario == ScenarioUsageLimit --
+	// DiscordMessage/AttachmentMarkdown use it to report the known reset
+	// time, if any. Kept as a separate field (rather than inferred solely
+	// from Scenario) so callers outside this package can check it directly.
+	UsageLimit *UsageLimitInfo
 
 	WatchdogKilled bool
 	ExitCode       int // -1 if unknown/signal-terminated
@@ -125,12 +152,28 @@ type AlertPayload struct {
 // `dev` gateway picks up its own mention and auto-threads its reply --
 // the 2026-08-31 decision.
 func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
+	if p.Scenario == ScenarioUsageLimit {
+		// Devara only, never Ara-Dev: there's nothing for the `dev` gateway
+		// to unblock here -- the cause is external and clears on its own
+		// once the reset time (if known) passes.
+		return fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
+			mentionID, p.Slug, p.Repo, resetsAtSuffix(p.UsageLimit))
+	}
 	if p.Scenario == ScenarioDoneWithoutPR {
 		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
 			mentionID, araDevMentionID, p.Slug, p.Repo)
 	}
 	return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
 		mentionID, araDevMentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
+}
+
+// resetsAtSuffix is DiscordMessage's " (resets at ...)" clause for a usage-
+// limit block, or "" if the reset time is unknown.
+func resetsAtSuffix(u *UsageLimitInfo) string {
+	if u == nil || u.ResetsAt == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (resets at %s)", u.ResetsAt.UTC().Format(time.RFC3339))
 }
 
 // AttachmentMarkdown is the fuller diagnosable content: task slug/repo,
@@ -147,6 +190,13 @@ func (p AlertPayload) AttachmentMarkdown() string {
 	}
 	if p.Scenario == ScenarioDoneWithoutPR {
 		b.WriteString("- **Cause**: CC self-reported `status: done` but left `pr_url` empty -- no crash occurred, claude exited cleanly. The work may be real but is unverified as shipped (no commit/push/PR confirmed).\n")
+	}
+	if p.Scenario == ScenarioUsageLimit {
+		reset := "unknown"
+		if p.UsageLimit != nil && p.UsageLimit.ResetsAt != nil {
+			reset = p.UsageLimit.ResetsAt.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(&b, "- **Cause**: claude reported hitting the Claude usage limit (rate_limit_info.status != \"allowed\", or a result event with is_error+429) -- not a crash. The whole pipeline is paused until the limit resets (%s); this task will auto-resume via `--resume` once it does.\n", reset)
 	}
 	fmt.Fprintf(&b, "- **Exit code**: %d\n", p.ExitCode)
 	if p.ExitErrText != "" {
@@ -233,6 +283,14 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
 	}
 
+	if info.scenario == ScenarioUsageLimit && deps.Pause != nil {
+		// Records this task for main.go's later auto-resume: once the
+		// limit resets, every note recorded here flips blocked ->
+		// blocker_resolved and the normal claim path picks it back up via
+		// --resume.
+		deps.Pause.AddBlockedNote(job.NotePath)
+	}
+
 	branchExists, hasUncommitted := inspectRepoState(info.repoPath, info.branchName)
 	payload := AlertPayload{
 		Slug:                  job.Slug,
@@ -240,6 +298,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		Scenario:              info.scenario,
 		Stage:                 info.stage,
 		DiscordThreadID:       info.discordThreadID,
+		UsageLimit:            info.usageLimit,
 		WatchdogKilled:        errorIsIdleTimeout(info.exitErr),
 		ExitCode:              exitCodeOf(info.exitErr),
 		StderrTail:            info.stderrTail,
