@@ -63,7 +63,12 @@ func runRunner(cfg *config.Config) {
 		}
 	}
 
-	runnerDeps := runner.Deps{
+	// Declared (zero-valued) before the composite literal, rather than via
+	// :=, so MergeGateFactory's closure below can read runnerDeps.ClaudeBin
+	// by name -- the one source for the claude binary both it and
+	// ProcessTask use, instead of each hardcoding "claude" independently.
+	var runnerDeps runner.Deps
+	runnerDeps = runner.Deps{
 		Vault:       vault,
 		Repos:       cfg.Repos,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
@@ -83,7 +88,7 @@ func runRunner(cfg *config.Config) {
 				RepoPath:      repoCfg.Path,
 				PRURL:         prURL,
 				DefaultBranch: repoCfg.DefaultBranch,
-				ClaudeBin:     "claude",
+				ClaudeBin:     runnerDeps.ClaudeBin,
 				CodingSession: sessionID,
 			}
 		},
@@ -178,7 +183,7 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr
 		if status == "blocked" && usageLimit != nil {
 			notifier.Send(job.NotePath, discordThreadID,
 				fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See its Work Log.",
-					cfg.DiscordUserID, job.Slug, job.Repo, resetsAtSuffix(usageLimit)),
+					cfg.DiscordUserID, job.Slug, job.Repo, usageLimit.ResetsAtSuffix()),
 				job.Slug+".md", "# Task blocked: usage limit\n\n"+workLog+"\n")
 			resumeMgr.handleTrip(usageLimit.ResetsAt)
 			return
@@ -203,17 +208,6 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr
 			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, status),
 			job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
 	}
-}
-
-// resetsAtSuffix is newTerminalHandler's " (resets at ...)" clause for a
-// usage-limit block, or "" if the reset time is unknown -- mirrors
-// crashfallback.go's own resetsAtSuffix for AlertPayload, kept as a
-// separate copy since that one is unexported in a different package.
-func resetsAtSuffix(u *runner.UsageLimitInfo) string {
-	if u == nil || u.ResetsAt == nil {
-		return ""
-	}
-	return fmt.Sprintf(" (resets at %s)", u.ResetsAt.UTC().Format(time.RFC3339))
 }
 
 // newPanicHandler builds the RepoWorker.OnPanic callback wired into

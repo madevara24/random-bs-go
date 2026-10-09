@@ -157,7 +157,7 @@ func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
 		// to unblock here -- the cause is external and clears on its own
 		// once the reset time (if known) passes.
 		return fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
-			mentionID, p.Slug, p.Repo, resetsAtSuffix(p.UsageLimit))
+			mentionID, p.Slug, p.Repo, p.UsageLimit.ResetsAtSuffix())
 	}
 	if p.Scenario == ScenarioDoneWithoutPR {
 		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
@@ -165,15 +165,6 @@ func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
 	}
 	return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
 		mentionID, araDevMentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
-}
-
-// resetsAtSuffix is DiscordMessage's " (resets at ...)" clause for a usage-
-// limit block, or "" if the reset time is unknown.
-func resetsAtSuffix(u *UsageLimitInfo) string {
-	if u == nil || u.ResetsAt == nil {
-		return ""
-	}
-	return fmt.Sprintf(" (resets at %s)", u.ResetsAt.UTC().Format(time.RFC3339))
 }
 
 // AttachmentMarkdown is the fuller diagnosable content: task slug/repo,

@@ -14,13 +14,11 @@ package runner
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/notetask"
-	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
@@ -172,22 +170,11 @@ func restoreRepo(job worker.Job, info setupFailureInfo) {
 		return
 	}
 
-	runGit := func(args ...string) error {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = info.repoCfg.Path
-		cmd.Env = vaultgit.CleanGitEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), info.repoCfg.Path, err, out)
-		}
-		return nil
-	}
-
-	if err := runGit("checkout", info.repoCfg.DefaultBranch); err != nil {
+	if err := runGitCommand(info.repoCfg.Path, "checkout", info.repoCfg.DefaultBranch); err != nil {
 		fmt.Printf("[runner] task %s: cleanup: failed to check out default branch %s: %v\n", job.Slug, info.repoCfg.DefaultBranch, err)
 	}
 	if info.branchName != "" {
-		if err := runGit("branch", "-D", info.branchName); err != nil {
+		if err := runGitCommand(info.repoCfg.Path, "branch", "-D", info.branchName); err != nil {
 			fmt.Printf("[runner] task %s: cleanup: failed to delete branch %s: %v\n", job.Slug, info.branchName, err)
 		}
 	}
