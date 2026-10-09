@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-
-	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
 // blockPreserveExcludePaths lists paths that must never be swept into a
@@ -38,14 +36,7 @@ var blockPreserveExcludePaths = []string{".serena", ".claude"}
 // branch the clone happens to be sitting on.
 func preserveBlockedWork(repoPath, branchName string) error {
 	run := func(args ...string) error {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repoPath
-		cmd.Env = vaultgit.CleanGitEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), repoPath, err, out)
-		}
-		return nil
+		return runGitCommand(repoPath, args...)
 	}
 
 	current, err := currentGitBranch(repoPath)

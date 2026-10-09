@@ -73,6 +73,19 @@ type UsageLimitInfo struct {
 	ResetsAt *time.Time
 }
 
+// ResetsAtSuffix is the " (resets at ...)" clause a usage-limit message
+// appends, or "" if the reset time is unknown -- nil-safe, so it can be
+// called directly on a possibly-nil *UsageLimitInfo. Shared by
+// crashfallback.go's AlertPayload.DiscordMessage and
+// cmd/pmrunner/runner_mode.go's newTerminalHandler, the two places that
+// render this same clause.
+func (u *UsageLimitInfo) ResetsAtSuffix() string {
+	if u == nil || u.ResetsAt == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (resets at %s)", u.ResetsAt.UTC().Format(time.RFC3339))
+}
+
 // ActivityReporter is the subset of worker.RepoWorker that ProcessTask
 // needs to report progress -- an interface so this package doesn't need
 // worker's concrete type for anything except the Job it's handed (and
@@ -345,62 +358,48 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}()
 
 	copyAfter, copyErr := readNoteCopy(copyPath)
+
+	var scenario Scenario
+	var partialCopy *notetask.Note
+	var haveCopyToUse bool
+	isCrash := true
 	switch {
 	case copyErr != nil:
 		// Scenario 1 (no copy at all) and scenario 3 (copy exists but fails
 		// to parse) are handled identically: a parse failure means the
 		// runner can't trust *anything* in the copy, no partial credit,
 		// same as no copy existing to begin with.
-		scenario := ScenarioNoCopy
+		scenario = ScenarioNoCopy
 		if _, statErr := os.Stat(copyPath); statErr == nil {
 			scenario = ScenarioParseFailure
 		}
-		// A usage-limit hit on this invocation is the more specific, known
-		// cause -- it takes priority over the generic no-copy/parse-failure
-		// scenario, since we know exactly why the copy was never written.
-		if usageLimitErr != nil {
-			scenario = ScenarioUsageLimit
-		}
-		return handleCrashFallback(deps, job, crashInfo{
-			scenario:        scenario,
-			stage:           "result read-back",
-			exitErr:         exitErr,
-			stderrTail:      stderrTail,
-			repoPath:        repoCfg.Path,
-			branchName:      branchName,
-			sessionID:       sessionID,
-			discordThreadID: discordThreadID,
-			usageLimit:      usageLimitInfoOf(usageLimitErr),
-		})
 
 	case !isTerminalStatus(copyAfter.Frontmatter.Status):
 		// Scenario 2: parsed fine, but CC never reached done/blocked/failed.
 		// Per the same trust rule, the runner *can* still fold in whatever
 		// did parse (e.g. partial Work Log content) before marking blocked.
-		scenario := ScenarioNonTerminal
-		if usageLimitErr != nil {
-			scenario = ScenarioUsageLimit
-		}
-		return handleCrashFallback(deps, job, crashInfo{
-			scenario:        scenario,
-			stage:           "result read-back",
-			exitErr:         exitErr,
-			stderrTail:      stderrTail,
-			repoPath:        repoCfg.Path,
-			branchName:      branchName,
-			sessionID:       sessionID,
-			partialCopy:     copyAfter,
-			haveCopyToUse:   true,
-			discordThreadID: discordThreadID,
-			usageLimit:      usageLimitInfoOf(usageLimitErr),
-		})
+		scenario = ScenarioNonTerminal
+		partialCopy = copyAfter
+		haveCopyToUse = true
 
 	case copyAfter.Frontmatter.Status == "done" && !hasPRURL(copyAfter.Frontmatter.PRURL):
 		// A done copy with no pr_url can't be trusted as a clean finish --
 		// done implies a PR was opened. Same partial-credit treatment as the
 		// non-terminal case above: fold in whatever did parse before marking
 		// blocked, rather than merging in a false "clean done".
-		scenario := ScenarioDoneWithoutPR
+		scenario = ScenarioDoneWithoutPR
+		partialCopy = copyAfter
+		haveCopyToUse = true
+
+	default:
+		isCrash = false
+	}
+
+	if isCrash {
+		// A usage-limit hit on this invocation is the more specific, known
+		// cause -- it takes priority over whichever scenario above the copy
+		// read-back would otherwise have picked, since we know exactly why
+		// things went the way they did.
 		if usageLimitErr != nil {
 			scenario = ScenarioUsageLimit
 		}
@@ -412,8 +411,8 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			repoPath:        repoCfg.Path,
 			branchName:      branchName,
 			sessionID:       sessionID,
-			partialCopy:     copyAfter,
-			haveCopyToUse:   true,
+			partialCopy:     partialCopy,
+			haveCopyToUse:   haveCopyToUse,
 			discordThreadID: discordThreadID,
 			usageLimit:      usageLimitInfoOf(usageLimitErr),
 		})
@@ -472,7 +471,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit)
 	}
 
-	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" && prURL != "<nil>" {
+	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {
 		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID)
 	}
 
@@ -529,7 +528,7 @@ func resolveAutoMerge(taskValue *bool, repoDefault bool) bool {
 
 func derefStr(s *string) string {
 	if s == nil {
-		return "<nil>"
+		return ""
 	}
 	return *s
 }
@@ -608,6 +607,25 @@ func readNoteCopy(copyPath string) (*notetask.Note, error) {
 	return note, nil
 }
 
+// runGitCommand runs `git <args...>` in dir with a clean environment, returning a
+// combined-output error in the shape every crash/setup alert's diagnostics
+// depend on -- shared by every call site that needs that exact error text
+// (pullAndBranch, checkoutTaskBranch here, plus restoreRepo and
+// preserveBlockedWork in their own files). Call sites that only need a
+// quick boolean/output check (inspectRepoState, localBranchExists,
+// currentGitBranch, hasStagedChanges) use `git -C` directly instead, since
+// they don't need CleanGitEnv or this error shape.
+func runGitCommand(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = vaultgit.CleanGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), dir, err, out)
+	}
+	return nil
+}
+
 // pullAndBranch starts the clone from a known-clean copy of the default
 // branch before creating the task branch -- fetch, force-checkout the
 // default branch (so a dirty tree left behind by whatever this clone was
@@ -620,14 +638,7 @@ func readNoteCopy(copyPath string) (*notetask.Note, error) {
 // `checkout <default>` is not enough on its own.
 func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 	run := func(args ...string) error {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repoCfg.Path
-		cmd.Env = vaultgit.CleanGitEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), repoCfg.Path, err, out)
-		}
-		return nil
+		return runGitCommand(repoCfg.Path, args...)
 	}
 	if err := run("fetch", "origin", repoCfg.DefaultBranch); err != nil {
 		return err
@@ -658,14 +669,7 @@ func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 // runner.
 func checkoutTaskBranch(repoCfg config.RepoConfig, branchName string) error {
 	run := func(args ...string) error {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repoCfg.Path
-		cmd.Env = vaultgit.CleanGitEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git %s (in %s): %w\n%s", strings.Join(args, " "), repoCfg.Path, err, out)
-		}
-		return nil
+		return runGitCommand(repoCfg.Path, args...)
 	}
 	if err := run("fetch", "origin", branchName); err != nil {
 		return err

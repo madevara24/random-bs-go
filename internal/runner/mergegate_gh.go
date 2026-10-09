@@ -120,14 +120,13 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 // reviewOnce is the actual claude -p review invocation + verdict parsing,
 // pulled out of RunReview so it's directly testable with hand-built
 // prBody/diff content (see TestRealReviewInvocation) without needing a
-// real PR/gh state to fetch from.
-// reviewOnce is this package's other claude invocation, separate from
-// invokeClaude -- it runs --output-format json, not stream-json, so it
-// never streams a rate_limit_event line and isn't covered by this task's
-// usage-limit detection/pause (RBG-24, out of scope). A review session
-// hitting the limit mid-loop would surface as a plain invocation error
-// here, handled (or not) by whatever already calls RunReview, not by
-// pause.State.
+// real PR/gh state to fetch from. It's this package's other claude
+// invocation, separate from invokeClaude -- it runs --output-format json,
+// not stream-json, so it never streams a rate_limit_event line and isn't
+// covered by this task's usage-limit detection/pause (RBG-24, out of
+// scope). A review session hitting the limit mid-loop would surface as a
+// plain invocation error here, handled (or not) by whatever already calls
+// RunReview, not by pause.State.
 func reviewOnce(claudeBin, repoPath string, timeout time.Duration, round int, prBody, diff, priorComments string) (ReviewVerdict, string, error) {
 	prompt := buildReviewPrompt(round, prBody, diff, priorComments)
 
