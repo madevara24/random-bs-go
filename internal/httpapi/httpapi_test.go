@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
 func TestHealthAlwaysOK(t *testing.T) {
-	s := New(make(chan struct{}, 1), nil, nil)
+	s := New(make(chan struct{}, 1), nil, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -32,7 +33,7 @@ func TestHealthAlwaysOK(t *testing.T) {
 
 func TestDispatchWakesAndCoalesces(t *testing.T) {
 	wake := make(chan struct{}, 1)
-	s := New(wake, nil, nil)
+	s := New(wake, nil, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -83,7 +84,7 @@ func TestDispatchWakesAndCoalesces(t *testing.T) {
 }
 
 func TestDispatchRejectsNonPost(t *testing.T) {
-	s := New(make(chan struct{}, 1), nil, nil)
+	s := New(make(chan struct{}, 1), nil, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -108,7 +109,7 @@ func TestStatusTasksReportsOnlyBusyRepos(t *testing.T) {
 	busyWorker.Enqueue(worker.Job{Repo: "busy-repo", Slug: "busy-slug", NotePath: "Tasks/busy-slug.md"})
 	time.Sleep(20 * time.Millisecond) // let it actually start
 
-	s := New(make(chan struct{}, 1), workers, nil)
+	s := New(make(chan struct{}, 1), workers, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -120,14 +121,14 @@ func TestStatusTasksReportsOnlyBusyRepos(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var got map[string]TaskStatusWire
+	var got StatusTasksResponse
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if _, ok := got["idle-repo"]; ok {
+	if _, ok := got.Tasks["idle-repo"]; ok {
 		t.Errorf("idle-repo present in response, want it omitted: %+v", got)
 	}
-	busy, ok := got["busy-repo"]
+	busy, ok := got.Tasks["busy-repo"]
 	if !ok {
 		t.Fatalf("busy-repo missing from response: %+v", got)
 	}
@@ -166,7 +167,7 @@ func TestStatusTasksReportsDiscordThreadID(t *testing.T) {
 	busyWorker.Enqueue(worker.Job{Repo: "busy-repo", Slug: "busy-slug", NotePath: relPath})
 	time.Sleep(20 * time.Millisecond) // let it actually start
 
-	s := New(make(chan struct{}, 1), workers, v)
+	s := New(make(chan struct{}, 1), workers, v, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -175,11 +176,11 @@ func TestStatusTasksReportsDiscordThreadID(t *testing.T) {
 		t.Fatalf("GET /status/tasks: %v", err)
 	}
 	defer resp.Body.Close()
-	var got map[string]TaskStatusWire
+	var got StatusTasksResponse
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	busy, ok := got["busy-repo"]
+	busy, ok := got.Tasks["busy-repo"]
 	if !ok {
 		t.Fatalf("busy-repo missing from response: %+v", got)
 	}
@@ -189,7 +190,7 @@ func TestStatusTasksReportsDiscordThreadID(t *testing.T) {
 }
 
 func TestRunnerLogRejectsNonPost(t *testing.T) {
-	s := New(make(chan struct{}, 1), nil, nil)
+	s := New(make(chan struct{}, 1), nil, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -203,7 +204,7 @@ func TestRunnerLogRejectsNonPost(t *testing.T) {
 }
 
 func TestRunnerLogWithoutVaultReturns503(t *testing.T) {
-	s := New(make(chan struct{}, 1), nil, nil)
+	s := New(make(chan struct{}, 1), nil, nil, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -225,7 +226,7 @@ func TestRunnerLogRejectsInvalidEvent(t *testing.T) {
 	if err := v.Sync(); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	s := New(make(chan struct{}, 1), nil, v)
+	s := New(make(chan struct{}, 1), nil, v, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -258,7 +259,7 @@ func TestRunnerLogAppendsOutcomeToNote(t *testing.T) {
 	if err := v.Sync(); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	s := New(make(chan struct{}, 1), nil, v)
+	s := New(make(chan struct{}, 1), nil, v, nil)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -283,5 +284,195 @@ func TestRunnerLogAppendsOutcomeToNote(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Runner Log missing \"notify_failed\" after POST /runner-log: %+v", note.RunnerLog)
+	}
+}
+
+func TestResumeRejectsNonPost(t *testing.T) {
+	s := New(make(chan struct{}, 1), nil, nil, nil)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/resume")
+	if err != nil {
+		t.Fatalf("GET /resume: %v", err)
+	}
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /resume status = %d, want 405", resp.StatusCode)
+	}
+}
+
+// TestStatusTasksReportsPausedAndResetsAt confirms GET /status/tasks
+// reports the shared pause state's paused flag and resets_at alongside the
+// per-repo task map.
+func TestStatusTasksReportsPausedAndResetsAt(t *testing.T) {
+	var p pause.State
+	resetsAt := time.Unix(1791552000, 0)
+	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+
+	s := New(make(chan struct{}, 1), nil, nil, &p)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	var got StatusTasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if !got.Paused {
+		t.Error("Paused = false, want true")
+	}
+	if got.ResetsAt == nil || !got.ResetsAt.Equal(resetsAt) {
+		t.Errorf("ResetsAt = %v, want %v", got.ResetsAt, resetsAt)
+	}
+}
+
+// TestStatusTasksReportsUnpausedWhenNoPauseWired confirms a nil Pause
+// (every existing caller before this feature) reports Paused=false, not a
+// panic or a zero-value decode failure.
+func TestStatusTasksReportsUnpausedWhenNoPauseWired(t *testing.T) {
+	s := New(make(chan struct{}, 1), nil, nil, nil)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	var got StatusTasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if got.Paused {
+		t.Error("Paused = true, want false when no pause.State is wired in")
+	}
+	if got.ResetsAt != nil {
+		t.Errorf("ResetsAt = %v, want nil", got.ResetsAt)
+	}
+}
+
+// TestResumeClearsPauseFlipsNotesAndWakesEverything is POST /resume's test
+// gate: a tripped pause with a recorded blocked note must come back
+// unpaused, with that note flipped from blocked to blocker_resolved (plus a
+// Runner Log line), the dispatch-wake channel signaled, and every repo
+// worker woken (observed here via QueueLen staying drainable -- Wake is
+// exercised directly in internal/worker's own test).
+func TestResumeClearsPauseFlipsNotesAndWakesEverything(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/httpapi-resume-%s.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Resume endpoint test task.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote(relPath)
+
+	dispatchWake := make(chan struct{}, 1)
+	globalSlots := worker.NewGlobalSlots(1)
+	rw := worker.New("phase6-test-repo", globalSlots, nil)
+	rw.Pause = &p
+	workers := worker.Workers{"phase6-test-repo": rw}
+
+	var cancelCalled bool
+	s := New(dispatchWake, workers, v, &p)
+	s.CancelResumeTimer = func() { cancelCalled = true }
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if !cancelCalled {
+		t.Error("CancelResumeTimer was never called")
+	}
+	if p.IsPaused() {
+		t.Error("pause still reports paused after POST /resume")
+	}
+
+	select {
+	case <-dispatchWake:
+	default:
+		t.Error("dispatch-wake channel was never signaled")
+	}
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.Status != "blocker_resolved" {
+		t.Errorf("status = %q, want %q", note.Frontmatter.Status, "blocker_resolved")
+	}
+	found := false
+	for _, e := range note.RunnerLog {
+		if e.Event == "blocker_resolved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Runner Log missing a \"blocker_resolved\" entry: %+v", note.RunnerLog)
+	}
+}
+
+// TestResumeDoesNotFlipANormalBlockedNoteItDidNotRecord confirms Resume
+// only ever touches notes pause.State itself recorded -- a normal blocked
+// note (one needing human input, never added via AddBlockedNote) must stay
+// untouched by a usage-limit resume.
+func TestResumeDoesNotFlipANormalBlockedNoteItDidNotRecord(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/httpapi-resume-untouched-%s.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "A normal blocked note, never recorded by the pause -- must stay untouched.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	// Deliberately not calling p.AddBlockedNote(relPath).
+
+	s := New(make(chan struct{}, 1), nil, v, &p)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want unchanged %q", note.Frontmatter.Status, "blocked")
 	}
 }

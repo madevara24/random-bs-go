@@ -1,18 +1,21 @@
 // Package httpapi is the runner daemon's local HTTP surface: an inbound
 // trigger from the git hook (POST /dispatch), a liveness probe
-// (GET /health), and (POST /runner-log) the write side of the watcher's
-// Runner Log outcome, since the watcher runs in a separate OS process from
-// the one that actually owns the vault clone. Every endpoint here is meant
-// to bind localhost only, no auth (same-user, same-machine trust
-// boundary).
+// (GET /health), (POST /runner-log) the write side of the watcher's Runner
+// Log outcome, since the watcher runs in a separate OS process from the one
+// that actually owns the vault clone, and (POST /resume) the manual
+// counterpart to main.go's usage-limit auto-resume timer. Every endpoint
+// here is meant to bind localhost only, no auth (same-user, same-machine
+// trust boundary).
 package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
@@ -30,25 +33,37 @@ type Server struct {
 	// /health.
 	Workers worker.Workers
 
-	// Vault backs POST /runner-log -- the same *vaultgit.Vault instance
-	// the rest of the runner uses, so the write goes through the one
-	// in-process mutex that actually serializes every git-touching
-	// operation against this clone. Nil is valid (the route then reports
-	// 503) for callers that don't need /runner-log, like most of this
-	// package's own tests.
+	// Vault backs POST /runner-log and POST /resume -- the same
+	// *vaultgit.Vault instance the rest of the runner uses, so the write
+	// goes through the one in-process mutex that actually serializes every
+	// git-touching operation against this clone. Nil is valid (the routes
+	// then report 503) for callers that don't need either, like most of
+	// this package's own tests.
 	Vault *vaultgit.Vault
+
+	// Pause is the shared pipeline-pause flag. Nil means POST /resume and
+	// GET /status/tasks's paused/resets_at fields are no-ops/zero values --
+	// fine for callers that don't need this feature.
+	Pause *pause.State
+
+	// CancelResumeTimer, if set, is called by POST /resume (and by Resume,
+	// its underlying method) before doing anything else -- main.go wires
+	// this to stop its own auto-resume timer, so a manual resume can never
+	// race the timer into resuming twice. nil is a safe no-op.
+	CancelResumeTimer func()
 
 	mux *http.ServeMux
 }
 
 // New builds a Server. dispatchWake must be the same channel the daemon's
 // dispatch-pass loop is ranging over.
-func New(dispatchWake chan struct{}, workers worker.Workers, vault *vaultgit.Vault) *Server {
-	s := &Server{DispatchWake: dispatchWake, Workers: workers, Vault: vault, mux: http.NewServeMux()}
+func New(dispatchWake chan struct{}, workers worker.Workers, vault *vaultgit.Vault, p *pause.State) *Server {
+	s := &Server{DispatchWake: dispatchWake, Workers: workers, Vault: vault, Pause: p, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/dispatch", s.handleDispatch)
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/status/tasks", s.handleStatusTasks)
 	s.mux.HandleFunc("/runner-log", s.handleRunnerLog)
+	s.mux.HandleFunc("/resume", s.handleResume)
 	return s
 }
 
@@ -94,6 +109,17 @@ type TaskStatusWire struct {
 	DiscordThreadID string    `json:"discord_thread_id"`
 }
 
+// StatusTasksResponse is GET /status/tasks's full JSON shape: the per-repo
+// task map (unchanged), plus top-level visibility into the shared pause --
+// Paused/ResetsAt mirror pause.State.Snapshot() so a human (or the watcher,
+// in principle) can see a stuck-looking queue is actually just waiting on
+// the usage limit to clear, not wedged.
+type StatusTasksResponse struct {
+	Paused   bool                      `json:"paused"`
+	ResetsAt *time.Time                `json:"resets_at,omitempty"`
+	Tasks    map[string]TaskStatusWire `json:"tasks"`
+}
+
 // handleStatusTasks reads every RepoWorker.currentTask under its own
 // RWMutex and returns the per-repo map (nil entries for idle repos are
 // omitted, not returned as null, to keep the payload small) -- this is
@@ -124,9 +150,11 @@ func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 			DiscordThreadID: s.discordThreadIDFor(ts.NotePath),
 		}
 	}
+	snap := s.Pause.Snapshot()
+	resp := StatusTasksResponse{Paused: snap.Paused, ResetsAt: snap.ResetsAt, Tasks: out}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // discordThreadIDFor best-effort reads notePath's discord_thread_id --
@@ -187,4 +215,74 @@ func (s *Server) handleRunnerLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleResume is the manual counterpart to main.go's usage-limit
+// auto-resume timer: a human calling this before the timer fires resumes
+// the pipeline immediately and cancels the timer, so it can never fire a
+// second time afterward.
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	flipped, err := s.Resume()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"resumed_notes": flipped})
+}
+
+// Resume is POST /resume's mechanics, also called directly by main.go's
+// auto-resume timer on fire (after it sends its own "reset passed" Discord
+// message) so both paths share exactly one resume implementation, in this
+// order: cancel any main.go-owned timer (so a fire racing a concurrent
+// manual call can't resume twice), clear the pause and collect the notes it
+// recorded, flip each from blocked to blocker_resolved with a Runner Log
+// line, then wake the dispatch loop and every repo worker so the normal
+// claim path picks everything back up (via --resume, since session_id is
+// already set).
+//
+// Flipping a note that isn't currently "blocked" is deliberately skipped,
+// not forced -- if a human already hand-resolved it some other way between
+// the trip and this call, forcing blocker_resolved over whatever they did
+// would stomp on that.
+func (s *Server) Resume() ([]string, error) {
+	if s.CancelResumeTimer != nil {
+		s.CancelResumeTimer()
+	}
+	notePaths := s.Pause.Clear()
+
+	var flipped []string
+	for _, notePath := range notePaths {
+		if s.Vault == nil {
+			continue
+		}
+		err := s.Vault.WriteNote(notePath, "runner: blocker_resolved (usage limit reset)", func(n *notetask.Note) error {
+			if n.Frontmatter.Status != "blocked" {
+				return nil
+			}
+			n.Frontmatter.Status = "blocker_resolved"
+			notetask.AppendRunnerLog(n, "blocker_resolved", time.Now())
+			return nil
+		})
+		if err != nil {
+			return flipped, fmt.Errorf("httpapi: resuming %s: %w", notePath, err)
+		}
+		flipped = append(flipped, notePath)
+	}
+
+	select {
+	case s.DispatchWake <- struct{}{}:
+	default:
+	}
+	for _, rw := range s.Workers {
+		rw.Wake()
+	}
+
+	return flipped, nil
 }

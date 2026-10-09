@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/pause"
 )
 
 // Job is one unit of work a RepoWorker processes. Deliberately its own type
@@ -66,6 +68,14 @@ type RepoWorker struct {
 	// the user-visible side of any failure before returning.
 	OnError func(job Job, err error)
 
+	// Pause is the shared pipeline-pause flag -- nil (the zero value) means
+	// never paused, so every existing caller that doesn't set this field
+	// behaves exactly as before. Checked by Run's drain loop before each
+	// popJob, never inside runOne: a job already popped must finish, since
+	// popJob is what removes it from the queue -- guarding after the pop
+	// would silently drop it.
+	Pause *pause.State
+
 	mu    sync.Mutex
 	queue []Job
 
@@ -100,6 +110,18 @@ func (w *RepoWorker) Enqueue(job Job) {
 	w.queue = append(w.queue, job)
 	w.mu.Unlock()
 
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Wake sends the same non-blocking, coalesced wake signal Enqueue does,
+// without touching the queue -- main.go's resume path uses this to nudge
+// every repo worker back into its drain loop once the pause clears, since
+// nothing else would otherwise wake a worker that's currently blocked on
+// <-w.wake with an empty queue.
+func (w *RepoWorker) Wake() {
 	select {
 	case w.wake <- struct{}{}:
 	default:
@@ -171,6 +193,14 @@ func (w *RepoWorker) setCurrentTask(t *TaskStatus) {
 func (w *RepoWorker) Run() {
 	for range w.wake {
 		for {
+			if w.Pause.IsPaused() {
+				// Guarded here, before popJob, deliberately -- popJob
+				// removes the job from the queue, so checking inside runOne
+				// (after the pop) would silently drop it instead of
+				// leaving it queued for the next wake once the pause
+				// clears.
+				break
+			}
 			job, ok := w.popJob()
 			if !ok {
 				break

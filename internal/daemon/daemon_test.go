@@ -77,7 +77,7 @@ func TestBootReconcilesAlreadyQueuedNotes(t *testing.T) {
 	ws, mu, processedPtr := newRecordingWorkers(repoKey)
 	ws.StartAll()
 
-	r := NewRunner(v, ws)
+	r := NewRunner(v, ws, nil)
 	if err := r.Boot(); err != nil {
 		t.Fatalf("Boot: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestDispatchPassFlowsThroughToStubProcessing(t *testing.T) {
 	ws, mu, processedPtr := newRecordingWorkers(repoKey)
 	ws.StartAll()
 
-	r := NewRunner(v, ws)
+	r := NewRunner(v, ws, nil)
 	if err := r.Boot(); err != nil {
 		t.Fatalf("Boot: %v", err)
 	}

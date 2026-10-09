@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
@@ -126,7 +127,7 @@ func TestRunDispatchPass(t *testing.T) {
 	}, "Ready F, already stamped.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq); err != nil {
+	if err := RunDispatchPass(v, enq, nil); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -170,6 +171,59 @@ func TestRunDispatchPass(t *testing.T) {
 		if enq.calls[i].repoKey != want {
 			t.Errorf("enqueue order[%d] = %q, want %q (full order: %v)", i, enq.calls[i].repoKey, want, enqOrder(enq))
 		}
+	}
+}
+
+// TestRunDispatchPassSkipsClaimingWhilePaused covers the pause side of
+// RBG-24: while the shared pause.State is tripped, RunDispatchPass must
+// return before claiming anything -- a ready note stays ready, not queued,
+// and nothing is enqueued. This is what stops a usage-limit event from
+// burning through the rest of the queue: without this guard, the next
+// ready task gets claimed and immediately hits the same limit again.
+func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/phase2-paused-%s-ready.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "ready", Repo: "repo-paused", Created: "2026-09-10",
+	}, "Ready while the pipeline is paused.")
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+
+	enq := &recordingEnqueuer{}
+	if err := RunDispatchPass(v, enq, &p); err != nil {
+		t.Fatalf("RunDispatchPass while paused: %v", err)
+	}
+
+	if len(enq.calls) != 0 {
+		t.Errorf("enqueued %d jobs while paused, want 0: %+v", len(enq.calls), enq.calls)
+	}
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "ready" {
+		t.Errorf("status = %q while paused, want unchanged %q", n.Frontmatter.Status, "ready")
+	}
+
+	// Once unpaused, the same note is claimed and enqueued normally --
+	// proof this is a guard on the pass, not a hidden rejection of this
+	// particular note.
+	p.Clear()
+	if err := RunDispatchPass(v, enq, &p); err != nil {
+		t.Fatalf("RunDispatchPass after resume: %v", err)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs after resume, want 1: %+v", len(enq.calls), enq.calls)
+	}
+	n = readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q after resume, want %q", n.Frontmatter.Status, "queued")
 	}
 }
 

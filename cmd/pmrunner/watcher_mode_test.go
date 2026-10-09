@@ -79,7 +79,7 @@ func TestRunOneWatchCycleStaleTaskMentionsBoth(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/status/tasks", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]watcher.TaskStatus{
+		json.NewEncoder(w).Encode(map[string]any{"tasks": map[string]watcher.TaskStatus{
 			"repo-a": {
 				Slug:           "task-1",
 				Repo:           "repo-a",
@@ -87,7 +87,7 @@ func TestRunOneWatchCycleStaleTaskMentionsBoth(t *testing.T) {
 				LastActivityAt: time.Now().Add(-1 * time.Hour),
 				Stage:          "invocation",
 			},
-		})
+		}})
 	})
 	runnerSrv := httptest.NewServer(mux)
 	defer runnerSrv.Close()
@@ -123,7 +123,7 @@ func TestRunOneWatchCycleStaleTaskRoutesIntoThread(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/status/tasks", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]watcher.TaskStatus{
+		json.NewEncoder(w).Encode(map[string]any{"tasks": map[string]watcher.TaskStatus{
 			"repo-a": {
 				Slug:            "task-1",
 				Repo:            "repo-a",
@@ -132,7 +132,7 @@ func TestRunOneWatchCycleStaleTaskRoutesIntoThread(t *testing.T) {
 				Stage:           "invocation",
 				DiscordThreadID: "wedged-thread-456",
 			},
-		})
+		}})
 	})
 	runnerSrv := httptest.NewServer(mux)
 	defer runnerSrv.Close()

@@ -106,9 +106,9 @@ func TestTerminalHandlerDone(t *testing.T) {
 
 			cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
-			handler := newTerminalHandler(cfg, notifier)
+			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "")
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "", nil)
 
 			got := waitForAlert(t, alerts)
 			if got.hasFile {
@@ -140,9 +140,9 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 
 			cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
-			handler := newTerminalHandler(cfg, notifier)
+			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "")
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "", nil)
 
 			got := waitForAlert(t, alerts)
 			if !got.hasFile {
@@ -155,6 +155,34 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 				t.Errorf("message %q missing Ara-Dev mention", got.content)
 			}
 		})
+	}
+}
+
+// TestTerminalHandlerUsageLimitBlockMentionsDevaraOnly covers RBG-24's
+// mention rule: a "blocked" status whose usageLimit is non-nil (the "self-
+// reported blocked while a limit is tripped" case) must mention Devara
+// only, never Ara-Dev -- there's nothing for that gateway to unblock, the
+// cause clears on its own once the limit resets.
+func TestTerminalHandlerUsageLimitBlockMentionsDevaraOnly(t *testing.T) {
+	srv, alerts := capturingDiscordServer(t)
+	defer srv.Close()
+
+	cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
+	notifier := &notify.Notifier{WebhookURL: srv.URL}
+	handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
+
+	resetsAt := time.Now().Add(time.Hour)
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "blocked", "hit the limit", false, "", "", &runner.UsageLimitInfo{ResetsAt: &resetsAt})
+
+	got := waitForAlert(t, alerts)
+	if !strings.Contains(got.content, "<@12345>") {
+		t.Errorf("message %q missing Devara mention", got.content)
+	}
+	if strings.Contains(got.content, "<@67890>") {
+		t.Errorf("message %q has Ara-Dev mention, want none for a usage-limit block", got.content)
+	}
+	if !got.hasFile {
+		t.Error("usage-limit blocked message dropped the .md attachment, want it kept")
 	}
 }
 
