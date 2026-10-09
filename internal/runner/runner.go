@@ -20,6 +20,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
+	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
@@ -374,7 +375,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			scenario = ScenarioParseFailure
 		}
 
-	case !isTerminalStatus(copyAfter.Frontmatter.Status):
+	case !taskmeta.IsTerminalStatus(copyAfter.Frontmatter.Status):
 		// Scenario 2: parsed fine, but CC never reached done/blocked/failed.
 		// Per the same trust rule, the runner *can* still fold in whatever
 		// did parse (e.g. partial Work Log content) before marking blocked.
@@ -500,15 +501,6 @@ func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.Re
 		if deps.OnMergeGateError != nil {
 			deps.OnMergeGateError(job, prURL, discordThreadID, err)
 		}
-	}
-}
-
-func isTerminalStatus(status string) bool {
-	switch status {
-	case "done", "blocked", "failed":
-		return true
-	default:
-		return false
 	}
 }
 

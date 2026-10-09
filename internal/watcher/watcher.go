@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
 
@@ -180,29 +181,13 @@ func (w *Watcher) CheckStatusTasks() (map[string]TaskStatus, []StaleTask, error)
 	return raw, stale, nil
 }
 
-const tasksDir = "Tasks"
-
-func isTerminalStatus(status string) bool {
-	switch status {
-	case "done", "blocked", "failed":
-		return true
-	default:
-		return false
-	}
-}
-
-func slugFromPath(relPath string) string {
-	base := filepath.Base(relPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
-}
-
 // ScanForUnnotified is gap 3, independent of the two HTTP tiers above --
 // a direct read of Tasks/ (not through the daemon's HTTP surface at all,
 // since RepoWorker.currentTask is already cleared by the time this
 // matters). Flags any note at a terminal status whose Runner Log has
 // neither "notified" nor "notify_failed" yet, past ageThreshold.
 func (w *Watcher) ScanForUnnotified(ageThreshold time.Duration) ([]UnnotifiedNote, error) {
-	pattern := filepath.Join(w.Vault.Path, tasksDir, "*.md")
+	pattern := filepath.Join(w.Vault.Path, taskmeta.TasksDir, "*.md")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("watcher: scanning %s: %w", pattern, err)
@@ -219,7 +204,7 @@ func (w *Watcher) ScanForUnnotified(ageThreshold time.Duration) ([]UnnotifiedNot
 		if err != nil {
 			continue // malformed note -- not this scan's job to fix
 		}
-		if !isTerminalStatus(note.Frontmatter.Status) {
+		if !taskmeta.IsTerminalStatus(note.Frontmatter.Status) {
 			continue
 		}
 		hasNotified := false
@@ -251,7 +236,7 @@ func (w *Watcher) ScanForUnnotified(ageThreshold time.Duration) ([]UnnotifiedNot
 		}
 		out = append(out, UnnotifiedNote{
 			RelPath:         relPath,
-			Slug:            slugFromPath(relPath),
+			Slug:            taskmeta.TitleFromPath(relPath),
 			Status:          note.Frontmatter.Status,
 			Age:             age,
 			DiscordThreadID: threadID,

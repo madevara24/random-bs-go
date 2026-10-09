@@ -10,6 +10,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
+	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
@@ -30,8 +31,8 @@ func TestSlugFromPathMatchesRealBranchConvention(t *testing.T) {
 		{"Tasks/plain-slug-already.md", "plain-slug-already"},
 	}
 	for _, c := range cases {
-		if got := slugFromPath(c.path); got != c.want {
-			t.Errorf("slugFromPath(%q) = %q, want %q", c.path, got, c.want)
+		if got := taskmeta.SlugFromPath(c.path); got != c.want {
+			t.Errorf("taskmeta.SlugFromPath(%q) = %q, want %q", c.path, got, c.want)
 		}
 	}
 }
