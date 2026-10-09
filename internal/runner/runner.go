@@ -880,11 +880,14 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 	waitErr := cmd.Wait()
 	close(killDone)
 
-	if watchdogFired.Load() {
-		return sessionID, stderrTail.String(), ErrIdleTimeout
-	}
+	// usageLimitHit is checked first: claude can report the limit via
+	// rate_limit_event and then hang (rather than exit) until the idle
+	// watchdog kills it, and that real signal must win over ErrIdleTimeout.
 	if usageLimitHit {
 		return sessionID, stderrTail.String(), &UsageLimitError{ResetsAt: usageLimitResetsAt}
+	}
+	if watchdogFired.Load() {
+		return sessionID, stderrTail.String(), ErrIdleTimeout
 	}
 	// Fallback: a future claude version could exit before ever emitting the
 	// structured event -- if the process errored out and its stderr tail
