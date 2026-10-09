@@ -202,8 +202,7 @@ type ciRun struct {
 
 // hasCIWorkflows reports whether the local clone at repoPath has any
 // GitHub Actions workflow files at all. Checked against the repo itself
-// (not repos.json's `ci` field, which nothing reads) so this can never
-// drift from what's actually configured.
+// so this can never drift from what's actually configured.
 func hasCIWorkflows(repoPath string) bool {
 	for _, ext := range []string{"yml", "yaml"} {
 		matches, _ := filepath.Glob(filepath.Join(repoPath, ".github", "workflows", "*."+ext))

@@ -5,16 +5,15 @@
 package notify
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"time"
 
+	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
@@ -258,22 +257,7 @@ func postForumClaimOnce(forumWebhookURL, threadName, content string) (string, er
 }
 
 // ReadWebhookURLFromEnvFile is a small convenience for tests/tools that
-// need the real webhook URL without going through the full config
-// package -- reads a bare KEY=VALUE .env line, same format config.Load
-// already parses.
+// need the real webhook URL without going through the full config package.
 func ReadWebhookURLFromEnvFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	const prefix = "DISCORD_WEBHOOK_URL="
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) > len(prefix) && line[:len(prefix)] == prefix {
-			return line[len(prefix):], nil
-		}
-	}
-	return "", fmt.Errorf("DISCORD_WEBHOOK_URL not found in %s", path)
+	return config.ReadEnvKey(path, "DISCORD_WEBHOOK_URL")
 }

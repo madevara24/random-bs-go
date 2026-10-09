@@ -42,7 +42,9 @@ Each config directory needs two files:
   `DISCORD_USER_ID`, `DISCORD_ARA_DEV_USER_ID`, `GLOBAL_SLOTS` (positive
   int — the shared concurrency cap across all repos), `IDLE_TIMEOUT_MINUTES`
   (positive int), `VAULT_PATH`, `VAULT_DEFAULT_BRANCH`. Optional:
-  `HTTP_PORT` (default `8420`).
+  `HTTP_PORT` (default `8420`), `USAGE_LIMIT_RESUME_GRACE_SECONDS` (default
+  `60` — how long after a Claude usage-limit reset the pipeline waits before
+  auto-resuming).
 - **`repos.json`** — a map of repo key to onboarding config:
 
   ```json
@@ -51,7 +53,6 @@ Each config directory needs two files:
       "path": "/path/to/local/clone",
       "remote": "git@github.com:org/my-repo.git",
       "default_branch": "main",
-      "ci": "...",
       "auto_merge_default": false
     }
   }
