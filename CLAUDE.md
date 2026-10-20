@@ -33,7 +33,7 @@ message.
 
 ## auto_merge is not merge-only
 
-`auto_merge` makes the runner merge the PR; it does not itself deploy. On a repo whose deploy workflow triggers on push to `main`, that merge is a production deploy. When changing the merge gate, task schema, or docs, keep that distinction explicit; task authors must read the target repo's deploy workflow.
+`auto_merge` makes the runner merge the PR; it does not itself deploy. On a repo whose deploy workflow triggers on push to `main`, that merge is a production deploy. When changing the merge gate, task schema, or docs, keep that distinction explicit; task authors must read the target repo's deploy workflow. A new deployable stack must have its own push-to-main deploy job and path filter; a manual cutover is a temporary exception with a linked follow-up task, not a permanent manual merge.
 
 ## runner package layout
 
