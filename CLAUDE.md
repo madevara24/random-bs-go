@@ -31,6 +31,10 @@ It's gated behind `PMRUNNER_SEND_REAL_DISCORD_TEST=1` and skips by default
 — do not set that env var unless you specifically intend to send a real
 message.
 
+## auto_merge is not merge-only
+
+`auto_merge` makes the runner merge the PR; it does not itself deploy. On a repo whose deploy workflow triggers on push to `main`, that merge is a production deploy. When changing the merge gate, task schema, or docs, keep that distinction explicit; task authors must read the target repo's deploy workflow.
+
 ## runner package layout
 
 `internal/runner/crashfallback.go` and `internal/runner/setupfallback.go`
