@@ -326,6 +326,113 @@ func TestProcessTaskSelfReportedBlockedPreservesDirtyWork(t *testing.T) {
 	}
 }
 
+// TestProcessTaskSelfReportedBlockedPreserveFailureAlerts is the
+// preserve-failure sibling of the test above: the fake CC session leaves
+// real, uncommitted work in the tree and self-reports status: blocked as
+// before, but this time also breaks origin before exiting, so
+// preserveBlockedWork commits locally but fails to push. This is the RBG-39
+// gap: before this task, that failure was only a stdout Printf, and the
+// blocked alert looked perfectly normal even though the work survives
+// nowhere but the clone's local commit. ProcessTask must still return
+// cleanly (not error/hang) and must fire a second OnBlocked alert whose
+// payload carries PreserveErr.
+func TestProcessTaskSelfReportedBlockedPreserveFailureAlerts(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "clonelifecycle-selfblocked-preservefail-" + run
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Clone Lifecycle Self-Blocked Preserve Failure Test %s.md", run)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Self-blocked preserve-failure test -- the fake claude stub decides what happens, this prompt is never actually read.")
+
+	originURLOut, err := exec.Command("git", "-C", testTargetRepoPath, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatalf("reading origin remote url: %v", err)
+	}
+	originURL := strings.TrimSpace(string(originURLOut))
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	copyName := copyFileName(slug)
+	workFileName := "selfblocked-preservefail-work-" + run + ".txt"
+	writeStubScript(t, scriptPath, fmt.Sprintf(
+		"echo 'real but uncommitted task work' > %q\n"+
+			"printf -- '---\\nstatus: blocked\\nrepo: phase6-test-repo\\ncreated: \"2026-09-15\"\\n---\\nSelf-blocked preserve-failure test.\\n\\n## Work Log\\n\\nGot partway through, blocked on missing credentials.\\n' > %q\n"+
+			"git -C %q remote set-url origin /nonexistent-bogus-remote-%s.git\n"+
+			"exit 0",
+		filepath.Join(testTargetRepoPath, workFileName),
+		filepath.Join(testTargetRepoPath, copyName),
+		testTargetRepoPath, run))
+
+	deps := Deps{
+		Vault:  v,
+		Engine: engine.NewClaude(scriptPath),
+		Repos: map[string]config.RepoConfig{
+			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName := "task/" + slug
+
+	// Registered before the remote-restore cleanup below, so it runs after
+	// it (t.Cleanup is LIFO) -- the branch/push cleanup needs origin
+	// pointing at the real remote again to have any chance of working.
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+		exec.Command("rm", "-f", filepath.Join(testTargetRepoPath, copyName)).Run()
+		exec.Command("rm", "-f", filepath.Join(testTargetRepoPath, workFileName)).Run()
+	})
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "remote", "set-url", "origin", originURL).Run()
+	})
+
+	var gotJob *worker.Job
+	var gotAlert *AlertPayload
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
+
+	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
+		t.Fatalf("ProcessTask: %v (self-reported blocked is the happy path, not a crash)", err)
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Fatalf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+
+	if gotJob == nil || gotAlert == nil {
+		t.Fatal("OnBlocked was never called, want it fired for the failed preserve")
+	}
+	if gotJob.NotePath != relPath {
+		t.Errorf("OnBlocked job.NotePath = %q, want %q", gotJob.NotePath, relPath)
+	}
+	if gotAlert.PreserveErr == "" {
+		t.Error("payload.PreserveErr is empty, want the preserveBlockedWork push failure carried through")
+	}
+	if gotAlert.RepoPath != testTargetRepoPath {
+		t.Errorf("RepoPath = %q, want %q", gotAlert.RepoPath, testTargetRepoPath)
+	}
+
+	msg := gotAlert.DiscordMessage("devara-id", "aradev-id")
+	if !strings.Contains(msg, "not preserved") {
+		t.Errorf("message %q missing the not-preserved warning", msg)
+	}
+	if !strings.Contains(msg, "aradev-id") {
+		t.Errorf("message %q missing Ara-Dev mention", msg)
+	}
+}
+
 // TestProcessTaskResumeDoesNotReconcileDefaultBranchItself is the
 // integration-level guard for the "runner never merges/rebases, that's
 // CC's job" rule: main advances while a task sits blocked, then the task
