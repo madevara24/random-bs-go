@@ -234,8 +234,12 @@ func TestCheckoutTaskBranchTracksOriginWhenNotLocal(t *testing.T) {
 	})
 
 	repoCfg := config.RepoConfig{Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"}
-	if err := checkoutTaskBranch(repoCfg, branchName); err != nil {
+	localOnly, err := checkoutTaskBranch(repoCfg, branchName)
+	if err != nil {
 		t.Fatalf("checkoutTaskBranch: %v", err)
+	}
+	if localOnly {
+		t.Errorf("localOnly = true, want false -- origin has the branch")
 	}
 
 	current := strings.TrimSpace(runGit(t, testTargetRepoPath, "branch", "--show-current"))
@@ -248,6 +252,71 @@ func TestCheckoutTaskBranchTracksOriginWhenNotLocal(t *testing.T) {
 	upstream := strings.TrimSpace(runGit(t, testTargetRepoPath, "rev-parse", "--abbrev-ref", branchName+"@{upstream}"))
 	if upstream != "origin/"+branchName {
 		t.Errorf("upstream = %q, want %q", upstream, "origin/"+branchName)
+	}
+}
+
+// TestCheckoutTaskBranchFallsBackToLocalWhenNeverPushed is RBG-38's core
+// case: preserveBlockedWork's push to origin never happened (RBG-33 lived
+// this live), but the branch and its commit are still sitting in this very
+// clone -- checkoutTaskBranch must pick it up rather than hard-failing on
+// the fetch, since `git fetch origin <branch>` fails when origin has no
+// such ref.
+func TestCheckoutTaskBranchFallsBackToLocalWhenNeverPushed(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	branchName := fmt.Sprintf("task/clonelifecycle-localonly-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branchName)
+	markerPath := filepath.Join(testTargetRepoPath, "local-only-marker.txt")
+	if err := os.WriteFile(markerPath, []byte("preserved work that never reached origin\n"), 0o644); err != nil {
+		t.Fatalf("writing marker file: %v", err)
+	}
+	runGit(t, testTargetRepoPath, "add", "local-only-marker.txt")
+	runGit(t, testTargetRepoPath, "commit", "-m", "simulate preserved blocked work that never got pushed")
+	// Deliberately never pushed -- origin has no ref for this branch.
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branchName).Run()
+		os.Remove(markerPath)
+	})
+
+	repoCfg := config.RepoConfig{Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"}
+	localOnly, err := checkoutTaskBranch(repoCfg, branchName)
+	if err != nil {
+		t.Fatalf("checkoutTaskBranch: %v", err)
+	}
+	if !localOnly {
+		t.Errorf("localOnly = false, want true -- origin never had this branch")
+	}
+
+	current := strings.TrimSpace(runGit(t, testTargetRepoPath, "branch", "--show-current"))
+	if current != branchName {
+		t.Fatalf("current branch = %q, want %q", current, branchName)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Errorf("checked-out branch missing the preserved marker file: %v", err)
+	}
+}
+
+// TestCheckoutTaskBranchErrorsWhenNeitherLocalNorRemote is resume's actual
+// dead end: no local branch, and origin never got a push either -- there's
+// nothing to resume from, so checkoutTaskBranch must say so (naming the
+// branch) rather than leaving the caller to guess from a bare git error.
+func TestCheckoutTaskBranchErrorsWhenNeitherLocalNorRemote(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	branchName := fmt.Sprintf("task/clonelifecycle-neither-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "-f", "main")
+
+	repoCfg := config.RepoConfig{Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"}
+	_, err := checkoutTaskBranch(repoCfg, branchName)
+	if err == nil {
+		t.Fatal("checkoutTaskBranch: got nil error, want one naming the missing branch")
+	}
+	if !strings.Contains(err.Error(), branchName) {
+		t.Errorf("error does not name the branch %q: %v", branchName, err)
 	}
 }
 
