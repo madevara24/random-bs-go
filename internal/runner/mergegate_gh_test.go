@@ -232,7 +232,8 @@ func TestRunReviewResolvesHeadBranchFromPRURL(t *testing.T) {
 		// this test.
 		PRURL:         "https://github.com/fake-owner/fake-repo/pull/42",
 		DefaultBranch: "main",
-		Engine:        engine.NewClaude(claudeScript),
+		CodingEngine:  engine.NewClaude(claudeScript),
+		ReviewEngine:  engine.NewClaude(claudeScript),
 	}
 
 	verdict, _, err := g.RunReview(0)
@@ -241,5 +242,70 @@ func TestRunReviewResolvesHeadBranchFromPRURL(t *testing.T) {
 	}
 	if verdict != VerdictApprove {
 		t.Errorf("verdict = %v, want APPROVE", verdict)
+	}
+}
+
+// TestGhMergeGateOpsRunReviewAndResumeUseDistinctEngines is RBG-34's
+// merge-gate acceptance check: RunReview's fresh review session must use
+// ReviewEngine, never CodingEngine, and ResumeWithFeedback's coding-session
+// resume must use CodingEngine, never ReviewEngine -- two fake engines
+// (distinct stub scripts, each appending its own marker to a shared log)
+// prove which one each method actually invoked.
+func TestGhMergeGateOpsRunReviewAndResumeUseDistinctEngines(t *testing.T) {
+	branch := fmt.Sprintf("mergegate-distinct-engines-test-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branch)
+	runGit(t, testTargetRepoPath, "push", "-u", "origin", branch)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branch).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branch).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGh(t, filepath.Join(binDir, "gh"), branch, "fake PR body")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logPath := filepath.Join(binDir, "calls.log")
+	reviewScript := filepath.Join(binDir, "fake-review-engine.sh")
+	if err := os.WriteFile(reviewScript, []byte(
+		"#!/bin/sh\necho review >> "+logPath+"\necho '{\"result\":\"VERDICT: APPROVE\"}'\n"), 0o755); err != nil {
+		t.Fatalf("writing fake review-engine script: %v", err)
+	}
+	codingScript := filepath.Join(binDir, "fake-coding-engine.sh")
+	if err := os.WriteFile(codingScript, []byte(
+		"#!/bin/sh\necho coding >> "+logPath+"\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"resume-session\"}'\n"), 0o755); err != nil {
+		t.Fatalf("writing fake coding-engine script: %v", err)
+	}
+
+	g := &GhMergeGateOps{
+		RepoPath:      testTargetRepoPath,
+		PRURL:         "https://github.com/fake-owner/fake-repo/pull/42",
+		DefaultBranch: "main",
+		CodingEngine:  engine.NewClaude(codingScript),
+		ReviewEngine:  engine.NewClaude(reviewScript),
+		CodingSession: "orig-session",
+	}
+
+	if _, _, err := g.RunReview(0); err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+	logAfterReview, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading call log after RunReview: %v", err)
+	}
+	if got := strings.TrimSpace(string(logAfterReview)); got != "review" {
+		t.Errorf("call log after RunReview = %q, want exactly %q (review engine only, never coding)", got, "review")
+	}
+
+	if err := g.ResumeWithFeedback("fix this"); err != nil {
+		t.Fatalf("ResumeWithFeedback: %v", err)
+	}
+	logAfterResume, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading call log after ResumeWithFeedback: %v", err)
+	}
+	if got := strings.TrimSpace(string(logAfterResume)); got != "review\ncoding" {
+		t.Errorf("call log after ResumeWithFeedback = %q, want %q (coding engine appended, never review again)", got, "review\ncoding")
 	}
 }

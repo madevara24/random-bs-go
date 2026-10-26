@@ -75,7 +75,7 @@ func runAutoMergeDefaultCase(t *testing.T, slugPrefix string, taskAutoMerge *boo
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main", AutoMergeDefault: repoDefault},
 		},
-		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) MergeGateOps {
+		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) MergeGateOps {
 			gateCalled = true
 			return &fakeMergeGateOps{verdicts: []ReviewVerdict{VerdictApprove}, ciConclusion: "success"}
 		},

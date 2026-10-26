@@ -21,7 +21,22 @@ type Job struct {
 	NotePath string
 	Repo     string
 	Slug     string
+
+	// Engine is the coding engine's name, resolved once at claim time (see
+	// EngineResolver) -- never written back to the note here; the note's
+	// own `engine:` key is only ever written once the run actually starts
+	// (internal/runner.ProcessTask), so until then it stays meaning
+	// exactly "the task author pinned this."
+	Engine string
 }
+
+// EngineResolver decides which engine codes repoKey's task, given the
+// note's own `engine:` pin (noteEngine, "" if unset). Injected so this
+// package never needs to import config (for RepoConfig) or runner (for
+// the engine registry) -- the caller (cmd/pmrunner) closes over whatever
+// it needs to apply the real repo/default precedence (see
+// internal/engineresolve.Coding).
+type EngineResolver func(repoKey, noteEngine string) string
 
 // Enqueuer is how a claimed job reaches its repo's queue. Defined here
 // (the caller side) rather than in the worker package, so this package
@@ -81,7 +96,12 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 // returns immediately before syncing or claiming anything: every
 // ready/blocker_resolved note stays exactly as it is (ready stays ready,
 // not queued) until a human or the auto-resume timer clears the pause.
-func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
+//
+// resolveEngine resolves the coding engine for each claimed job's Engine
+// field -- nil is valid (every Job.Engine comes out "", same as before
+// this field existed) for any caller that doesn't care. Resolution never
+// writes `engine:` to the note itself -- see Job's doc comment.
+func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEngine EngineResolver) error {
 	if p.IsPaused() {
 		return nil
 	}
@@ -156,10 +176,23 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
 			continue
 		}
 
-		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug})
+		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug, Engine: resolveEngineFor(resolveEngine, repoKey, note)})
 	}
 
 	return nil
+}
+
+// resolveEngineFor calls resolveEngine (if non-nil) with repoKey and
+// note's own `engine:` pin, deref'd to "" if unset.
+func resolveEngineFor(resolveEngine EngineResolver, repoKey string, note *notetask.Note) string {
+	if resolveEngine == nil {
+		return ""
+	}
+	var noteEngine string
+	if note.Frontmatter.Engine != nil {
+		noteEngine = *note.Frontmatter.Engine
+	}
+	return resolveEngine(repoKey, noteEngine)
 }
 
 // ReconcileQueued scans Tasks/ for notes already at status "queued" and
@@ -168,8 +201,9 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State) error {
 // frontmatter is the only record of a queued job, so this must run once at
 // boot, after a fresh Sync() and before the daemon starts accepting
 // dispatch triggers. Does not write anything to the vault -- these notes
-// are already claimed.
-func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer) error {
+// are already claimed. resolveEngine resolves each enqueued Job's Engine
+// field the same way RunDispatchPass does -- nil is valid, same meaning.
+func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer, resolveEngine EngineResolver) error {
 	scanned, err := scanTasks(v.Path)
 	if err != nil {
 		return err
@@ -195,7 +229,8 @@ func ReconcileQueued(v *vaultgit.Vault, enq Enqueuer) error {
 	for _, note := range notesOnly {
 		relPath := relPathOf[note]
 		slug := taskmeta.SlugFromPath(relPath)
-		enq.Enqueue(note.Frontmatter.Repo, Job{NotePath: relPath, Repo: note.Frontmatter.Repo, Slug: slug})
+		repoKey := note.Frontmatter.Repo
+		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug, Engine: resolveEngineFor(resolveEngine, repoKey, note)})
 	}
 	return nil
 }

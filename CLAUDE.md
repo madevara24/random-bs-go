@@ -40,12 +40,12 @@ message.
 `internal/runner/crashfallback.go` and `internal/runner/setupfallback.go`
 are separate files for a reason and shouldn't be merged:
 
-- `setupfallback.go` handles failures in the five steps that run *before*
-  Claude is ever invoked (claim write, re-read, branch setup, note-copy
-  write, git-exclude).
-- `crashfallback.go` handles the three scenarios where Claude *did* run
-  but didn't finish cleanly (no result copy, an unparseable copy, or a
-  copy that parsed but never reached a terminal status).
+- `setupfallback.go` handles failures in the six steps that run *before*
+  the coding engine is ever invoked (engine resolution, claim write,
+  re-read, branch setup, note-copy write, git-exclude).
+- `crashfallback.go` handles the three scenarios where the coding engine
+  *did* run but didn't finish cleanly (no result copy, an unparseable
+  copy, or a copy that parsed but never reached a terminal status).
 
 Both write `status: blocked` to the vault note and fire the same alert
 path, but the failure information available at each stage is different,

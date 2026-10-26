@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
 	"github.com/madevara24/random-bs-go/internal/engine"
+	"github.com/madevara24/random-bs-go/internal/engineresolve"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
@@ -64,18 +66,18 @@ func runRunner(cfg *config.Config) {
 		}
 	}
 
-	// Built once, shared by ProcessTask and every MergeGateFactory call
-	// below -- the one engine instance both use, instead of each
-	// constructing its own.
-	claudeEngine := engine.NewClaude("")
+	// Built once, shared by every task's ProcessTask/MergeGateFactory call
+	// below -- the same registry, not a fresh one per task.
+	engineRegistry := buildEngineRegistry(cfg.ClaudeBin)
 
 	runnerDeps := runner.Deps{
-		Vault:       vault,
-		Repos:       cfg.Repos,
-		Engine:      claudeEngine,
-		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
-		PostClaim:   postClaim,
-		Pause:       pauseState,
+		Vault:               vault,
+		Repos:               cfg.Repos,
+		EngineRegistry:      engineRegistry,
+		ReviewEngineDefault: cfg.ReviewEngine,
+		IdleTimeout:         time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
+		PostClaim:           postClaim,
+		Pause:               pauseState,
 		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.Send(
 				job.NotePath, payload.DiscordThreadID,
@@ -85,12 +87,13 @@ func runRunner(cfg *config.Config) {
 			}
 		},
 		OnTerminal: newTerminalHandler(cfg, notifier, resumeMgr),
-		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) runner.MergeGateOps {
+		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) runner.MergeGateOps {
 			return &runner.GhMergeGateOps{
 				RepoPath:      repoCfg.Path,
 				PRURL:         prURL,
 				DefaultBranch: repoCfg.DefaultBranch,
-				Engine:        claudeEngine,
+				CodingEngine:  codingEngine,
+				ReviewEngine:  reviewEngine,
 				CodingSession: sessionID,
 			}
 		},
@@ -113,7 +116,10 @@ func runRunner(cfg *config.Config) {
 	}
 	workers.StartAll()
 
-	r := daemon.NewRunner(vault, workers, pauseState)
+	resolveEngine := func(repoKey, noteEngine string) string {
+		return engineresolve.Coding(noteEngine, cfg.Repos[repoKey].Engine, cfg.DefaultEngine)
+	}
+	r := daemon.NewRunner(vault, workers, pauseState, resolveEngine)
 	if err := r.Boot(); err != nil {
 		fmt.Printf("pmrunner: fatal: boot failed: %v\n", err)
 		return
@@ -130,6 +136,32 @@ func runRunner(cfg *config.Config) {
 	if err := http.ListenAndServe(addr, server); err != nil {
 		fmt.Printf("pmrunner: fatal: http server: %v\n", err)
 	}
+}
+
+// buildEngineRegistry builds the name->Engine map runner.Deps/
+// MergeGateFactory resolve against -- today it holds only claude.
+// claudeBin is CLAUDE_BIN's resolved value ("" from config.Load means
+// "claude", resolved via PATH, same as always).
+func buildEngineRegistry(claudeBin string) map[string]engine.Engine {
+	return map[string]engine.Engine{
+		"claude": engine.NewClaude(claudeBin),
+	}
+}
+
+// registeredEngineNames lists every name buildEngineRegistry registers --
+// what config.Load validates DEFAULT_ENGINE/REVIEW_ENGINE and repos.json's
+// per-repo "engine"/"review_engine" fields against. Derived from
+// buildEngineRegistry itself (rather than a separately maintained literal)
+// so the two can never drift apart; the bin argument doesn't affect which
+// names come out, so "" is fine here.
+func registeredEngineNames() []string {
+	reg := buildEngineRegistry("")
+	names := make([]string, 0, len(reg))
+	for name := range reg {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // resetsAtOf is a nil-safe accessor for AlertPayload.UsageLimit.ResetsAt --

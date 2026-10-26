@@ -1,14 +1,15 @@
-// Setup-phase failure handling: ProcessTask's error path for the five
-// steps that run before Claude is ever invoked (claim write, re-read,
-// branch setup, note-copy write, git-exclude). Sibling to
-// crashfallback.go's handleCrashFallback, which covers the three scenarios
-// where Claude *did* run but didn't finish cleanly -- this file exists
-// because, before it, a setup failure just returned a bare error that
-// reached only worker's local log: the vault note was left stuck at
-// whatever status the last successful step left it, forever, with no
-// alert. Confirmed live in production 2026-09-17 (see task notes): an
-// invalid branch name made pullAndBranch's final `checkout -b` fail, and
-// the note sat at in_progress until someone noticed by hand.
+// Setup-phase failure handling: ProcessTask's error path for the six
+// steps that run before the coding engine is ever invoked (engine
+// resolution, claim write, re-read, branch setup, note-copy write,
+// git-exclude). Sibling to crashfallback.go's handleCrashFallback, which
+// covers the three scenarios where the coding engine *did* run but didn't
+// finish cleanly -- this file exists because, before it, a setup failure
+// just returned a bare error that reached only worker's local log: the
+// vault note was left stuck at whatever status the last successful step
+// left it, forever, with no alert. Confirmed live in production
+// 2026-09-17 (see task notes): an invalid branch name made
+// pullAndBranch's final `checkout -b` fail, and the note sat at
+// in_progress until someone noticed by hand.
 package runner
 
 import (
@@ -22,18 +23,27 @@ import (
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
-// ScenarioSetupFailure covers all five pre-invocation setup steps -- a new
+// ScenarioSetupFailure covers all six pre-invocation setup steps -- a new
 // family of blocked scenario, sibling to crashfallback.go's three
 // post-invocation ones (see that file's Scenario doc comment), not a
 // replacement for any of them.
 const ScenarioSetupFailure Scenario = 3
 
-// setupStage names one of the five setup steps that run before Claude is
-// ever invoked.
+// setupStage names one of the six setup steps that run before the coding
+// engine is ever invoked.
 type setupStage int
 
 const (
-	setupStageWriteInProgress setupStage = iota
+	// setupStageResolveEngine is the very first setup step, before any
+	// note or repo write: resolving and validating the coding engine's
+	// name (job.Engine, falling back to the note's own `engine:`) and the
+	// review engine's name (the note's `review_engine:`, the repo's
+	// "review_engine", REVIEW_ENGINE) both exist in the registry. A typo
+	// in either blocks the task here, before the branch is touched --
+	// checking review_engine: this early means a typo there blocks before
+	// the coding run even starts, not only once the merge gate does.
+	setupStageResolveEngine setupStage = iota
+	setupStageWriteInProgress
 	setupStageRereadNote
 	setupStagePullAndBranch
 	setupStageWriteNoteCopy
@@ -46,6 +56,8 @@ const (
 
 func (s setupStage) String() string {
 	switch s {
+	case setupStageResolveEngine:
+		return "resolving coding/review engine"
 	case setupStageWriteInProgress:
 		return "writing status: in_progress"
 	case setupStageRereadNote:
@@ -65,9 +77,9 @@ func (s setupStage) String() string {
 
 // repoTouched reports whether this stage's failure could have left the
 // target repo clone in a state that needs restoring (a branch checked
-// out, a note-copy file written) -- the first two stages fail before the
-// runner has touched the target repo clone at all, so there's nothing
-// there to restore.
+// out, a note-copy file written) -- the first three stages (engine
+// resolution, claim write, re-read) fail before the runner has touched
+// the target repo clone at all, so there's nothing there to restore.
 func (s setupStage) repoTouched() bool {
 	return s >= setupStagePullAndBranch
 }
@@ -84,13 +96,14 @@ type setupFailureInfo struct {
 	// resume is true when this ProcessTask call is resuming a prior
 	// session (pullAndBranch never ran this invocation -- the task branch,
 	// if it exists, predates this run and holds real prior work). Only
-	// writeNoteCopy/excludeFromGit can fail on a resume, since those are
-	// the only two of the five steps that still run when resuming; cleanup
-	// must never delete that branch in that case.
+	// writeNoteCopy/excludeFromGit can fail on a resume among the stages
+	// that actually restore anything on failure (repoTouched() -- engine
+	// resolution never does); cleanup must never delete that branch in
+	// that case.
 	resume bool
 
 	// discordThreadID is the task's discord_thread_id, if it has one by
-	// this stage -- empty for the first two stages (the claim post, if
+	// this stage -- empty for the first three stages (the claim post, if
 	// any, hasn't happened yet at that point).
 	discordThreadID string
 }

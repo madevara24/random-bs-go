@@ -31,10 +31,18 @@ type GhMergeGateOps struct {
 	PRURL         string
 	DefaultBranch string
 
-	// Engine is the coding-agent engine used for both the review
-	// invocation and ResumeWithFeedback's coding-session resume -- nil
-	// defaults to the claude engine (see engine()).
-	Engine        engine.Engine
+	// CodingEngine is the engine ResumeWithFeedback resumes the original
+	// coding session with -- nil defaults to the claude engine (see
+	// codingEngine()). Must be the same engine that task actually coded
+	// with; resuming a different engine's session_id means nothing to it.
+	CodingEngine engine.Engine
+
+	// ReviewEngine is the engine RunReview uses for the fresh (no
+	// --resume) reviewer session -- resolved independently of
+	// CodingEngine, see resolveReviewEngineName. nil defaults to the
+	// claude engine (see reviewEngine()).
+	ReviewEngine engine.Engine
+
 	CodingSession string // the original coding session's session_id, to resume with feedback
 
 	// ReviewTimeout bounds one review invocation -- a review session isn't
@@ -56,11 +64,18 @@ func (g *GhMergeGateOps) reviewTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
-func (g *GhMergeGateOps) engine() engine.Engine {
-	if g.Engine == nil {
+func (g *GhMergeGateOps) codingEngine() engine.Engine {
+	if g.CodingEngine == nil {
 		return engine.NewClaude("")
 	}
-	return g.Engine
+	return g.CodingEngine
+}
+
+func (g *GhMergeGateOps) reviewEngine() engine.Engine {
+	if g.ReviewEngine == nil {
+		return engine.NewClaude("")
+	}
+	return g.ReviewEngine
 }
 
 func (g *GhMergeGateOps) runGh(args ...string) (string, error) {
@@ -115,7 +130,7 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 		priorComments, _ = fetchPRComments(g.RepoPath, g.PRURL)
 	}
 
-	verdict, feedback, err := reviewOnce(g.engine(), g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
+	verdict, feedback, err := reviewOnce(g.reviewEngine(), g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
 	if err != nil {
 		return "", "", err
 	}
@@ -300,7 +315,7 @@ func (g *GhMergeGateOps) Merge() error {
 // session (not the review session, which is always fresh) with the
 // review's CONCERNS or CI's failure text.
 func (g *GhMergeGateOps) ResumeWithFeedback(text string) error {
-	_, _, err := invokeEngine(g.engine(), g.RepoPath, text, g.CodingSession, 15*time.Minute, nil)
+	_, _, err := invokeEngine(g.codingEngine(), g.RepoPath, text, g.CodingSession, 15*time.Minute, nil)
 	return err
 }
 
