@@ -5,7 +5,6 @@ package runner
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/taskmeta"
@@ -25,43 +25,13 @@ import (
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
-// ErrIdleTimeout is returned by invokeClaude (and surfaces through
+// ErrIdleTimeout is returned by invokeEngine (and surfaces through
 // ProcessTask) when the idle watchdog kills the process group after
-// IdleTimeout of silence on the stream-json output -- distinct from a
-// plain process-exit error so callers (the crash-fallback alert in
+// IdleTimeout of silence on the coding invocation's stdout -- distinct from
+// a plain process-exit error so callers (the crash-fallback alert in
 // particular) can say "the runner killed it for going idle," not just show
 // a bare exit code.
 var ErrIdleTimeout = errors.New("runner: idle timeout exceeded, process group killed")
-
-// ErrUsageLimit is the sentinel invokeClaude's returned error wraps (via
-// Unwrap, so errors.Is(err, ErrUsageLimit) works) when it detects the
-// claude CLI hit its Claude usage limit -- verified live 2026-10-09 against
-// claude 2.1.278: a dedicated rate_limit_event line with
-// rate_limit_info.status != "allowed", corroborated by a result event with
-// is_error == true and api_error_status == 429. Never keyed on
-// result.subtype (stays "success" even on the limit) or on overageStatus
-// (reads "rejected" in both the healthy and limited state).
-var ErrUsageLimit = errors.New("runner: claude usage limit hit")
-
-// UsageLimitError is the concrete error invokeClaude returns on a detected
-// usage limit -- a type (not a bare sentinel) so the resetsAt epoch
-// rate_limit_info reported can ride along with it. Use errors.As to recover
-// one from a wrapped error.
-type UsageLimitError struct {
-	// ResetsAt is rate_limit_info.resetsAt, converted from its Unix epoch --
-	// nil if the event never arrived with one (e.g. the stderr-tail
-	// fallback matched instead) or claude didn't report one.
-	ResetsAt *time.Time
-}
-
-func (e *UsageLimitError) Error() string {
-	if e.ResetsAt != nil {
-		return fmt.Sprintf("%s (resets at %s)", ErrUsageLimit, e.ResetsAt.UTC().Format(time.RFC3339))
-	}
-	return fmt.Sprintf("%s (reset time unknown)", ErrUsageLimit)
-}
-
-func (e *UsageLimitError) Unwrap() error { return ErrUsageLimit }
 
 // UsageLimitInfo is threaded through AlertPayload and Deps.OnTerminal
 // whenever a blocked (or, in principle, failed/done) task's outcome was
@@ -102,9 +72,11 @@ type Deps struct {
 	Vault *vaultgit.Vault
 	Repos map[string]config.RepoConfig
 
-	// ClaudeBin is the claude CLI's path/name -- overridable so tests can
-	// point it at a fake stub script instead of the real binary.
-	ClaudeBin string
+	// Engine is the coding-agent engine used to invoke the coding session
+	// and parse its output -- nil defaults to the claude engine (see
+	// engine()). Overridable so tests can point it at a fake stub binary
+	// instead of the real claude CLI.
+	Engine engine.Engine
 
 	// PostClaim, if non-nil, posts a fresh task's Discord forum claim
 	// message (thread_name + content, no mentions) and returns the new
@@ -195,11 +167,11 @@ type Deps struct {
 	OnMergeGateError func(job worker.Job, prURL, discordThreadID string, err error)
 }
 
-func (d Deps) claudeBin() string {
-	if d.ClaudeBin == "" {
-		return "claude"
+func (d Deps) engine() engine.Engine {
+	if d.Engine == nil {
+		return engine.NewClaude("")
 	}
-	return d.ClaudeBin
+	return d.Engine
 }
 
 func (d Deps) idleTimeout() time.Duration {
@@ -326,7 +298,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		priorSessionID = *note.Frontmatter.SessionID
 	}
 
-	sessionID, stderrTail, exitErr := invokeClaude(deps.claudeBin(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
+	sessionID, stderrTail, exitErr := invokeEngine(deps.engine(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
 	if sessionID != "" {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
 	}
@@ -340,7 +312,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// regardless of what the copy read-back below finds -- the limit was
 	// genuinely hit either way, and dispatch/every repo worker need to stop
 	// claiming/popping work before the next task repeats the same 429.
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if errors.As(exitErr, &usageLimitErr) {
 		fmt.Printf("[runner] task %s: claude hit the usage limit\n", job.Slug)
 		if deps.Pause != nil {
@@ -762,34 +734,31 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranc
 	return b.String()
 }
 
-// invokeClaude runs `claude -p` (fresh or --resume), parses the first
-// stream-json line for session_id, and waits for exit -- guarded by an idle
-// watchdog: idleTimeout resets on every stream-json line (a long-but-alive
-// task keeps resetting it forever), and fires only after that long a
-// silence, killing the whole process group (not just the top-level PID) so
-// a Bash-tool-spawned child claude itself started can't survive as an
-// orphan. This is deliberately an idle watchdog, not a flat deadline: a
-// fixed wall-clock timeout can't tell "genuinely hung" from "still
-// working."
+// invokeEngine runs eng's coding command (fresh or --resume), parses each
+// stdout line via eng.ParseLine into a shared RunState, and waits for exit
+// -- guarded by an idle watchdog: idleTimeout resets on every stdout line
+// (a long-but-alive task keeps resetting it forever), and fires only after
+// that long a silence, killing the whole process group (not just the
+// top-level PID) so a Bash-tool-spawned child the engine's CLI started
+// can't survive as an orphan. This is deliberately an idle watchdog, not a
+// flat deadline: a fixed wall-clock timeout can't tell "genuinely hung"
+// from "still working." This lifecycle is generic over any engine.Engine;
+// everything CLI-specific (argv, line parsing, exit classification) is
+// eng's own responsibility.
 //
-// Returns the captured session_id (best-effort -- the crash-fallback path
-// handles the case where the process died before ever emitting one), the
-// last portion of stderr (for crash-fallback alert content), and either the
-// process's own exit error, ErrIdleTimeout if the watchdog fired, or a
-// *UsageLimitError if a rate_limit_event/result line (or, as a fallback,
-// the stderr tail) says claude hit its usage limit.
-func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, string, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
-	if resumeSessionID != "" {
-		args = append(args, "--resume", resumeSessionID)
-	}
-
-	cmd := exec.Command(claudeBin, args...)
-	cmd.Dir = dir
-	// New process group: claude's own PID becomes its group leader, so
+// Returns the session ID (eng's own pre-assigned one if it returned a
+// non-empty one from BuildCommand, otherwise best-effort captured via
+// ParseLine -- the crash-fallback path handles the case where the process
+// died before ever emitting one), the last portion of stderr (for
+// crash-fallback alert content), and either the process's own exit error,
+// ErrIdleTimeout if the watchdog fired, or whatever eng.ClassifyExit
+// decides (e.g. a *engine.UsageLimitError).
+func invokeEngine(eng engine.Engine, dir, prompt, resumeSessionID string, idleTimeout time.Duration, reporter ActivityReporter) (string, string, error) {
+	cmd, preAssignedSessionID := eng.BuildCommand(dir, prompt, resumeSessionID)
+	// New process group: the engine's own PID becomes its group leader, so
 	// killing -PID (the negative of the group leader's PID) reaches every
 	// descendant it spawned (e.g. a Bash tool call's subshell), not just
-	// claude itself.
+	// the engine's top-level process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
@@ -800,7 +769,7 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
 
 	if err := cmd.Start(); err != nil {
-		return "", "", fmt.Errorf("starting claude: %w", err)
+		return "", "", fmt.Errorf("starting %s: %w", eng.Name(), err)
 	}
 
 	idleTimer := time.NewTimer(idleTimeout)
@@ -821,9 +790,7 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 		}
 	}()
 
-	var sessionID string
-	var usageLimitHit bool
-	var usageLimitResetsAt *time.Time
+	state := engine.RunState{SessionID: preAssignedSessionID}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -843,82 +810,25 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 		if line == "" {
 			continue
 		}
-		var evt map[string]any
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue // not every line need be JSON we care about
-		}
-		if sessionID == "" {
-			if sid, ok := evt["session_id"].(string); ok && sid != "" {
-				sessionID = sid
-			}
-		}
-
-		// Detected inline as events stream, not deferred until after exit --
-		// a rate_limit_event line arrives well before claude's own process
-		// exit, and the primary discriminator is rate_limit_info.status:
-		// "allowed" is healthy, anything else (captured live: "rejected")
-		// is the limit. Deliberately never keyed on overageStatus (reads
-		// "rejected" in both the healthy and limited state) or on
-		// result.subtype (stays "success" even on the limit).
-		switch evt["type"] {
-		case "rate_limit_event":
-			if info, ok := evt["rate_limit_info"].(map[string]any); ok {
-				if status, _ := info["status"].(string); status != "" && status != "allowed" {
-					fmt.Printf("[runner] rate_limit_event (not allowed): %s\n", line)
-					usageLimitHit = true
-					if ra, ok := info["resetsAt"].(float64); ok {
-						t := time.Unix(int64(ra), 0)
-						usageLimitResetsAt = &t
-					}
-				}
-			}
-		case "result":
-			// Corroborating signal, independent of the rate_limit_event
-			// above in case a future version ever omits it: is_error with a
-			// 429 api_error_status.
-			if isErr, _ := evt["is_error"].(bool); isErr {
-				if code, ok := evt["api_error_status"].(float64); ok && int(code) == 429 {
-					usageLimitHit = true
-				}
-			}
-		}
+		eng.ParseLine(line, &state)
 	}
 
 	waitErr := cmd.Wait()
 	close(killDone)
 
-	// usageLimitHit is checked first: claude can report the limit via
-	// rate_limit_event and then hang (rather than exit) until the idle
-	// watchdog kills it, and that real signal must win over ErrIdleTimeout.
-	if usageLimitHit {
-		return sessionID, stderrTail.String(), &UsageLimitError{ResetsAt: usageLimitResetsAt}
+	// state.UsageLimitHit is checked first: the engine's CLI can report the
+	// limit and then hang (rather than exit) until the idle watchdog kills
+	// it, and that real signal must win over ErrIdleTimeout.
+	if !state.UsageLimitHit && watchdogFired.Load() {
+		return state.SessionID, stderrTail.String(), ErrIdleTimeout
 	}
-	if watchdogFired.Load() {
-		return sessionID, stderrTail.String(), ErrIdleTimeout
-	}
-	// Fallback: a future claude version could exit before ever emitting the
-	// structured event -- if the process errored out and its stderr tail
-	// still reads like a usage-limit message, treat it the same way, just
-	// without a known resetsAt.
-	if waitErr != nil && looksLikeUsageLimitMessage(stderrTail.String()) {
-		return sessionID, stderrTail.String(), &UsageLimitError{}
-	}
-	return sessionID, stderrTail.String(), waitErr
+	return state.SessionID, stderrTail.String(), eng.ClassifyExit(waitErr, stderrTail.String(), state)
 }
 
-// looksLikeUsageLimitMessage is invokeClaude's fallback detector, for a
-// future claude version that exits before ever emitting a structured
-// rate_limit_event/result line -- a best-effort substring match against
-// the wording captured live 2026-10-09 ("You've hit your session limit").
-func looksLikeUsageLimitMessage(s string) bool {
-	s = strings.ToLower(s)
-	return strings.Contains(s, "usage limit") || strings.Contains(s, "session limit") || strings.Contains(s, "rate limit")
-}
-
-// usageLimitInfoOf converts invokeClaude's error-typed usage-limit signal
+// usageLimitInfoOf converts invokeEngine's error-typed usage-limit signal
 // into the plain data struct AlertPayload/OnTerminal carry -- nil in, nil
 // out.
-func usageLimitInfoOf(e *UsageLimitError) *UsageLimitInfo {
+func usageLimitInfoOf(e *engine.UsageLimitError) *UsageLimitInfo {
 	if e == nil {
 		return nil
 	}

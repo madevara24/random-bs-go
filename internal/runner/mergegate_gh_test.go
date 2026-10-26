@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/engine"
 )
 
 // TestGitDiffMissingLocalBranch confirms gitDiff still produces a diff when
@@ -113,7 +115,7 @@ func TestRealReviewInvocation(t *testing.T) {
 		"+}\n"
 
 	t.Run("obviously fine change", func(t *testing.T) {
-		verdict, feedback, err := reviewOnce("claude", testTargetRepoPath, 90*time.Second, 0, "Adds a harmless doc clarification to the README.", goodDiff, "")
+		verdict, feedback, err := reviewOnce(engine.NewClaude(""), testTargetRepoPath, 90*time.Second, 0, "Adds a harmless doc clarification to the README.", goodDiff, "")
 		if err != nil {
 			t.Fatalf("reviewOnce: %v", err)
 		}
@@ -124,7 +126,7 @@ func TestRealReviewInvocation(t *testing.T) {
 	})
 
 	t.Run("obviously bad change", func(t *testing.T) {
-		verdict, feedback, err := reviewOnce("claude", testTargetRepoPath, 90*time.Second, 0, "Adds a small utility function.", badDiff, "")
+		verdict, feedback, err := reviewOnce(engine.NewClaude(""), testTargetRepoPath, 90*time.Second, 0, "Adds a small utility function.", badDiff, "")
 		if err != nil {
 			t.Fatalf("reviewOnce: %v", err)
 		}
@@ -230,7 +232,7 @@ func TestRunReviewResolvesHeadBranchFromPRURL(t *testing.T) {
 		// this test.
 		PRURL:         "https://github.com/fake-owner/fake-repo/pull/42",
 		DefaultBranch: "main",
-		ClaudeBin:     claudeScript,
+		Engine:        engine.NewClaude(claudeScript),
 	}
 
 	verdict, _, err := g.RunReview(0)

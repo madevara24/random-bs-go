@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
@@ -65,11 +66,11 @@ func TestInvokeClaudeDetectsUsageLimitFromRateLimitEvent(t *testing.T) {
 	body := strings.Join([]string{echoLine(initLine), echoLine(limitedRateLimitEventLine), echoLine(limitedResultLine), "exit 1"}, "\n")
 	script := writeInvokeClaudeStub(t, tmpDir, body)
 
-	sessionID, _, err := invokeClaude(script, tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
+	sessionID, _, err := invokeEngine(engine.NewClaude(script), tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if !errors.As(err, &usageLimitErr) {
-		t.Fatalf("invokeClaude error = %v, want a *UsageLimitError", err)
+		t.Fatalf("invokeClaude error = %v, want a *engine.UsageLimitError", err)
 	}
 	if usageLimitErr.ResetsAt == nil || !usageLimitErr.ResetsAt.Equal(time.Unix(1791552000, 0)) {
 		t.Errorf("ResetsAt = %v, want %v", usageLimitErr.ResetsAt, time.Unix(1791552000, 0))
@@ -77,8 +78,8 @@ func TestInvokeClaudeDetectsUsageLimitFromRateLimitEvent(t *testing.T) {
 	if sessionID != "fake-usagelimit-session" {
 		t.Errorf("sessionID = %q, want it captured from the init line despite the limit", sessionID)
 	}
-	if !errors.Is(err, ErrUsageLimit) {
-		t.Error("errors.Is(err, ErrUsageLimit) = false, want true")
+	if !errors.Is(err, engine.ErrUsageLimit) {
+		t.Error("errors.Is(err, engine.ErrUsageLimit) = false, want true")
 	}
 }
 
@@ -91,11 +92,11 @@ func TestInvokeClaudeResultEventAloneCorroboratesUsageLimit(t *testing.T) {
 	body := strings.Join([]string{echoLine(initLine), echoLine(limitedResultLine), "exit 1"}, "\n")
 	script := writeInvokeClaudeStub(t, tmpDir, body)
 
-	_, _, err := invokeClaude(script, tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
+	_, _, err := invokeEngine(engine.NewClaude(script), tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if !errors.As(err, &usageLimitErr) {
-		t.Fatalf("invokeClaude error = %v, want a *UsageLimitError", err)
+		t.Fatalf("invokeClaude error = %v, want a *engine.UsageLimitError", err)
 	}
 	if usageLimitErr.ResetsAt != nil {
 		t.Errorf("ResetsAt = %v, want nil (no rate_limit_event arrived to supply one)", usageLimitErr.ResetsAt)
@@ -111,9 +112,9 @@ func TestInvokeClaudeHealthyRateLimitEventDoesNotTrip(t *testing.T) {
 	body := strings.Join([]string{echoLine(initLine), echoLine(healthyRateLimitEventLine), echoLine(healthyResult), "exit 0"}, "\n")
 	script := writeInvokeClaudeStub(t, tmpDir, body)
 
-	_, _, err := invokeClaude(script, tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
+	_, _, err := invokeEngine(engine.NewClaude(script), tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if errors.As(err, &usageLimitErr) {
 		t.Fatalf("invokeClaude error = %v, want no UsageLimitError for the healthy fixture", err)
 	}
@@ -131,9 +132,9 @@ func TestInvokeClaudeOverageRejectedButStatusAllowedDoesNotTrip(t *testing.T) {
 	body := strings.Join([]string{echoLine(initLine), echoLine(line), "exit 0"}, "\n")
 	script := writeInvokeClaudeStub(t, tmpDir, body)
 
-	_, _, err := invokeClaude(script, tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
+	_, _, err := invokeEngine(engine.NewClaude(script), tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if errors.As(err, &usageLimitErr) {
 		t.Fatalf("invokeClaude error = %v, want no UsageLimitError when status is \"allowed\" regardless of overageStatus", err)
 	}
@@ -148,11 +149,11 @@ func TestInvokeClaudeFallbackDetectsStderrMessage(t *testing.T) {
 	body := strings.Join([]string{echoLine(initLine), "echo " + shQuote("Error: you've hit your session limit") + " >&2", "exit 1"}, "\n")
 	script := writeInvokeClaudeStub(t, tmpDir, body)
 
-	_, stderrTail, err := invokeClaude(script, tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
+	_, stderrTail, err := invokeEngine(engine.NewClaude(script), tmpDir, "irrelevant prompt", "", 5*time.Second, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if !errors.As(err, &usageLimitErr) {
-		t.Fatalf("invokeClaude error = %v, want a *UsageLimitError from the stderr fallback", err)
+		t.Fatalf("invokeClaude error = %v, want a *engine.UsageLimitError from the stderr fallback", err)
 	}
 	if usageLimitErr.ResetsAt != nil {
 		t.Errorf("ResetsAt = %v, want nil (fallback has no structured resetsAt)", usageLimitErr.ResetsAt)
@@ -181,11 +182,11 @@ sleep 999999
 	}
 
 	const idleTimeout = 2 * time.Second
-	sessionID, _, err := invokeClaude(scriptPath, tmpDir, "irrelevant prompt", "", idleTimeout, nil)
+	sessionID, _, err := invokeEngine(engine.NewClaude(scriptPath), tmpDir, "irrelevant prompt", "", idleTimeout, nil)
 
-	var usageLimitErr *UsageLimitError
+	var usageLimitErr *engine.UsageLimitError
 	if !errors.As(err, &usageLimitErr) {
-		t.Fatalf("invokeClaude error = %v, want a *UsageLimitError even though the idle watchdog also fired", err)
+		t.Fatalf("invokeClaude error = %v, want a *engine.UsageLimitError even though the idle watchdog also fired", err)
 	}
 	if errors.Is(err, ErrIdleTimeout) {
 		t.Error("errors.Is(err, ErrIdleTimeout) = true, want the usage-limit error reported instead")
