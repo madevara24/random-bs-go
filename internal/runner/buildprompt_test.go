@@ -20,7 +20,7 @@ func TestBuildPromptCarriesPRContract(t *testing.T) {
 	}
 
 	for _, resume := range []bool{false, true} {
-		prompt := buildPrompt(note, "copy.md", resume, "main")
+		prompt := buildPrompt(note, "copy.md", resume, "main", "task/slug", false)
 
 		if !strings.Contains(prompt, "pushed to `origin`") || !strings.Contains(prompt, "pull request") {
 			t.Errorf("resume=%v: prompt missing commit/push/PR requirement:\n%s", resume, prompt)
@@ -36,7 +36,7 @@ func TestBuildPromptCarriesPRContract(t *testing.T) {
 
 func TestBuildPromptResumeStillMentionsTaskFile(t *testing.T) {
 	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
-	prompt := buildPrompt(note, "copy.md", true, "main")
+	prompt := buildPrompt(note, "copy.md", true, "main", "task/slug", false)
 
 	if !strings.Contains(prompt, "copy.md") {
 		t.Errorf("resume prompt missing copy file name:\n%s", prompt)
@@ -53,7 +53,7 @@ func TestBuildPromptResumeStillMentionsTaskFile(t *testing.T) {
 // runner's resume git surface is fetch+checkout only, never merge/rebase.
 func TestBuildPromptResumeCarriesReconciliationNotice(t *testing.T) {
 	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
-	prompt := buildPrompt(note, "copy.md", true, "main")
+	prompt := buildPrompt(note, "copy.md", true, "main", "task/slug", false)
 
 	if !strings.Contains(prompt, "origin/main") {
 		t.Errorf("resume prompt missing the default branch it must reconcile against:\n%s", prompt)
@@ -68,7 +68,7 @@ func TestBuildPromptResumeCarriesReconciliationNotice(t *testing.T) {
 		t.Errorf("resume prompt missing confirmation that the runner itself never merges/rebases:\n%s", prompt)
 	}
 
-	freshPrompt := buildPrompt(note, "copy.md", false, "main")
+	freshPrompt := buildPrompt(note, "copy.md", false, "main", "task/slug", false)
 	if strings.Contains(freshPrompt, "may have advanced") {
 		t.Errorf("fresh prompt should not carry the resume-only reconciliation notice:\n%s", freshPrompt)
 	}
@@ -76,9 +76,30 @@ func TestBuildPromptResumeCarriesReconciliationNotice(t *testing.T) {
 
 func TestBuildPromptFreshIncludesTaskBody(t *testing.T) {
 	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
-	prompt := buildPrompt(note, "copy.md", false, "main")
+	prompt := buildPrompt(note, "copy.md", false, "main", "task/slug", false)
 
 	if !strings.Contains(prompt, "Do the thing.") {
 		t.Errorf("fresh prompt missing task body:\n%s", prompt)
+	}
+}
+
+// TestBuildPromptResumeLocalOnlyMentionsPushUpstream guards RBG-38: when
+// checkoutTaskBranch had to fall back to a branch that was never pushed to
+// origin, the resume prompt must tell the session to set an upstream on its
+// first push instead of implying the normal (tracked) resume case.
+func TestBuildPromptResumeLocalOnlyMentionsPushUpstream(t *testing.T) {
+	note := &notetask.Note{Frontmatter: notetask.Frontmatter{Status: "ready"}, Prompt: "Do the thing."}
+
+	localOnlyPrompt := buildPrompt(note, "copy.md", true, "main", "task/rbg-38-test", true)
+	if !strings.Contains(localOnlyPrompt, "git push -u origin task/rbg-38-test") {
+		t.Errorf("local-only resume prompt missing the git push -u origin instruction:\n%s", localOnlyPrompt)
+	}
+	if !strings.Contains(localOnlyPrompt, "only locally") {
+		t.Errorf("local-only resume prompt missing the only-found-locally notice:\n%s", localOnlyPrompt)
+	}
+
+	normalPrompt := buildPrompt(note, "copy.md", true, "main", "task/rbg-38-test", false)
+	if strings.Contains(normalPrompt, "git push -u origin") {
+		t.Errorf("normal resume prompt should not carry the local-only push instruction:\n%s", normalPrompt)
 	}
 }

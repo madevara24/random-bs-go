@@ -242,8 +242,11 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// dispatch.slugFromPath), so a resume can check out exactly this same
 	// branch rather than guessing at whatever suffix a prior run computed.
 	branchName := fmt.Sprintf("task/%s", job.Slug)
+	var localOnlyResume bool
 	if resume {
-		if err := checkoutTaskBranch(repoCfg, branchName); err != nil {
+		var err error
+		localOnlyResume, err = checkoutTaskBranch(repoCfg, branchName)
+		if err != nil {
 			return handleSetupFailure(deps, job, setupFailureInfo{
 				stage:           setupStageCheckoutTaskBranch,
 				err:             fmt.Errorf("checking out task branch for resumed %s: %w", job.Slug, err),
@@ -292,7 +295,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	reporter.SetStage("invocation")
 
-	prompt := buildPrompt(note, copyName, resume, repoCfg.DefaultBranch)
+	prompt := buildPrompt(note, copyName, resume, repoCfg.DefaultBranch, branchName, localOnlyResume)
 	var priorSessionID string
 	if resume {
 		priorSessionID = *note.Frontmatter.SessionID
@@ -637,17 +640,30 @@ func pullAndBranch(repoCfg config.RepoConfig, branchName string) error {
 // be picked up as-is; reconciling origin/<default> into it is left to the
 // resumed session itself (see resumeReconciliationNotice), never the
 // runner.
-func checkoutTaskBranch(repoCfg config.RepoConfig, branchName string) error {
+// The returned bool is true when the checkout came from the local-only
+// fallback path (no remote ref, so the branch has no upstream) -- callers
+// use it to warn the resumed session it needs to `git push -u origin` when
+// it eventually pushes, rather than assuming the tracked-origin case below.
+func checkoutTaskBranch(repoCfg config.RepoConfig, branchName string) (bool, error) {
 	run := func(args ...string) error {
 		return runGitCommand(repoCfg.Path, args...)
 	}
-	if err := run("fetch", "origin", branchName); err != nil {
-		return err
+	fetchErr := run("fetch", "origin", branchName)
+	if fetchErr == nil {
+		if localBranchExists(repoCfg.Path, branchName) {
+			return false, run("checkout", branchName)
+		}
+		return false, run("checkout", "-b", branchName, "--track", "origin/"+branchName)
 	}
-	if localBranchExists(repoCfg.Path, branchName) {
-		return run("checkout", branchName)
+	if !localBranchExists(repoCfg.Path, branchName) {
+		return false, fmt.Errorf("task branch %s has no remote ref on origin (%w) and no local branch either -- the preserved work is gone unless it still exists somewhere and gets pushed to origin/%s", branchName, fetchErr, branchName)
 	}
-	return run("checkout", "-b", branchName, "--track", "origin/"+branchName)
+	// The push preserveBlockedWork was supposed to make never reached
+	// origin (RBG-33 lived this), but the branch -- and its commits --
+	// are still sitting right here in the clone. Pick it up as-is rather
+	// than hard-failing the resume over a missing remote ref.
+	fmt.Printf("[runner] task %s: origin fetch failed (%v); falling back to the local branch, which was never pushed\n", branchName, fetchErr)
+	return true, run("checkout", branchName)
 }
 
 func localBranchExists(repoPath, branchName string) bool {
@@ -715,15 +731,29 @@ const prCompletionContract = "The task is only done once your work is committed 
 // or assume the runner already did.
 const resumeReconciliationNotice = "The runner only fetched and checked out your preserved branch for this resume -- it never merges, rebases, or touches `origin/%s` itself. `origin/%s` may have advanced while this task was blocked, so before continuing the task itself, reconcile `origin/%s` into your branch (merge or rebase, whichever this repo's convention is) and resolve any conflicts yourself.\n\n"
 
+// resumeLocalOnlyNotice is resumeReconciliationNotice's counterpart for the
+// case checkoutTaskBranch falls back to a local-only branch (RBG-38): the
+// preserved work's push to origin never landed, so unlike the normal case
+// this branch has no upstream yet, and the session must set one explicitly
+// the first time it pushes rather than assuming a plain `git push` works.
+const resumeLocalOnlyNotice = "The runner found your preserved branch only locally on this clone -- it was never pushed to `origin`, so it has no upstream, and the runner never merges, rebases, or touches `origin/%s` itself. `origin/%s` may have advanced while this task was blocked, so before continuing the task itself, reconcile `origin/%s` into your branch (merge or rebase, whichever this repo's convention is) and resolve any conflicts yourself. Because this branch has no upstream yet, push it with `git push -u origin %s` the first time -- a plain `git push` will fail.\n\n"
+
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
 // vault access, so it's pointed at the note-copy instead for anything it
-// needs to read or write about task state.
-func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranch string) string {
+// needs to read or write about task state. localOnlyResume is true only
+// when checkoutTaskBranch had to fall back to a branch that was never
+// pushed to origin (see resumeLocalOnlyNotice); it's meaningless when
+// resume is false.
+func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranch string, branchName string, localOnlyResume bool) string {
 	var b strings.Builder
 	if resume {
 		b.WriteString(fmt.Sprintf(
 			"This is a resumed session for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). Re-read that file now, including your own prior Work Log entries, to reconstruct context, then continue the task.\n\n%s\n\n", copyName, prCompletionContract))
-		b.WriteString(fmt.Sprintf(resumeReconciliationNotice, defaultBranch, defaultBranch, defaultBranch))
+		if localOnlyResume {
+			b.WriteString(fmt.Sprintf(resumeLocalOnlyNotice, defaultBranch, defaultBranch, defaultBranch, branchName))
+		} else {
+			b.WriteString(fmt.Sprintf(resumeReconciliationNotice, defaultBranch, defaultBranch, defaultBranch))
+		}
 	} else {
 		b.WriteString(fmt.Sprintf(
 			"You are working on a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). It holds your task's frontmatter (status/repo/auto_merge/pr_url/session_id/etc.) and body (the task prompt below, plus a \"## Work Log\" section for your own narrative).\n\n"+
