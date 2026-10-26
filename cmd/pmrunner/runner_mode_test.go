@@ -186,6 +186,48 @@ func TestTerminalHandlerUsageLimitBlockMentionsDevaraOnly(t *testing.T) {
 	}
 }
 
+// TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer covers RBG-32: a
+// task that finished `done` (not just `blocked`) must still arm the
+// auto-resume timer when this invocation also hit the usage limit --
+// otherwise the pipeline stays paused forever after a done-but-limited
+// task, since nothing else would ever call handleTrip for it. It must
+// also append the usage-limit pause sentence to the normal done message,
+// not replace it.
+func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
+	srv, alerts := capturingDiscordServer(t)
+	defer srv.Close()
+
+	cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
+	notifier := &notify.Notifier{WebhookURL: srv.URL}
+	resumeMgr := newResumeTimerMgr(cfg, notifier, nil)
+	handler := newTerminalHandler(cfg, notifier, resumeMgr)
+
+	resetsAt := time.Now().Add(time.Hour)
+	const prURL = "https://github.com/example/repo/pull/42"
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", false, prURL, "", &runner.UsageLimitInfo{ResetsAt: &resetsAt})
+
+	resumeMgr.mu.Lock()
+	armed := resumeMgr.timer != nil
+	resumeMgr.mu.Unlock()
+	if !armed {
+		t.Error("resume timer was not armed for a done task that hit the usage limit")
+	}
+
+	got := waitForAlert(t, alerts)
+	if !strings.Contains(got.content, prURL) {
+		t.Errorf("message %q missing PR URL %q", got.content, prURL)
+	}
+	if !strings.Contains(got.content, "manual merge") {
+		t.Errorf("message %q missing the normal done wording", got.content)
+	}
+	if !strings.Contains(got.content, "The Claude usage limit was hit on this run") {
+		t.Errorf("message %q missing the usage-limit pause sentence", got.content)
+	}
+	if got.hasFile {
+		t.Errorf("done message attached a file, want none")
+	}
+}
+
 // TestBuildWorkersWiresOnPanicAndOnError is this package's wiring test: for
 // every configured repo, buildWorkers must hand back a RepoWorker whose
 // OnPanic and OnError are both non-nil -- OnError already defaults to a

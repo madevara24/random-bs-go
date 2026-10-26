@@ -353,3 +353,76 @@ func TestProcessTaskSelfReportedBlockedWhileUsageLimitTripped(t *testing.T) {
 		t.Errorf("status = %q, want %q", note.Frontmatter.Status, "blocked")
 	}
 }
+
+// TestProcessTaskSelfReportedDoneWhileUsageLimitTripped covers RBG-32's
+// production gap: CC's copy finished cleanly with status: done and a real
+// pr_url, but invokeClaude's exit error says this invocation still hit the
+// usage limit (e.g. the limit landed right as claude was wrapping up).
+// Unlike the self-reported-blocked case above, this must NOT run
+// preserveBlockedWork or record the note in BlockedNotes -- a done task's
+// work is finished, not a blocker to flip back to blocker_resolved on
+// resume -- but OnTerminal must still get a non-nil usageLimit so the
+// auto-resume timer arms regardless of the task's own final status.
+func TestProcessTaskSelfReportedDoneWhileUsageLimitTripped(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+
+	deps, job, v, slug := setupCrashTest(t, "phase-usagelimit-done", scriptPath)
+	var p pause.State
+	deps.Pause = &p
+
+	copyName := copyFileName(slug)
+	writeStubScript(t, scriptPath, strings.Join([]string{
+		echoLine(limitedResultLine),
+		fmt.Sprintf("printf -- '---\\nstatus: done\\nrepo: phase6-test-repo\\ncreated: \"2026-09-15\"\\npr_url: \"https://github.com/example/repo/pull/1\"\\n---\\nCrash-fallback test task.\\n\\n## Work Log\\n\\nFinished just as the usage limit hit.\\n' > %q",
+			filepath.Join(testTargetRepoPath, copyName)),
+		"exit 1",
+	}, "\n"))
+
+	var gotBlockedCalled bool
+	deps.OnBlocked = func(j worker.Job, pl AlertPayload) { gotBlockedCalled = true }
+
+	var gotStatus string
+	var gotUsageLimit *UsageLimitInfo
+	var onTerminalCalled bool
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo) {
+		onTerminalCalled = true
+		gotStatus = status
+		gotUsageLimit = usageLimit
+	}
+
+	err := ProcessTask(deps, noopReporter{}, job)
+	if err != nil {
+		t.Fatalf("ProcessTask: %v (self-reported done is the happy path, not a crash)", err)
+	}
+	if gotBlockedCalled {
+		t.Error("OnBlocked was called, want only OnTerminal for a self-reported done")
+	}
+	if !onTerminalCalled {
+		t.Fatal("OnTerminal was never called")
+	}
+	if gotStatus != "done" {
+		t.Errorf("status = %q, want %q", gotStatus, "done")
+	}
+	if gotUsageLimit == nil {
+		t.Fatal("usageLimit = nil, want it set for a self-reported done while the limit tripped on this invocation")
+	}
+
+	if !p.IsPaused() {
+		t.Error("pause was not tripped")
+	}
+	snap := p.Snapshot()
+	for _, n := range snap.BlockedNotes {
+		if n == job.NotePath {
+			t.Errorf("BlockedNotes = %v, want it to NOT contain %q for a done task", snap.BlockedNotes, job.NotePath)
+		}
+	}
+
+	note, err := v.ReadNote(job.NotePath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.Status != "done" {
+		t.Errorf("status = %q, want %q", note.Frontmatter.Status, "done")
+	}
+}
