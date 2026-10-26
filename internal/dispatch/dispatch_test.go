@@ -175,13 +175,14 @@ func TestRunDispatchPass(t *testing.T) {
 	}
 }
 
-// TestRunDispatchPassSkipsClaimingWhilePaused covers the pause side of
-// RBG-24: while the shared pause.State is tripped, RunDispatchPass must
-// return before claiming anything -- a ready note stays ready, not queued,
-// and nothing is enqueued. This is what stops a usage-limit event from
-// burning through the rest of the queue: without this guard, the next
-// ready task gets claimed and immediately hits the same limit again.
-func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
+// TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused covers
+// RBG-35's per-engine pause: with "claude" paused, a ready note that
+// resolves to "claude" must stay ready, not queued, while a ready note
+// that resolves to a different (fake, test-only) engine "other" is
+// claimed and enqueued as usual. This is what stops a usage-limit event on
+// one engine from burning through the rest of the queue without also
+// stopping every other engine's tasks dead.
+func TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused(t *testing.T) {
 	skipIfNoTestVault(t)
 	t.Cleanup(testvault.Lock(t))
 	v := vaultgit.New(testVaultPath, "master")
@@ -190,41 +191,63 @@ func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
 	}
 
 	run := fmt.Sprintf("%d", time.Now().UnixNano())
-	relPath := fmt.Sprintf("Tasks/phase2-paused-%s-ready.md", run)
-	testvault.Seed(t, relPath, notetask.Frontmatter{
+	claudePath := fmt.Sprintf("Tasks/phase2-paused-%s-claude.md", run)
+	otherPath := fmt.Sprintf("Tasks/phase2-paused-%s-other.md", run)
+	testvault.Seed(t, claudePath, notetask.Frontmatter{
 		Status: "ready", Repo: "repo-paused", Created: "2026-09-10",
-	}, "Ready while the pipeline is paused.")
+	}, "Ready while claude is paused.")
+	testvault.Seed(t, otherPath, notetask.Frontmatter{
+		Status: "ready", Repo: "repo-paused", Created: "2026-09-10", Engine: strp("other"),
+	}, "Ready on a different engine while claude is paused.")
+
+	// resolveEngine stands in for the real repo/DEFAULT_ENGINE precedence:
+	// a note with no engine: pin resolves to "claude", exercised directly
+	// in internal/engineresolve.
+	resolveEngine := func(repoKey, noteEngine string) string {
+		if noteEngine != "" {
+			return noteEngine
+		}
+		return "claude"
+	}
 
 	var p pause.State
 	resetsAt := time.Now().Add(time.Hour)
-	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, &p, nil); err != nil {
-		t.Fatalf("RunDispatchPass while paused: %v", err)
+	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
+		t.Fatalf("RunDispatchPass while claude paused: %v", err)
 	}
 
-	if len(enq.calls) != 0 {
-		t.Errorf("enqueued %d jobs while paused, want 0: %+v", len(enq.calls), enq.calls)
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs while claude paused, want 1 (the \"other\"-engine note): %+v", len(enq.calls), enq.calls)
 	}
-	n := readNote(t, v.Path, relPath)
+	if enq.calls[0].job.Engine != "other" {
+		t.Errorf("enqueued job engine = %q, want %q", enq.calls[0].job.Engine, "other")
+	}
+
+	n := readNote(t, v.Path, claudePath)
 	if n.Frontmatter.Status != "ready" {
-		t.Errorf("status = %q while paused, want unchanged %q", n.Frontmatter.Status, "ready")
+		t.Errorf("claude-engine note status = %q while claude paused, want unchanged %q", n.Frontmatter.Status, "ready")
+	}
+	n = readNote(t, v.Path, otherPath)
+	if n.Frontmatter.Status != "queued" {
+		t.Errorf("other-engine note status = %q, want %q (claimed despite claude being paused)", n.Frontmatter.Status, "queued")
 	}
 
-	// Once unpaused, the same note is claimed and enqueued normally --
-	// proof this is a guard on the pass, not a hidden rejection of this
-	// particular note.
-	p.Clear()
-	if err := RunDispatchPass(v, enq, &p, nil); err != nil {
+	// Once claude clears, the same note is claimed and enqueued normally --
+	// proof this is a guard scoped to that engine, not a hidden rejection
+	// of this particular note.
+	p.Clear("claude")
+	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
 		t.Fatalf("RunDispatchPass after resume: %v", err)
 	}
-	if len(enq.calls) != 1 {
-		t.Fatalf("enqueued %d jobs after resume, want 1: %+v", len(enq.calls), enq.calls)
+	if len(enq.calls) != 2 {
+		t.Fatalf("enqueued %d jobs after resume, want 2: %+v", len(enq.calls), enq.calls)
 	}
-	n = readNote(t, v.Path, relPath)
+	n = readNote(t, v.Path, claudePath)
 	if n.Frontmatter.Status != "queued" {
-		t.Errorf("status = %q after resume, want %q", n.Frontmatter.Status, "queued")
+		t.Errorf("claude-engine note status = %q after resume, want %q", n.Frontmatter.Status, "queued")
 	}
 }
 

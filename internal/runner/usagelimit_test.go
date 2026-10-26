@@ -216,11 +216,11 @@ func TestNormalBlockedNeverTripsPause(t *testing.T) {
 	if err == nil {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
-	if p.IsPaused() {
+	if p.IsPaused("claude") {
 		t.Error("pause was tripped by an ordinary (non-usage-limit) block")
 	}
-	if len(p.Snapshot().BlockedNotes) != 0 {
-		t.Errorf("BlockedNotes = %v, want empty for an ordinary block", p.Snapshot().BlockedNotes)
+	if len(p.Snapshot("claude").BlockedNotes) != 0 {
+		t.Errorf("BlockedNotes = %v, want empty for an ordinary block", p.Snapshot("claude").BlockedNotes)
 	}
 
 	note, err := v.ReadNote(job.NotePath)
@@ -258,10 +258,10 @@ func TestCrashFallbackScenarioUsageLimit(t *testing.T) {
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioUsageLimit, gotJob, gotAlert)
 
-	if !p.IsPaused() {
+	if !p.IsPaused("claude") {
 		t.Error("pause was not tripped by a usage-limit block")
 	}
-	snap := p.Snapshot()
+	snap := p.Snapshot("claude")
 	found := false
 	for _, n := range snap.BlockedNotes {
 		if n == job.NotePath {
@@ -309,7 +309,7 @@ func TestProcessTaskSelfReportedBlockedWhileUsageLimitTripped(t *testing.T) {
 	var gotStatus string
 	var gotUsageLimit *UsageLimitInfo
 	var onTerminalCalled bool
-	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo) {
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string) {
 		onTerminalCalled = true
 		gotStatus = status
 		gotUsageLimit = usageLimit
@@ -332,10 +332,10 @@ func TestProcessTaskSelfReportedBlockedWhileUsageLimitTripped(t *testing.T) {
 		t.Fatal("usageLimit = nil, want it set for a self-reported blocked while the limit tripped on this invocation")
 	}
 
-	if !p.IsPaused() {
+	if !p.IsPaused("claude") {
 		t.Error("pause was not tripped")
 	}
-	snap := p.Snapshot()
+	snap := p.Snapshot("claude")
 	found := false
 	for _, n := range snap.BlockedNotes {
 		if n == job.NotePath {
@@ -386,7 +386,7 @@ func TestProcessTaskSelfReportedDoneWhileUsageLimitTripped(t *testing.T) {
 	var gotStatus string
 	var gotUsageLimit *UsageLimitInfo
 	var onTerminalCalled bool
-	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo) {
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string) {
 		onTerminalCalled = true
 		gotStatus = status
 		gotUsageLimit = usageLimit
@@ -409,10 +409,10 @@ func TestProcessTaskSelfReportedDoneWhileUsageLimitTripped(t *testing.T) {
 		t.Fatal("usageLimit = nil, want it set for a self-reported done while the limit tripped on this invocation")
 	}
 
-	if !p.IsPaused() {
+	if !p.IsPaused("claude") {
 		t.Error("pause was not tripped")
 	}
-	snap := p.Snapshot()
+	snap := p.Snapshot("claude")
 	for _, n := range snap.BlockedNotes {
 		if n == job.NotePath {
 			t.Errorf("BlockedNotes = %v, want it to NOT contain %q for a done task", snap.BlockedNotes, job.NotePath)

@@ -92,19 +92,21 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 // time.
 //
 // p is the shared pipeline-pause flag -- nil is valid (treated as never
-// paused) for any caller that doesn't wire one in. While paused, this
-// returns immediately before syncing or claiming anything: every
-// ready/blocker_resolved note stays exactly as it is (ready stays ready,
-// not queued) until a human or the auto-resume timer clears the pause.
+// paused for any engine) for any caller that doesn't wire one in. A usage
+// limit belongs to one engine's account, so this never returns early on a
+// global pause: it always syncs and claims. Instead, each candidate note's
+// own resolved engine (via resolveEngine, same resolution a claimed Job's
+// Engine field gets) is checked against p individually -- a note whose
+// resolved engine is currently paused is skipped, left exactly as it is
+// (ready stays ready, not queued), while a note resolved to any other,
+// unpaused engine is claimed as usual. A skipped note is reconsidered on
+// every later pass until its engine's pause clears.
 //
 // resolveEngine resolves the coding engine for each claimed job's Engine
 // field -- nil is valid (every Job.Engine comes out "", same as before
 // this field existed) for any caller that doesn't care. Resolution never
 // writes `engine:` to the note itself -- see Job's doc comment.
 func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEngine EngineResolver) error {
-	if p.IsPaused() {
-		return nil
-	}
 	if err := v.Sync(); err != nil {
 		return fmt.Errorf("dispatch: sync: %w", err)
 	}
@@ -163,6 +165,15 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEng
 		relPath := relPathOf[note]
 		slug := taskmeta.SlugFromPath(relPath)
 		repoKey := note.Frontmatter.Repo
+		engineName := resolveEngineFor(resolveEngine, repoKey, note)
+
+		if p.IsPaused(engineName) {
+			// This note's engine is paused -- leave it exactly as it is
+			// (ready/blocker_resolved, not queued) for a later pass to
+			// pick up once that engine's pause clears. A different note
+			// resolved to any other engine is unaffected.
+			continue
+		}
 
 		claimErr := v.WriteNote(relPath, fmt.Sprintf("dispatch: claim %s", slug), func(n *notetask.Note) error {
 			if !claimableStatus(n.Frontmatter.Status) {
@@ -176,7 +187,7 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEng
 			continue
 		}
 
-		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug, Engine: resolveEngineFor(resolveEngine, repoKey, note)})
+		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug, Engine: engineName})
 	}
 
 	return nil

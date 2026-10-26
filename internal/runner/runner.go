@@ -109,14 +109,16 @@ type Deps struct {
 	// (IDLE_TIMEOUT_MINUTES), read by both run modes.
 	IdleTimeout time.Duration
 
-	// Pause is the shared pipeline-pause flag -- nil is valid (every usage-
-	// limit-detection branch below is nil-safe) for any caller that doesn't
-	// wire one in, which is every existing test unless it specifically
-	// means to exercise this. Production always sets it: a single
-	// *pause.State constructed once in cmd/pmrunner/runner_mode.go and
-	// shared with dispatch.RunDispatchPass (via daemon.NewRunner) and every
-	// RepoWorker (via worker.New), so a trip here is visible everywhere
-	// else in the pipeline that needs to stop claiming/popping work.
+	// Pause is the shared pipeline-pause flag, keyed by engine name -- nil
+	// is valid (every usage-limit-detection branch below is nil-safe) for
+	// any caller that doesn't wire one in, which is every existing test
+	// unless it specifically means to exercise this. Production always
+	// sets it: a single *pause.State constructed once in
+	// cmd/pmrunner/runner_mode.go and shared with dispatch.RunDispatchPass
+	// (via daemon.NewRunner) and every RepoWorker (via worker.New), so a
+	// trip here for this task's codingEngineName is visible everywhere
+	// else in the pipeline that needs to stop claiming/popping that same
+	// engine's work -- never any other engine's.
 	Pause *pause.State
 
 	// OnBlocked fires synchronously, right after the vault note is written
@@ -154,12 +156,15 @@ type Deps struct {
 	// hit the usage limit, whatever the resulting terminal status (done,
 	// blocked, or failed) -- the copy still parsed fine with its own
 	// terminal status, but invokeClaude's exit error says the real cause.
-	// main.go's wiring uses this to arm/re-arm the auto-resume timer on
-	// every status, and, for a self-reported blocked specifically, to
-	// mention Devara only (never Ara-Dev -- there's nothing for that
-	// gateway to unblock). nil for an ordinary terminal status with no
-	// usage-limit involvement.
-	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo)
+	// main.go's wiring uses this to arm/re-arm that engine's auto-resume
+	// timer on every status, and, for a self-reported blocked
+	// specifically, to mention Devara only (never Ara-Dev -- there's
+	// nothing for that gateway to unblock). nil for an ordinary terminal
+	// status with no usage-limit involvement. engineName is this task's
+	// resolved coding engine (codingEngineName), the same name a trip
+	// above was scoped to -- main.go's wiring needs it to arm the right
+	// engine's timer and name it in the Discord message.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -385,7 +390,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	if errors.As(exitErr, &usageLimitErr) {
 		fmt.Printf("[runner] task %s: claude hit the usage limit\n", job.Slug)
 		if deps.Pause != nil {
-			deps.Pause.Trip(pause.ReasonUsageLimit, usageLimitErr.ResetsAt)
+			deps.Pause.Trip(codingEngineName, pause.ReasonUsageLimit, usageLimitErr.ResetsAt)
 		}
 	}
 
@@ -512,7 +517,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		// gated on blocked specifically even though selfReportedUsageLimit
 		// above no longer is.
 		if usageLimitErr != nil && deps.Pause != nil {
-			deps.Pause.AddBlockedNote(job.NotePath)
+			deps.Pause.AddBlockedNote(codingEngineName, job.NotePath)
 		}
 	}
 
@@ -520,7 +525,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit, codingEngineName)
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {

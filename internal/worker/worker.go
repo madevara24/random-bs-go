@@ -34,6 +34,7 @@ type TaskStatus struct {
 	NotePath       string
 	Slug           string
 	Repo           string
+	Engine         string
 	StartedAt      time.Time
 	LastActivityAt time.Time
 	Stage          string
@@ -74,12 +75,13 @@ type RepoWorker struct {
 	// the user-visible side of any failure before returning.
 	OnError func(job Job, err error)
 
-	// Pause is the shared pipeline-pause flag -- nil (the zero value) means
-	// never paused, so every existing caller that doesn't set this field
-	// behaves exactly as before. Checked by Run's drain loop before each
-	// popJob, never inside runOne: a job already popped must finish, since
-	// popJob is what removes it from the queue -- guarding after the pop
-	// would silently drop it.
+	// Pause is the shared pipeline-pause flag, keyed by engine name -- nil
+	// (the zero value) means never paused for any engine, so every
+	// existing caller that doesn't set this field behaves exactly as
+	// before. Checked by Run's drain loop, per job.Engine, before that job
+	// is ever popped (see popNextRunnable), never inside runOne: a job
+	// already popped must finish, since popping is what removes it from
+	// the queue -- guarding after the pop would silently drop it.
 	Pause *pause.State
 
 	mu    sync.Mutex
@@ -142,15 +144,23 @@ func (w *RepoWorker) QueueLen() int {
 	return len(w.queue)
 }
 
-func (w *RepoWorker) popJob() (Job, bool) {
+// popNextRunnable removes and returns the first queued job whose engine
+// isn't currently paused, preserving every other job's relative order --
+// so a job for a paused engine is skipped over, left in place, never
+// popped, while a job behind it for a different, unpaused engine can
+// still run. Returns ok=false if the queue is empty or every remaining
+// job's engine is paused.
+func (w *RepoWorker) popNextRunnable() (Job, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.queue) == 0 {
-		return Job{}, false
+	for i, job := range w.queue {
+		if w.Pause.IsPaused(job.Engine) {
+			continue
+		}
+		w.queue = append(w.queue[:i:i], w.queue[i+1:]...)
+		return job, true
 	}
-	job := w.queue[0]
-	w.queue = w.queue[1:]
-	return job, true
+	return Job{}, false
 }
 
 // CurrentTask returns a copy of the in-flight task's status, or nil if
@@ -193,21 +203,17 @@ func (w *RepoWorker) setCurrentTask(t *TaskStatus) {
 	w.statusMu.Unlock()
 }
 
-// Run blocks on the wake channel, fully drains the queue on each wake, and
-// blocks again -- forever. Meant to be launched once per repo, in its own
-// goroutine, at daemon boot: `go rw.Run()`.
+// Run blocks on the wake channel, then repeatedly pops and runs the next
+// runnable job (see popNextRunnable) until none remain, and blocks again
+// -- forever. Meant to be launched once per repo, in its own goroutine, at
+// daemon boot: `go rw.Run()`. A queue holding only jobs for currently-
+// paused engines drains nothing and goes back to sleep; main.go's resume
+// path calls Wake once an engine clears so this loop gets another chance
+// to pop whatever was left behind for it.
 func (w *RepoWorker) Run() {
 	for range w.wake {
 		for {
-			if w.Pause.IsPaused() {
-				// Guarded here, before popJob, deliberately -- popJob
-				// removes the job from the queue, so checking inside runOne
-				// (after the pop) would silently drop it instead of
-				// leaving it queued for the next wake once the pause
-				// clears.
-				break
-			}
-			job, ok := w.popJob()
+			job, ok := w.popNextRunnable()
 			if !ok {
 				break
 			}
@@ -225,7 +231,7 @@ func (w *RepoWorker) runOne(job Job) {
 	defer func() { <-w.globalSlots }()
 
 	now := time.Now()
-	w.setCurrentTask(&TaskStatus{NotePath: job.NotePath, Slug: job.Slug, Repo: job.Repo, StartedAt: now, LastActivityAt: now, Stage: "starting"})
+	w.setCurrentTask(&TaskStatus{NotePath: job.NotePath, Slug: job.Slug, Repo: job.Repo, Engine: job.Engine, StartedAt: now, LastActivityAt: now, Stage: "starting"})
 	defer w.setCurrentTask(nil)
 
 	defer func() {

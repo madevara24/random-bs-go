@@ -3,9 +3,12 @@
 // (GET /health), (POST /runner-log) the write side of the watcher's Runner
 // Log outcome, since the watcher runs in a separate OS process from the one
 // that actually owns the vault clone, and (POST /resume) the manual
-// counterpart to main.go's usage-limit auto-resume timer. Every endpoint
-// here is meant to bind localhost only, no auth (same-user, same-machine
-// trust boundary).
+// counterpart to main.go's per-engine usage-limit auto-resume timer. A
+// usage limit belongs to one engine's account, so /resume and
+// /status/tasks are both engine-aware: /resume takes an optional ?engine=
+// query parameter, and /status/tasks reports each known engine's own
+// paused state alongside the aggregate. Every endpoint here is meant to
+// bind localhost only, no auth (same-user, same-machine trust boundary).
 package httpapi
 
 import (
@@ -41,16 +44,29 @@ type Server struct {
 	// this package's own tests.
 	Vault *vaultgit.Vault
 
-	// Pause is the shared pipeline-pause flag. Nil means POST /resume and
-	// GET /status/tasks's paused/resets_at fields are no-ops/zero values --
-	// fine for callers that don't need this feature.
+	// Pause is the shared pipeline-pause flag, keyed by engine name. Nil
+	// means POST /resume and GET /status/tasks's paused/resets_at fields
+	// are no-ops/zero values -- fine for callers that don't need this
+	// feature.
 	Pause *pause.State
 
+	// EngineNames lists every registered engine (see
+	// cmd/pmrunner/runner_mode.go's registeredEngineNames), so GET
+	// /status/tasks's engines map always reports a known engine's unpaused
+	// zero state even before it's ever tripped -- without this, a fresh
+	// daemon with no usage-limit history yet would report an empty
+	// engines map instead of e.g. {"claude": {"paused": false}}. Nil/empty
+	// is valid (the engines map then only shows engines Pause itself has
+	// recorded), fine for callers/tests that don't care.
+	EngineNames []string
+
 	// CancelResumeTimer, if set, is called by POST /resume (and by Resume,
-	// its underlying method) before doing anything else -- main.go wires
-	// this to stop its own auto-resume timer, so a manual resume can never
-	// race the timer into resuming twice. nil is a safe no-op.
-	CancelResumeTimer func()
+	// its underlying method) once per engine it's about to clear, before
+	// doing anything else for that engine -- main.go wires this to stop
+	// its own per-engine auto-resume timer, so a manual resume can never
+	// race that engine's timer into resuming it twice. nil is a safe
+	// no-op.
+	CancelResumeTimer func(engine string)
 
 	mux *http.ServeMux
 }
@@ -103,21 +119,33 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 type TaskStatusWire struct {
 	Slug            string    `json:"slug"`
 	Repo            string    `json:"repo"`
+	Engine          string    `json:"engine"`
 	StartedAt       time.Time `json:"started_at"`
 	LastActivityAt  time.Time `json:"last_activity_at"`
 	Stage           string    `json:"stage"`
 	DiscordThreadID string    `json:"discord_thread_id"`
 }
 
+// EngineStatusWire is one engine's entry in GET /status/tasks's engines
+// map -- mirrors pause.Snapshot's Paused/ResetsAt for that one engine.
+type EngineStatusWire struct {
+	Paused   bool       `json:"paused"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+}
+
 // StatusTasksResponse is GET /status/tasks's full JSON shape: the per-repo
-// task map (unchanged), plus top-level visibility into the shared pause --
-// Paused/ResetsAt mirror pause.State.Snapshot() so a human (or the watcher,
-// in principle) can see a stuck-looking queue is actually just waiting on
-// the usage limit to clear, not wedged.
+// task map (now with each task's engine), top-level Paused/ResetsAt (true
+// if any engine is paused, and the earliest known reset among paused
+// engines -- unchanged meaning from before this was engine-aware, so a
+// single-claude deployment sees exactly the same two fields it always
+// has), and Engines, a per-engine breakdown so a human (or the watcher, in
+// principle) can see which specific engine a stuck-looking queue is
+// waiting on.
 type StatusTasksResponse struct {
-	Paused   bool                      `json:"paused"`
-	ResetsAt *time.Time                `json:"resets_at,omitempty"`
-	Tasks    map[string]TaskStatusWire `json:"tasks"`
+	Paused   bool                        `json:"paused"`
+	ResetsAt *time.Time                  `json:"resets_at,omitempty"`
+	Engines  map[string]EngineStatusWire `json:"engines"`
+	Tasks    map[string]TaskStatusWire   `json:"tasks"`
 }
 
 // handleStatusTasks reads every RepoWorker.currentTask under its own
@@ -134,6 +162,13 @@ type StatusTasksResponse struct {
 // giving it one), so this is how it learns which thread its own "looks
 // wedged" alert belongs in without reintroducing that collision:
 // ReadNote never takes Vault's write mutex, only WriteNote does.
+//
+// Engines starts from s.EngineNames (every registered engine's unpaused
+// zero state), then overlays whatever s.Pause.Snapshots() actually
+// reports -- so a never-tripped engine still shows up as
+// {"paused": false}, not missing entirely. Top-level Paused/ResetsAt are
+// then derived from that merged map: Paused is true if any entry is, and
+// ResetsAt is the earliest ResetsAt among paused entries.
 func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 	out := map[string]TaskStatusWire{}
 	for repoKey, rw := range s.Workers {
@@ -144,14 +179,35 @@ func (s *Server) handleStatusTasks(w http.ResponseWriter, r *http.Request) {
 		out[repoKey] = TaskStatusWire{
 			Slug:            ts.Slug,
 			Repo:            ts.Repo,
+			Engine:          ts.Engine,
 			StartedAt:       ts.StartedAt,
 			LastActivityAt:  ts.LastActivityAt,
 			Stage:           ts.Stage,
 			DiscordThreadID: s.discordThreadIDFor(ts.NotePath),
 		}
 	}
-	snap := s.Pause.Snapshot()
-	resp := StatusTasksResponse{Paused: snap.Paused, ResetsAt: snap.ResetsAt, Tasks: out}
+
+	engines := map[string]EngineStatusWire{}
+	for _, name := range s.EngineNames {
+		engines[name] = EngineStatusWire{}
+	}
+	for name, snap := range s.Pause.Snapshots() {
+		engines[name] = EngineStatusWire{Paused: snap.Paused, ResetsAt: snap.ResetsAt}
+	}
+
+	var anyPaused bool
+	var earliest *time.Time
+	for _, es := range engines {
+		if !es.Paused {
+			continue
+		}
+		anyPaused = true
+		if es.ResetsAt != nil && (earliest == nil || es.ResetsAt.Before(*earliest)) {
+			earliest = es.ResetsAt
+		}
+	}
+
+	resp := StatusTasksResponse{Paused: anyPaused, ResetsAt: earliest, Engines: engines, Tasks: out}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
@@ -217,16 +273,19 @@ func (s *Server) handleRunnerLog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleResume is the manual counterpart to main.go's usage-limit
-// auto-resume timer: a human calling this before the timer fires resumes
-// the pipeline immediately and cancels the timer, so it can never fire a
-// second time afterward.
+// handleResume is the manual counterpart to main.go's per-engine usage-
+// limit auto-resume timer: a human calling this before an engine's timer
+// fires resumes that engine immediately and cancels its timer, so it can
+// never fire a second time afterward. The optional ?engine= query
+// parameter scopes the resume to that one engine; omitted, it clears
+// every currently-paused engine (the only possibility with a single
+// engine in use, so this matches today's behavior exactly).
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	flipped, err := s.Resume()
+	flipped, err := s.Resume(r.URL.Query().Get("engine"))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -238,42 +297,60 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // Resume is POST /resume's mechanics, also called directly by main.go's
-// auto-resume timer on fire (after it sends its own "reset passed" Discord
-// message) so both paths share exactly one resume implementation, in this
-// order: cancel any main.go-owned timer (so a fire racing a concurrent
-// manual call can't resume twice), clear the pause and collect the notes it
-// recorded, flip each from blocked to blocker_resolved with a Runner Log
-// line, then wake the dispatch loop and every repo worker so the normal
+// per-engine auto-resume timer on fire (after it sends its own "reset
+// passed" Discord message for that engine) so both paths share exactly
+// one resume implementation. engine, if non-empty, scopes every step below
+// to that one engine only; empty resumes every engine s.Pause currently
+// reports as paused (today's single-engine behavior, generalized).
+//
+// Per engine, in this order: cancel any main.go-owned timer for it (so a
+// fire racing a concurrent manual call can't resume it twice), clear its
+// pause and collect the notes it recorded, flip each from blocked to
+// blocker_resolved with a Runner Log line. Once every targeted engine is
+// done, wake the dispatch loop and every repo worker once so the normal
 // claim path picks everything back up (via --resume, since session_id is
-// already set).
+// already set) -- a repo worker itself decides, per queued job, whether
+// that job's own engine is actually clear to run.
 //
 // Flipping a note that isn't currently "blocked" is deliberately skipped,
 // not forced -- if a human already hand-resolved it some other way between
 // the trip and this call, forcing blocker_resolved over whatever they did
 // would stomp on that.
-func (s *Server) Resume() ([]string, error) {
-	if s.CancelResumeTimer != nil {
-		s.CancelResumeTimer()
+func (s *Server) Resume(engine string) ([]string, error) {
+	var engines []string
+	if engine != "" {
+		engines = []string{engine}
+	} else {
+		for name, snap := range s.Pause.Snapshots() {
+			if snap.Paused {
+				engines = append(engines, name)
+			}
+		}
 	}
-	notePaths := s.Pause.Clear()
 
 	var flipped []string
-	for _, notePath := range notePaths {
-		if s.Vault == nil {
-			continue
+	for _, eng := range engines {
+		if s.CancelResumeTimer != nil {
+			s.CancelResumeTimer(eng)
 		}
-		err := s.Vault.WriteNote(notePath, "runner: blocker_resolved (usage limit reset)", func(n *notetask.Note) error {
-			if n.Frontmatter.Status != "blocked" {
-				return nil
+		notePaths := s.Pause.Clear(eng)
+		for _, notePath := range notePaths {
+			if s.Vault == nil {
+				continue
 			}
-			n.Frontmatter.Status = "blocker_resolved"
-			notetask.AppendRunnerLog(n, "blocker_resolved", time.Now())
-			return nil
-		})
-		if err != nil {
-			return flipped, fmt.Errorf("httpapi: resuming %s: %w", notePath, err)
+			err := s.Vault.WriteNote(notePath, "runner: blocker_resolved (usage limit reset)", func(n *notetask.Note) error {
+				if n.Frontmatter.Status != "blocked" {
+					return nil
+				}
+				n.Frontmatter.Status = "blocker_resolved"
+				notetask.AppendRunnerLog(n, "blocker_resolved", time.Now())
+				return nil
+			})
+			if err != nil {
+				return flipped, fmt.Errorf("httpapi: resuming %s: %w", notePath, err)
+			}
+			flipped = append(flipped, notePath)
 		}
-		flipped = append(flipped, notePath)
 	}
 
 	select {

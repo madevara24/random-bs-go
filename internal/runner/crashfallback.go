@@ -338,7 +338,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		// limit resets, every note recorded here flips blocked ->
 		// blocker_resolved and the normal claim path picks it back up via
 		// --resume.
-		deps.Pause.AddBlockedNote(job.NotePath)
+		deps.Pause.AddBlockedNote(info.engineName, job.NotePath)
 	}
 
 	branchExists, hasUncommitted := inspectRepoState(info.repoPath, info.branchName)
