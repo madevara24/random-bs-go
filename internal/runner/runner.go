@@ -163,14 +163,15 @@ type Deps struct {
 	// is the task's discord_thread_id if it has one (empty otherwise) --
 	// the caller routes the message there instead of the top-level webhook.
 	//
-	// usageLimit is non-nil only when status == "blocked" and this very
-	// invocation's claude process hit the usage limit -- the "self-
-	// reported blocked while a limit is tripped" case: the copy still
-	// parsed fine with CC's own status: blocked, but invokeClaude's exit
-	// error says why. main.go's wiring uses this to mention Devara only
-	// (never Ara-Dev -- there's nothing for that gateway to unblock) and to
-	// arm/re-arm the auto-resume timer. nil for every other status and for
-	// an ordinary blocked with no usage-limit involvement.
+	// usageLimit is non-nil whenever this very invocation's claude process
+	// hit the usage limit, whatever the resulting terminal status (done,
+	// blocked, or failed) -- the copy still parsed fine with its own
+	// terminal status, but invokeClaude's exit error says the real cause.
+	// main.go's wiring uses this to arm/re-arm the auto-resume timer on
+	// every status, and, for a self-reported blocked specifically, to
+	// mention Devara only (never Ara-Dev -- there's nothing for that
+	// gateway to unblock). nil for an ordinary terminal status with no
+	// usage-limit involvement.
 	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
@@ -442,7 +443,16 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	fmt.Printf("[runner] task %s: merged back status=%s pr_url=%v\n", job.Slug, terminalStatus, derefStr(copyAfter.Frontmatter.PRURL))
 
+	// This invocation hit the usage limit, but CC still got a valid copy
+	// write in with its own terminal status before claude exited -- tag it
+	// for OnTerminal regardless of which terminal status that was (done and
+	// failed included, not just blocked), so the pause's auto-resume timer
+	// arms no matter how the task itself finished.
 	var selfReportedUsageLimit *UsageLimitInfo
+	if usageLimitErr != nil {
+		selfReportedUsageLimit = usageLimitInfoOf(usageLimitErr)
+	}
+
 	if terminalStatus == "blocked" {
 		// Self-reported blocked (CC itself set status: blocked and exited
 		// cleanly) -- same preserve-on-block treatment as the crash-fallback
@@ -451,17 +461,13 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		if err := preserveBlockedWork(repoCfg.Path, branchName); err != nil {
 			fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
 		}
-		// This invocation hit the usage limit, but CC still got a valid
-		// copy write in with its own status: blocked before claude exited --
-		// the "self-reported blocked while a limit is tripped" case: tag it
-		// the same as a crash-detected usage-limit block (Devara-only
-		// mention, recorded for auto-resume), via OnTerminal rather than
-		// OnBlocked since no crash-fallback path fired here.
-		if usageLimitErr != nil {
-			selfReportedUsageLimit = usageLimitInfoOf(usageLimitErr)
-			if deps.Pause != nil {
-				deps.Pause.AddBlockedNote(job.NotePath)
-			}
+		// The "self-reported blocked while a limit is tripped" case: record
+		// the note for auto-resume's blocker_resolved flip. A done or failed
+		// note must never go through that flip, which is why this stays
+		// gated on blocked specifically even though selfReportedUsageLimit
+		// above no longer is.
+		if usageLimitErr != nil && deps.Pause != nil {
+			deps.Pause.AddBlockedNote(job.NotePath)
 		}
 	}
 
@@ -858,6 +864,7 @@ func invokeClaude(claudeBin, dir, prompt, resumeSessionID string, idleTimeout ti
 		case "rate_limit_event":
 			if info, ok := evt["rate_limit_info"].(map[string]any); ok {
 				if status, _ := info["status"].(string); status != "" && status != "allowed" {
+					fmt.Printf("[runner] rate_limit_event (not allowed): %s\n", line)
 					usageLimitHit = true
 					if ra, ok := info["resetsAt"].(float64); ok {
 						t := time.Unix(int64(ra), 0)

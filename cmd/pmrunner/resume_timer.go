@@ -34,11 +34,12 @@ func newResumeTimerMgr(cfg *config.Config, notifier *notify.Notifier, doResume f
 	return &resumeTimerMgr{cfg: cfg, notifier: notifier, doResume: doResume}
 }
 
-// handleTrip is called every time a usage-limit block fires -- OnBlocked's
-// ScenarioUsageLimit case, or OnTerminal's self-reported-blocked-while-
-// tripped case. Idempotent by design: several concurrent tasks can all hit
-// the same global limit around the same time, and only the first call with
-// no usable resetsAt should send the "reset time unknown" message -- every
+// handleTrip is called every time a usage-limit hit trips the pause --
+// OnBlocked's ScenarioUsageLimit case, or OnTerminal's usage-limit case,
+// the latter regardless of whether the task's own terminal status came out
+// done, blocked, or failed. Idempotent by design: several concurrent tasks
+// can all hit the same global limit around the same time, and only the
+// first call with no usable resetsAt should send the "reset time unknown" message -- every
 // later call while a timer is already armed is a silent no-op, re-armable
 // again only once cancel() (a resume, manual or automatic) has run. But a
 // call that does carry a real resetsAt always arms the timer, even after an
