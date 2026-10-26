@@ -65,6 +65,16 @@ const ScenarioDoneWithoutPR Scenario = 4
 // clears on its own.
 const ScenarioUsageLimit Scenario = 5
 
+// ScenarioPreserveFailure: ProcessTask's self-reported-blocked path (CC
+// itself set status: blocked and exited cleanly) whose own call to
+// preserveBlockedWork failed, with no crash scenario of any other kind to
+// report alongside it -- the only case this tag is used for. A
+// crash-fallback scenario (the ones above) whose preserveBlockedWork call
+// also fails keeps its own scenario rather than retagging to this one;
+// AlertPayload.PreserveErr carries the failure either way, see
+// handleCrashFallback and ProcessTask's self-reported-blocked block.
+const ScenarioPreserveFailure Scenario = 6
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -79,6 +89,8 @@ func (s Scenario) String() string {
 		return "setup_failure"
 	case ScenarioUsageLimit:
 		return "usage_limit"
+	case ScenarioPreserveFailure:
+		return "preserve_failure"
 	default:
 		return "unknown"
 	}
@@ -144,6 +156,22 @@ type AlertPayload struct {
 	PRState               string // best-effort; "unknown" if unchecked/unavailable
 
 	LogPointer string // placeholder until the per-task transcript log (Open item) exists
+
+	// PreserveErr is preserveBlockedWork's error text, or "" when it
+	// succeeded (or had nothing to preserve). Empty is the byte-identical
+	// case for DiscordMessage, which renders exactly as it did before this
+	// field existed; AttachmentMarkdown always gains a one-line "Preserved"
+	// summary ("yes" when this is empty). Non-empty means the blocked
+	// task's work exists only in the clone's uncommitted tree at RepoPath,
+	// which pullAndBranch will reset away the moment the next task in this
+	// repo starts -- confirmed live 2026-10-26 (RBG-33), where a `git add`
+	// permission error left real work silently unrecoverable.
+	PreserveErr string
+
+	// RepoPath is the target repo clone's filesystem path -- only rendered
+	// when PreserveErr is set, so a human knows exactly where to go rescue
+	// the uncommitted work before it's lost.
+	RepoPath string
 }
 
 // DiscordMessage is the short, one-line summary -- the attachment carries
@@ -151,7 +179,17 @@ type AlertPayload struct {
 // @-mention (Devara and Ara-Dev): one webhook post mentions both, so the
 // `dev` gateway picks up its own mention and auto-threads its reply --
 // the 2026-08-31 decision.
+//
+// A non-empty PreserveErr overrides every scenario-specific branch below,
+// ScenarioUsageLimit's Devara-only mention included: a failed preserve
+// means the work survives nowhere but the clone's dirty tree, about to be
+// reset away by the next task in this repo, which needs a human's hand
+// regardless of why the task blocked in the first place.
 func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
+	if p.PreserveErr != "" {
+		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**, and the blocked work was **not preserved**: %s. The work exists only in the clone's uncommitted tree at %s -- the next task in this repo will reset it away. See attached for details.",
+			mentionID, araDevMentionID, p.Slug, p.Repo, p.PreserveErr, p.RepoPath)
+	}
 	if p.Scenario == ScenarioUsageLimit {
 		// Devara only, never Ara-Dev: there's nothing for the `dev` gateway
 		// to unblock here -- the cause is external and clears on its own
@@ -196,6 +234,11 @@ func (p AlertPayload) AttachmentMarkdown() string {
 	fmt.Fprintf(&b, "- **Branch exists**: %v\n", p.BranchExists)
 	fmt.Fprintf(&b, "- **Uncommitted changes in target repo**: %v\n", p.HasUncommittedChanges)
 	fmt.Fprintf(&b, "- **PR state**: %s\n", p.PRState)
+	if p.PreserveErr == "" {
+		b.WriteString("- **Preserved**: yes\n")
+	} else {
+		fmt.Fprintf(&b, "- **Preserved**: %s -- the work exists only in the uncommitted tree at %s; the next task in this repo will reset it away.\n", p.PreserveErr, p.RepoPath)
+	}
 	fmt.Fprintf(&b, "- **Log**: %s\n", p.LogPointer)
 	b.WriteString("\n## stderr tail\n\n```\n")
 	if strings.TrimSpace(p.StderrTail) == "" {
@@ -270,7 +313,9 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		return fmt.Errorf("runner: writing blocked status for %s (%s): %w", job.Slug, info.scenario, writeErr)
 	}
 
+	var preserveErrText string
 	if err := preserveBlockedWork(info.repoPath, info.branchName); err != nil {
+		preserveErrText = err.Error()
 		fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
 	}
 
@@ -297,6 +342,8 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		HasUncommittedChanges: hasUncommitted,
 		PRState:               checkPRState(info.repoPath, info.branchName),
 		LogPointer:            "(per-task transcript logging not yet built -- see Design - Runner.md's Open section)",
+		PreserveErr:           preserveErrText,
+		RepoPath:              info.repoPath,
 	}
 	if info.exitErr != nil {
 		payload.ExitErrText = info.exitErr.Error()
@@ -312,4 +359,30 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 
 func errorIsIdleTimeout(err error) bool {
 	return err != nil && errors.Is(err, ErrIdleTimeout)
+}
+
+// preserveFailurePayload builds the AlertPayload for ProcessTask's
+// self-reported-blocked path (runner.go) when its own call to
+// preserveBlockedWork fails -- that path has no crash scenario of its own
+// to report, only the preserve failure itself, so it shares
+// handleCrashFallback's building blocks (inspectRepoState, checkPRState,
+// the log-pointer placeholder) here instead of duplicating them, so both
+// call sites render the same not-preserved warning in DiscordMessage/
+// AttachmentMarkdown.
+func preserveFailurePayload(job worker.Job, repoPath, branchName, discordThreadID string, preserveErr error) AlertPayload {
+	branchExists, hasUncommitted := inspectRepoState(repoPath, branchName)
+	return AlertPayload{
+		Slug:                  job.Slug,
+		Repo:                  job.Repo,
+		Scenario:              ScenarioPreserveFailure,
+		Stage:                 "preserving blocked work",
+		DiscordThreadID:       discordThreadID,
+		ExitCode:              -1,
+		BranchExists:          branchExists,
+		HasUncommittedChanges: hasUncommitted,
+		PRState:               checkPRState(repoPath, branchName),
+		LogPointer:            "(per-task transcript logging not yet built -- see Design - Runner.md's Open section)",
+		PreserveErr:           preserveErr.Error(),
+		RepoPath:              repoPath,
+	}
 }

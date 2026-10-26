@@ -280,6 +280,136 @@ func TestCheckPRStateFallbackOnGhFailure(t *testing.T) {
 	}
 }
 
+// TestAlertPayloadPreserveErrRendering is the table test for the RBG-39
+// PreserveErr field: empty must leave DiscordMessage byte-identical to what
+// it rendered before the field existed (AttachmentMarkdown gains the new
+// "Preserved" line regardless, per the task's instructions, but otherwise
+// is unchanged); set must make both render the not-preserved warning, the
+// clone path, and -- critically -- the Ara-Dev mention even on
+// ScenarioUsageLimit, which is Devara-only in every other case.
+func TestAlertPayloadPreserveErrRendering(t *testing.T) {
+	base := AlertPayload{
+		Slug:       "task-1",
+		Repo:       "repo-a",
+		Scenario:   ScenarioUsageLimit,
+		Stage:      "result read-back",
+		ExitCode:   1,
+		PRState:    "unknown (test)",
+		LogPointer: "(test)",
+		UsageLimit: &UsageLimitInfo{},
+	}
+
+	t.Run("empty PreserveErr", func(t *testing.T) {
+		msg := base.DiscordMessage("devara-id", "aradev-id")
+		wantMsg := fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
+			"devara-id", base.Slug, base.Repo, base.UsageLimit.ResetsAtSuffix())
+		if msg != wantMsg {
+			t.Errorf("DiscordMessage = %q, want %q (byte-identical to the pre-PreserveErr rendering)", msg, wantMsg)
+		}
+		if strings.Contains(msg, "aradev-id") {
+			t.Errorf("message %q mentions Ara-Dev, want Devara-only for an unaffected usage-limit block", msg)
+		}
+
+		md := base.AttachmentMarkdown()
+		if !strings.Contains(md, "- **Preserved**: yes\n") {
+			t.Errorf("attachment markdown missing \"Preserved: yes\" line:\n%s", md)
+		}
+	})
+
+	t.Run("set PreserveErr", func(t *testing.T) {
+		withErr := base
+		withErr.PreserveErr = "git push: permission denied"
+		withErr.RepoPath = "/home/obsidian/repos/phase6-test-repo"
+
+		msg := withErr.DiscordMessage("devara-id", "aradev-id")
+		if !strings.Contains(msg, "<@devara-id>") || !strings.Contains(msg, "<@aradev-id>") {
+			t.Errorf("message %q missing one of the two mentions, want both even on ScenarioUsageLimit", msg)
+		}
+		if !strings.Contains(msg, "not preserved") {
+			t.Errorf("message %q missing the not-preserved warning", msg)
+		}
+		if !strings.Contains(msg, withErr.RepoPath) {
+			t.Errorf("message %q missing the clone path", msg)
+		}
+		if !strings.Contains(msg, withErr.PreserveErr) {
+			t.Errorf("message %q missing the preserve error text", msg)
+		}
+
+		md := withErr.AttachmentMarkdown()
+		if !strings.Contains(md, "- **Preserved**: "+withErr.PreserveErr) {
+			t.Errorf("attachment markdown missing the preserve error text:\n%s", md)
+		}
+		if !strings.Contains(md, withErr.RepoPath) {
+			t.Errorf("attachment markdown missing the clone path:\n%s", md)
+		}
+		if !strings.Contains(md, "next task in this repo will reset it away") {
+			t.Errorf("attachment markdown missing the reset-away warning:\n%s", md)
+		}
+	})
+}
+
+// TestHandleCrashFallbackPreserveFailureCarriesIntoPayload gives
+// handleCrashFallback a repoPath that is a plain directory, not a git
+// clone, so preserveBlockedWork fails resolving the current branch before
+// it ever gets to git add/commit/push. Confirms the failure -- previously
+// only a stdout Printf nobody read -- now reaches AlertPayload.PreserveErr
+// and renders into both the Discord message and the attachment.
+func TestHandleCrashFallbackPreserveFailureCarriesIntoPayload(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "preserve-fail-crash-" + run
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Preserve Failure Crash Test %s.md", run)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Preserve-failure crash-fallback test -- repoPath is a plain directory, not a git clone, so preserveBlockedWork fails resolving the current branch.")
+
+	deps := Deps{Vault: v}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	notAGitRepo := t.TempDir()
+
+	var gotJob *worker.Job
+	var gotAlert *AlertPayload
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotJob = &j; gotAlert = &p }
+
+	err := handleCrashFallback(deps, job, crashInfo{
+		scenario:   ScenarioNoCopy,
+		stage:      "result read-back",
+		repoPath:   notAGitRepo,
+		branchName: "task/" + slug,
+	})
+	if err == nil {
+		t.Fatal("handleCrashFallback returned nil error, want an error for a blocked task")
+	}
+	if gotJob == nil || gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.PreserveErr == "" {
+		t.Error("payload.PreserveErr is empty, want the preserveBlockedWork failure carried through")
+	}
+	if !strings.Contains(gotAlert.PreserveErr, "resolving current branch") {
+		t.Errorf("PreserveErr = %q, want it to mention resolving the current branch", gotAlert.PreserveErr)
+	}
+	if gotAlert.RepoPath != notAGitRepo {
+		t.Errorf("RepoPath = %q, want %q", gotAlert.RepoPath, notAGitRepo)
+	}
+
+	msg := gotAlert.DiscordMessage("devara-id", "aradev-id")
+	if !strings.Contains(msg, "not preserved") {
+		t.Errorf("message %q missing the not-preserved warning", msg)
+	}
+	md := gotAlert.AttachmentMarkdown()
+	if !strings.Contains(md, notAGitRepo) {
+		t.Errorf("attachment markdown missing the clone path %q:\n%s", notAGitRepo, md)
+	}
+}
+
 // TestCrashFallbackScenario3ParseFailure forces scenario 3 (copy exists
 // but fails to parse) by having the stub overwrite the copy with malformed
 // YAML.

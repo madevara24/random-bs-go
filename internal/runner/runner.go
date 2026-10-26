@@ -435,6 +435,9 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		// than a scenario switch.
 		if err := preserveBlockedWork(repoCfg.Path, branchName); err != nil {
 			fmt.Printf("[runner] task %s: failed to preserve blocked work: %v\n", job.Slug, err)
+			if deps.OnBlocked != nil {
+				deps.OnBlocked(job, preserveFailurePayload(job, repoCfg.Path, branchName, discordThreadID, err))
+			}
 		}
 		// The "self-reported blocked while a limit is tripped" case: record
 		// the note for auto-resume's blocker_resolved flip. A done or failed
