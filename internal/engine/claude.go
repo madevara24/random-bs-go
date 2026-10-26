@@ -52,11 +52,16 @@ func (c *ClaudeEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.
 // verbatim out of invokeClaude's scan loop: captures session_id from
 // whichever line first carries one, and detects a usage-limit hit via
 // either a rate_limit_event line with rate_limit_info.status != "allowed"
-// (capturing resetsAt if present), or a result line with is_error and a
-// 429 api_error_status -- verified live 2026-10-09 against claude
-// 2.1.278. Deliberately never keyed on result.subtype (stays "success"
-// even on the limit) or on overageStatus (reads "rejected" in both the
-// healthy and limited state).
+// and != "allowed_warning" (capturing resetsAt if present), or a result
+// line with is_error and a 429 api_error_status -- verified live
+// 2026-10-09 against claude 2.1.278. Deliberately never keyed on
+// result.subtype (stays "success" even on the limit) or on overageStatus
+// (reads "rejected" in both the healthy and limited state).
+//
+// "allowed_warning" is logged (every status other than "allowed" is) but
+// never counted as a hit: production observed it from 90% utilization
+// up, several minutes ahead of the real "rejected" -- treating it as a
+// hit paused the pipeline on a task that still finished cleanly.
 func (c *ClaudeEngine) ParseLine(line string, state *RunState) {
 	var evt map[string]any
 	if err := json.Unmarshal([]byte(line), &evt); err != nil {
@@ -73,10 +78,12 @@ func (c *ClaudeEngine) ParseLine(line string, state *RunState) {
 		if info, ok := evt["rate_limit_info"].(map[string]any); ok {
 			if status, _ := info["status"].(string); status != "" && status != "allowed" {
 				fmt.Printf("[engine/claude] rate_limit_event (not allowed): %s\n", line)
-				state.UsageLimitHit = true
-				if ra, ok := info["resetsAt"].(float64); ok {
-					t := time.Unix(int64(ra), 0)
-					state.UsageLimitResetsAt = &t
+				if status != "allowed_warning" {
+					state.UsageLimitHit = true
+					if ra, ok := info["resetsAt"].(float64); ok {
+						t := time.Unix(int64(ra), 0)
+						state.UsageLimitResetsAt = &t
+					}
 				}
 			}
 		}

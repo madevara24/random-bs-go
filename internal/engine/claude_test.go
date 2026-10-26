@@ -62,6 +62,21 @@ func TestClaudeParseLineRateLimitAllowedDoesNotTrip(t *testing.T) {
 	}
 }
 
+// TestClaudeParseLineRateLimitAllowedWarningDoesNotTrip pins RBG-33 item
+// 8: the production 2026-10-26 incident line -- "allowed_warning" at 90%
+// utilization, several minutes ahead of the real "rejected" -- must not
+// be counted as a hit, even though it's neither "" nor "allowed".
+func TestClaudeParseLineRateLimitAllowedWarningDoesNotTrip(t *testing.T) {
+	var state RunState
+	NewClaude("").ParseLine(`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1793020200,"rateLimitType":"five_hour","utilization":0.9,"isUsingOverage":false,"surpassedThreshold":0.9}}`, &state)
+	if state.UsageLimitHit {
+		t.Error("UsageLimitHit = true, want false for status \"allowed_warning\"")
+	}
+	if state.UsageLimitResetsAt != nil {
+		t.Errorf("UsageLimitResetsAt = %v, want nil (not a hit, so no resetsAt captured)", state.UsageLimitResetsAt)
+	}
+}
+
 func TestClaudeParseLineRateLimitRejectedTripsWithResetsAt(t *testing.T) {
 	var state RunState
 	NewClaude("").ParseLine(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1791552000}}`, &state)
