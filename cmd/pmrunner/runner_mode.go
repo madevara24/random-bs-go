@@ -8,6 +8,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/daemon"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
@@ -63,14 +64,15 @@ func runRunner(cfg *config.Config) {
 		}
 	}
 
-	// Declared (zero-valued) before the composite literal, rather than via
-	// :=, so MergeGateFactory's closure below can read runnerDeps.ClaudeBin
-	// by name -- the one source for the claude binary both it and
-	// ProcessTask use, instead of each hardcoding "claude" independently.
-	var runnerDeps runner.Deps
-	runnerDeps = runner.Deps{
+	// Built once, shared by ProcessTask and every MergeGateFactory call
+	// below -- the one engine instance both use, instead of each
+	// constructing its own.
+	claudeEngine := engine.NewClaude("")
+
+	runnerDeps := runner.Deps{
 		Vault:       vault,
 		Repos:       cfg.Repos,
+		Engine:      claudeEngine,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
 		PostClaim:   postClaim,
 		Pause:       pauseState,
@@ -88,7 +90,7 @@ func runRunner(cfg *config.Config) {
 				RepoPath:      repoCfg.Path,
 				PRURL:         prURL,
 				DefaultBranch: repoCfg.DefaultBranch,
-				ClaudeBin:     runnerDeps.ClaudeBin,
+				Engine:        claudeEngine,
 				CodingSession: sessionID,
 			}
 		},

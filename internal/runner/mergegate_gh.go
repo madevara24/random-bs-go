@@ -1,13 +1,15 @@
 package runner
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/engine"
 )
 
 // GhMergeGateOps is the real MergeGateOps: a fresh claude -p review
@@ -28,7 +30,11 @@ type GhMergeGateOps struct {
 	// resumeReconciliationNotice) before this merge-gate loop ever ran.
 	PRURL         string
 	DefaultBranch string
-	ClaudeBin     string
+
+	// Engine is the coding-agent engine used for both the review
+	// invocation and ResumeWithFeedback's coding-session resume -- nil
+	// defaults to the claude engine (see engine()).
+	Engine        engine.Engine
 	CodingSession string // the original coding session's session_id, to resume with feedback
 
 	// ReviewTimeout bounds one review invocation -- a review session isn't
@@ -48,6 +54,13 @@ func (g *GhMergeGateOps) reviewTimeout() time.Duration {
 		return g.ReviewTimeout
 	}
 	return 5 * time.Minute
+}
+
+func (g *GhMergeGateOps) engine() engine.Engine {
+	if g.Engine == nil {
+		return engine.NewClaude("")
+	}
+	return g.Engine
 }
 
 func (g *GhMergeGateOps) runGh(args ...string) (string, error) {
@@ -102,7 +115,7 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 		priorComments, _ = fetchPRComments(g.RepoPath, g.PRURL)
 	}
 
-	verdict, feedback, err := reviewOnce(g.ClaudeBin, g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
+	verdict, feedback, err := reviewOnce(g.engine(), g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
 	if err != nil {
 		return "", "", err
 	}
@@ -117,38 +130,52 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 	return verdict, feedback, nil
 }
 
-// reviewOnce is the actual claude -p review invocation + verdict parsing,
-// pulled out of RunReview so it's directly testable with hand-built
-// prBody/diff content (see TestRealReviewInvocation) without needing a
-// real PR/gh state to fetch from. It's this package's other claude
-// invocation, separate from invokeClaude -- it runs --output-format json,
-// not stream-json, so it never streams a rate_limit_event line and isn't
+// reviewOnce is the actual review invocation + verdict parsing, pulled out
+// of RunReview so it's directly testable with hand-built prBody/diff
+// content (see TestRealReviewInvocation) without needing a real PR/gh
+// state to fetch from. It's eng's other invocation, separate from
+// invokeEngine -- claude's build uses --output-format json, not
+// stream-json, so it never streams a rate_limit_event line and isn't
 // covered by this task's usage-limit detection/pause (RBG-24, out of
 // scope). A review session hitting the limit mid-loop would surface as a
 // plain invocation error here, handled (or not) by whatever already calls
 // RunReview, not by pause.State.
-func reviewOnce(claudeBin, repoPath string, timeout time.Duration, round int, prBody, diff, priorComments string) (ReviewVerdict, string, error) {
+//
+// The review timeout is enforced here, generic over eng: start the
+// command eng builds, and kill it (not the whole process group -- a review
+// session isn't expected to spawn the same kind of Bash-tool subshells a
+// coding session's idle watchdog guards against) if it outlives timeout.
+func reviewOnce(eng engine.Engine, repoPath string, timeout time.Duration, round int, prBody, diff, priorComments string) (ReviewVerdict, string, error) {
 	prompt := buildReviewPrompt(round, prBody, diff, priorComments)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	cmd := eng.BuildReviewCommand(repoPath, prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return "", "", fmt.Errorf("starting review invocation: %w", err)
+	}
 
-	args := []string{"-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"}
-	cmd := exec.CommandContext(ctx, claudeBinOrDefault(claudeBin), args...)
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			return "", "", fmt.Errorf("review invocation: %w\n%s", err, stderr.String())
+		}
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		<-waitDone
+		return "", "", fmt.Errorf("review invocation: timed out after %s", timeout)
+	}
+
+	answer, err := eng.ParseReviewAnswer(stdout.Bytes())
 	if err != nil {
-		return "", "", fmt.Errorf("review invocation: %w", err)
+		return "", "", err
 	}
 
-	var result struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return "", "", fmt.Errorf("parsing review invocation output: %w\n%s", err, out)
-	}
-
-	verdict, feedback := parseReviewVerdict(result.Result)
+	verdict, feedback := parseReviewVerdict(answer)
 	return verdict, feedback, nil
 }
 
@@ -273,20 +300,13 @@ func (g *GhMergeGateOps) Merge() error {
 // session (not the review session, which is always fresh) with the
 // review's CONCERNS or CI's failure text.
 func (g *GhMergeGateOps) ResumeWithFeedback(text string) error {
-	_, _, err := invokeClaude(claudeBinOrDefault(g.ClaudeBin), g.RepoPath, text, g.CodingSession, 15*time.Minute, nil)
+	_, _, err := invokeEngine(g.engine(), g.RepoPath, text, g.CodingSession, 15*time.Minute, nil)
 	return err
 }
 
 // AlertRoundLimitHit implements MergeGateOps.
 func (g *GhMergeGateOps) AlertRoundLimitHit() {
 	fmt.Printf("[runner] mergegate: hit round limit (%d) on PR %s without a clean merge\n", MaxMergeGateRounds, g.PRURL)
-}
-
-func claudeBinOrDefault(bin string) string {
-	if bin == "" {
-		return "claude"
-	}
-	return bin
 }
 
 // fetchPRBody reads the PR description via `gh pr view` -- the review

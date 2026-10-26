@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/madevara24/random-bs-go/internal/engine"
 )
 
 // sandboxRepoPath is a real, disposable GitHub-hosted repo
@@ -155,7 +157,7 @@ func TestSandboxCleanPass(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		ClaudeBin:     "claude",
+		Engine:        engine.NewClaude("claude"),
 	}}
 
 	err = RunMergeGateLoop(ops)
@@ -192,7 +194,7 @@ func TestSandboxConcernsThenFix(t *testing.T) {
 		"Add a comment above it saying this is intentionally unsafe test code. Commit this (message: " +
 		"\"add nuke function (deliberately unsafe, for review test)\") and push the current branch to origin " +
 		"with `git push -u origin HEAD`. Do not open a PR yourself."
-	sessionID, _, err := invokeClaude("claude", sandboxRepoPath, prompt, "", 5*time.Minute, nil)
+	sessionID, _, err := invokeEngine(engine.NewClaude("claude"), sandboxRepoPath, prompt, "", 5*time.Minute, nil)
 	if err != nil {
 		t.Fatalf("initial coding invocation: %v", err)
 	}
@@ -219,7 +221,7 @@ func TestSandboxConcernsThenFix(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		ClaudeBin:     "claude",
+		Engine:        engine.NewClaude("claude"),
 		CodingSession: sessionID,
 	}}
 
@@ -280,7 +282,7 @@ func TestSandboxRoundExhaustion(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		ClaudeBin:     "claude",
+		Engine:        engine.NewClaude("claude"),
 	}}}
 
 	err := RunMergeGateLoop(ops)

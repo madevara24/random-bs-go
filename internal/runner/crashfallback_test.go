@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -56,8 +57,8 @@ func setupCrashTest(t *testing.T, slugPrefix, claudeBin string) (Deps, worker.Jo
 	}, "Crash-fallback test task -- the fake claude stub decides what happens, this prompt is never actually read by anything real.")
 
 	deps := Deps{
-		Vault:     v,
-		ClaudeBin: claudeBin,
+		Vault:  v,
+		Engine: engine.NewClaude(claudeBin),
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
 		},

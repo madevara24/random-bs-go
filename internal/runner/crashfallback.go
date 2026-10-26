@@ -187,7 +187,7 @@ func (p AlertPayload) AttachmentMarkdown() string {
 		if p.UsageLimit != nil && p.UsageLimit.ResetsAt != nil {
 			reset = p.UsageLimit.ResetsAt.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(&b, "- **Cause**: claude reported hitting the Claude usage limit (rate_limit_info.status != \"allowed\", or a result event with is_error+429) -- not a crash. The whole pipeline is paused until the limit resets (%s); this task will auto-resume via `--resume` once it does.\n", reset)
+		fmt.Fprintf(&b, "- **Cause**: claude reported hitting the Claude usage limit (rate_limit_info.status neither \"allowed\" nor \"allowed_warning\", or a result event with is_error+429) -- not a crash. The whole pipeline is paused until the limit resets (%s); this task will auto-resume via `--resume` once it does.\n", reset)
 	}
 	fmt.Fprintf(&b, "- **Exit code**: %d\n", p.ExitCode)
 	if p.ExitErrText != "" {

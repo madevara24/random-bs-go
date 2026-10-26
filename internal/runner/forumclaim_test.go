@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/testvault"
@@ -291,8 +292,8 @@ func TestProcessTaskResumeDoesNotRepostClaim(t *testing.T) {
 
 	var claimAttempts atomic.Int32
 	deps := Deps{
-		Vault:     v,
-		ClaudeBin: scriptPath,
+		Vault:  v,
+		Engine: engine.NewClaude(scriptPath),
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
 		},

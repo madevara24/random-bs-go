@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/runner"
@@ -251,7 +252,7 @@ func TestCheckStatusTasksFlagsStaleBeforeRunnerWatchdog(t *testing.T) {
 
 	deps := runner.Deps{
 		Vault:       v,
-		ClaudeBin:   scriptPath,
+		Engine:      engine.NewClaude(scriptPath),
 		IdleTimeout: 1 * time.Hour, // deliberately long -- the runner's own watchdog must NOT fire during this test
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},

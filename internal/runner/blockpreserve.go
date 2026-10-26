@@ -24,7 +24,7 @@ import (
 // need an entry here: it's untracked and already kept out of `git add` via
 // .git/info/exclude (excludeFromGit), which can't help with paths that are
 // already tracked.
-var blockPreserveExcludePaths = []string{".serena", ".claude"}
+var blockPreserveExcludePaths = []string{".serena", ".claude", ".pi"}
 
 // preserveBlockedWork commits and pushes the task branch's current working
 // tree, so a resumed session (via checkoutTaskBranch) or a human looking at

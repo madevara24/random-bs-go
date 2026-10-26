@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -284,8 +285,8 @@ func TestProcessTaskSelfReportedBlockedPreservesDirtyWork(t *testing.T) {
 		filepath.Join(testTargetRepoPath, copyName)))
 
 	deps := Deps{
-		Vault:     v,
-		ClaudeBin: scriptPath,
+		Vault:  v,
+		Engine: engine.NewClaude(scriptPath),
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
 		},
@@ -387,8 +388,8 @@ func TestProcessTaskResumeDoesNotReconcileDefaultBranchItself(t *testing.T) {
 	writeStubScript(t, scriptPath, "exit 0") // leaves the copy at in_progress -> blocked
 
 	deps := Deps{
-		Vault:     v,
-		ClaudeBin: scriptPath,
+		Vault:  v,
+		Engine: engine.NewClaude(scriptPath),
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
 		},

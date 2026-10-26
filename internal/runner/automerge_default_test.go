@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -69,8 +70,8 @@ func runAutoMergeDefaultCase(t *testing.T, slugPrefix string, taskAutoMerge *boo
 
 	var gateCalled bool
 	deps := Deps{
-		Vault:     v,
-		ClaudeBin: scriptPath,
+		Vault:  v,
+		Engine: engine.NewClaude(scriptPath),
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main", AutoMergeDefault: repoDefault},
 		},
