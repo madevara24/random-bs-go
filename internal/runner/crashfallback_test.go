@@ -294,6 +294,7 @@ func TestAlertPayloadPreserveErrRendering(t *testing.T) {
 		Scenario:   ScenarioUsageLimit,
 		Stage:      "result read-back",
 		ExitCode:   1,
+		EngineName: "claude",
 		PRState:    "unknown (test)",
 		LogPointer: "(test)",
 		UsageLimit: &UsageLimitInfo{},
@@ -301,8 +302,8 @@ func TestAlertPayloadPreserveErrRendering(t *testing.T) {
 
 	t.Run("empty PreserveErr", func(t *testing.T) {
 		msg := base.DiscordMessage("devara-id", "aradev-id")
-		wantMsg := fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
-			"devara-id", base.Slug, base.Repo, base.UsageLimit.ResetsAtSuffix())
+		wantMsg := fmt.Sprintf("<@%s> Task `%s` (%s) hit the %s usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
+			"devara-id", base.Slug, base.Repo, base.EngineName, base.UsageLimit.ResetsAtSuffix())
 		if msg != wantMsg {
 			t.Errorf("DiscordMessage = %q, want %q (byte-identical to the pre-PreserveErr rendering)", msg, wantMsg)
 		}

@@ -59,7 +59,7 @@ func main() {
 	envPath := filepath.Join(configDir, ".env")
 	reposPath := filepath.Join(configDir, "repos.json")
 
-	cfg, err := config.Load(envPath, reposPath)
+	cfg, err := config.Load(envPath, reposPath, registeredEngineNames())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pmrunner: fatal: %v\n", err)
 		os.Exit(1)

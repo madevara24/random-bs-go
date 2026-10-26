@@ -29,12 +29,18 @@ type Runner struct {
 	// dispatch.RunDispatchPass call below -- nil means never paused, same
 	// default as every other package that takes one.
 	Pause *pause.State
+
+	// ResolveEngine resolves each claimed/reconciled job's coding engine --
+	// forwarded to every dispatch.RunDispatchPass/ReconcileQueued call
+	// below. nil is valid (every Job.Engine comes out ""), same meaning as
+	// dispatch.EngineResolver's own nil case.
+	ResolveEngine dispatch.EngineResolver
 }
 
 // NewRunner constructs a Runner. Does not touch disk or start any
 // goroutines.
-func NewRunner(vault *vaultgit.Vault, workers worker.Workers, p *pause.State) *Runner {
-	return &Runner{Vault: vault, Workers: workers, DispatchWake: make(chan struct{}, 1), Pause: p}
+func NewRunner(vault *vaultgit.Vault, workers worker.Workers, p *pause.State, resolveEngine dispatch.EngineResolver) *Runner {
+	return &Runner{Vault: vault, Workers: workers, DispatchWake: make(chan struct{}, 1), Pause: p, ResolveEngine: resolveEngine}
 }
 
 // Boot runs the startup sequence required before the daemon may accept any
@@ -50,7 +56,7 @@ func (r *Runner) Boot() error {
 	if err := r.Vault.Sync(); err != nil {
 		return fmt.Errorf("daemon: boot sync: %w", err)
 	}
-	if err := dispatch.ReconcileQueued(r.Vault, r.Workers); err != nil {
+	if err := dispatch.ReconcileQueued(r.Vault, r.Workers, r.ResolveEngine); err != nil {
 		return fmt.Errorf("daemon: boot reconcile: %w", err)
 	}
 	return nil
@@ -59,7 +65,7 @@ func (r *Runner) Boot() error {
 // RunDispatchPass runs one full dispatch pass (sync -> scan -> claim ->
 // enqueue) against this Runner's vault and workers.
 func (r *Runner) RunDispatchPass() error {
-	return dispatch.RunDispatchPass(r.Vault, r.Workers, r.Pause)
+	return dispatch.RunDispatchPass(r.Vault, r.Workers, r.Pause, r.ResolveEngine)
 }
 
 // RunDispatchLoop blocks forever, running exactly one dispatch pass each

@@ -23,6 +23,8 @@ type Frontmatter struct {
 	Status          string  `yaml:"status"`
 	Repo            string  `yaml:"repo"`
 	AutoMerge       *bool   `yaml:"auto_merge"`
+	Engine          *string `yaml:"engine"`
+	ReviewEngine    *string `yaml:"review_engine"`
 	SessionID       *string `yaml:"session_id"`
 	PRURL           *string `yaml:"pr_url"`
 	LastUpdated     *string `yaml:"last_updated"`

@@ -20,7 +20,7 @@ func (w Workers) Enqueue(repoKey string, job dispatch.Job) {
 		fmt.Printf("[worker] no RepoWorker registered for repo %q, dropping job %s\n", repoKey, job.Slug)
 		return
 	}
-	rw.Enqueue(Job{NotePath: job.NotePath, Repo: job.Repo, Slug: job.Slug})
+	rw.Enqueue(Job{NotePath: job.NotePath, Repo: job.Repo, Slug: job.Slug, Engine: job.Engine})
 }
 
 // StartAll launches every RepoWorker's Run() goroutine. Call once, at boot.

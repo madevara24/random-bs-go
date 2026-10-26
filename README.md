@@ -42,7 +42,16 @@ Each config directory needs two files:
   `DISCORD_USER_ID`, `DISCORD_ARA_DEV_USER_ID`, `GLOBAL_SLOTS` (positive
   int — the shared concurrency cap across all repos), `IDLE_TIMEOUT_MINUTES`
   (positive int), `VAULT_PATH`, `VAULT_DEFAULT_BRANCH`. Optional:
-  `HTTP_PORT` (default `8420`).
+  `HTTP_PORT` (default `8420`), `DEFAULT_ENGINE` (default `claude` — the
+  coding engine a task resolves to when neither its note's `engine:` nor
+  its repo's `"engine"` is set), `CLAUDE_BIN` (default `claude` — the
+  claude CLI's path/name, resolved via `PATH`), `REVIEW_ENGINE` (default
+  `claude` — the engine that reviews a PR in the merge gate when neither
+  the note's `review_engine:` nor the repo's `"review_engine"` is set,
+  resolved independently of `DEFAULT_ENGINE`). `DEFAULT_ENGINE`,
+  `REVIEW_ENGINE`, and every repo's `"engine"`/`"review_engine"` must each
+  name a registered engine (today, only `claude`) — an unregistered name
+  fails startup with a clear error.
 - **`repos.json`** — a map of repo key to onboarding config:
 
   ```json
@@ -52,12 +61,43 @@ Each config directory needs two files:
       "remote": "git@github.com:org/my-repo.git",
       "default_branch": "main",
       "ci": "...",
-      "auto_merge_default": false
+      "auto_merge_default": false,
+      "engine": "claude",
+      "review_engine": "claude"
     }
   }
   ```
 
-  `path`, `remote`, and `default_branch` are required per repo.
+  `path`, `remote`, and `default_branch` are required per repo. `engine`
+  and `review_engine` are optional per-repo overrides of `DEFAULT_ENGINE`/
+  `REVIEW_ENGINE` (see below).
+
+### Engine selection
+
+Each task can pin which engine codes it and which engine reviews its PR in
+the merge gate, via the task note's own frontmatter:
+
+```yaml
+engine: claude
+review_engine: claude
+```
+
+Both are optional; a note without either key resolves to `claude` today
+(the only engine that exists). Resolution order, highest precedence
+first:
+
+- **Coding engine**: the note's `engine:` → the repo's `"engine"` →
+  `DEFAULT_ENGINE`.
+- **Review engine**: the note's `review_engine:` → the repo's
+  `"review_engine"` → `REVIEW_ENGINE`.
+
+The coding engine is resolved once, when the task is first claimed, and
+written into the note's `engine:` the moment the run actually starts (not
+earlier — until then, an `engine:` key on the note always means the task
+author pinned it). A resume always reuses the note's existing `engine:`,
+since one engine's `session_id` means nothing to another. The review
+engine is resolved fresh each time the merge gate starts and is never
+written back to the note (the reviewer has no session to resume).
 
 ## Test
 

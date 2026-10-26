@@ -72,11 +72,26 @@ type Deps struct {
 	Vault *vaultgit.Vault
 	Repos map[string]config.RepoConfig
 
-	// Engine is the coding-agent engine used to invoke the coding session
-	// and parse its output -- nil defaults to the claude engine (see
-	// engine()). Overridable so tests can point it at a fake stub binary
-	// instead of the real claude CLI.
+	// Engine is the coding-agent engine used when EngineRegistry is empty
+	// -- nil defaults to the claude engine (see engine()). Overridable so
+	// tests can point it at a fake stub binary instead of the real claude
+	// CLI. Only consulted by engineRegistry()'s single-entry fallback; real
+	// callers with more than one engine registered set EngineRegistry
+	// instead.
 	Engine engine.Engine
+
+	// EngineRegistry maps engine name -> engine.Engine, built once at boot
+	// (see cmd/pmrunner/runner_mode.go's buildEngineRegistry) -- empty
+	// falls back to a single {"claude": engine()} registry (see
+	// engineRegistry()), so every existing caller that only ever set
+	// Engine keeps working unchanged.
+	EngineRegistry map[string]engine.Engine
+
+	// ReviewEngineDefault is REVIEW_ENGINE's resolved value -- the review
+	// role's global default, resolved independently of DefaultEngine (a
+	// task's coding engine). "" falls back to "claude" (see
+	// reviewEngineDefault()).
+	ReviewEngineDefault string
 
 	// PostClaim, if non-nil, posts a fresh task's Discord forum claim
 	// message (thread_name + content, no mentions) and returns the new
@@ -149,8 +164,11 @@ type Deps struct {
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
 	// review/CI merge-gate loop. nil (the default) means the loop never
-	// runs.
-	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string) MergeGateOps
+	// runs. codingEngine is the same engine this task just coded/resumed
+	// with (for ResumeWithFeedback); reviewEngine is the merge gate's own
+	// resolved review engine (independent of codingEngine, see
+	// resolveReviewEngineName), used for the fresh reviewer session.
+	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) MergeGateOps
 
 	// OnRoundLimitHit fires if the merge-gate loop exhausts its round
 	// budget without a clean merge -- the PR stays open, status stays
@@ -172,6 +190,26 @@ func (d Deps) engine() engine.Engine {
 		return engine.NewClaude("")
 	}
 	return d.Engine
+}
+
+// engineRegistry is the name->Engine map ProcessTask resolves against --
+// d.EngineRegistry if set, else a single-entry {"claude": d.engine()}
+// registry so every existing caller that only ever set Deps.Engine keeps
+// resolving to exactly that engine under the name "claude".
+func (d Deps) engineRegistry() map[string]engine.Engine {
+	if len(d.EngineRegistry) > 0 {
+		return d.EngineRegistry
+	}
+	return map[string]engine.Engine{fallbackCodingEngineName: d.engine()}
+}
+
+// reviewEngineDefault is REVIEW_ENGINE's resolved value -- "claude" if
+// Deps.ReviewEngineDefault was never set.
+func (d Deps) reviewEngineDefault() string {
+	if d.ReviewEngineDefault == "" {
+		return fallbackCodingEngineName
+	}
+	return d.ReviewEngineDefault
 }
 
 func (d Deps) idleTimeout() time.Duration {
@@ -204,11 +242,39 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		return fmt.Errorf("runner: reading note %s: %w", job.NotePath, err)
 	}
 
+	// Resolve and validate both the coding and review engine names before
+	// the branch is ever touched -- an unknown name (job.Engine's
+	// resolution, or the note's own review_engine:) blocks the task right
+	// here instead of partway through setup or, for review_engine, only
+	// once the merge gate starts.
+	registry := deps.engineRegistry()
+	codingEngineName := resolveCodingEngineName(job, note)
+	codingEng, err := lookupEngine(registry, codingEngineName)
+	if err != nil {
+		return handleSetupFailure(deps, job, setupFailureInfo{
+			stage:   setupStageResolveEngine,
+			err:     err,
+			repoCfg: repoCfg,
+		})
+	}
+	reviewEngineName := resolveReviewEngineName(note, repoCfg, deps.reviewEngineDefault())
+	reviewEng, err := lookupEngine(registry, reviewEngineName)
+	if err != nil {
+		return handleSetupFailure(deps, job, setupFailureInfo{
+			stage:   setupStageResolveEngine,
+			err:     err,
+			repoCfg: repoCfg,
+		})
+	}
+
 	resume := note.Frontmatter.SessionID != nil && *note.Frontmatter.SessionID != ""
 
 	if !resume {
 		err := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: start %s", job.Slug), func(n *notetask.Note) error {
 			n.Frontmatter.Status = "in_progress"
+			if n.Frontmatter.Engine == nil || *n.Frontmatter.Engine == "" {
+				n.Frontmatter.Engine = &codingEngineName
+			}
 			notetask.AppendRunnerLog(n, "in_progress", time.Now())
 			return nil
 		})
@@ -301,7 +367,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		priorSessionID = *note.Frontmatter.SessionID
 	}
 
-	sessionID, stderrTail, exitErr := invokeEngine(deps.engine(), repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
+	sessionID, stderrTail, exitErr := invokeEngine(codingEng, repoCfg.Path, prompt, priorSessionID, deps.idleTimeout(), reporter)
 	if sessionID != "" {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
 	}
@@ -388,6 +454,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			repoPath:        repoCfg.Path,
 			branchName:      branchName,
 			sessionID:       sessionID,
+			engineName:      codingEngineName,
 			partialCopy:     partialCopy,
 			haveCopyToUse:   haveCopyToUse,
 			discordThreadID: discordThreadID,
@@ -457,7 +524,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {
-		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID)
+		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID, codingEng, reviewEng)
 	}
 
 	return nil
@@ -467,10 +534,13 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 // just landed on done+auto_merge+a real pr_url. Failures here are logged
 // and (on round exhaustion specifically) alerted -- they never change the
 // vault note's status, which stays "done" even when the loop exhausts.
-func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, discordThreadID string) {
+// codingEngine is the same engine this task just coded/resumed with (for
+// ResumeWithFeedback); reviewEngine is the merge gate's own resolved
+// review engine, for the fresh reviewer session.
+func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, discordThreadID string, codingEngine, reviewEngine engine.Engine) {
 	reporter.SetStage("review/CI merge-gate loop")
 
-	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL)
+	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL, codingEngine, reviewEngine)
 	err := RunMergeGateLoop(ops)
 	switch {
 	case err == nil:

@@ -107,6 +107,11 @@ type crashInfo struct {
 	branchName string
 	sessionID  string
 
+	// engineName is the coding engine this invocation actually ran --
+	// carried through to AlertPayload.EngineName so the alert/Work Log
+	// text names the real engine instead of a hardcoded "claude".
+	engineName string
+
 	// Set only for ScenarioNonTerminal: whatever did parse from the copy,
 	// to fold into the vault note before marking blocked.
 	haveCopyToUse bool
@@ -117,7 +122,7 @@ type crashInfo struct {
 	// task's own thread instead of the top-level webhook.
 	discordThreadID string
 
-	// usageLimit is non-nil only when this invocation's claude process hit
+	// usageLimit is non-nil only when this invocation's coding engine hit
 	// the usage limit -- carried through to AlertPayload.UsageLimit
 	// regardless of which scenario fires, so a future caller could in
 	// principle inspect it even on a scenario the override logic in
@@ -139,6 +144,15 @@ type AlertPayload struct {
 	// DiscordThreadID is the task's discord_thread_id, if it has one --
 	// the caller routes this alert there instead of the top-level webhook.
 	DiscordThreadID string
+
+	// EngineName is the coding engine this invocation actually ran --
+	// "claude" today, since that's the only engine that exists, but
+	// DiscordMessage/AttachmentMarkdown always name it explicitly rather
+	// than hardcoding "Claude"/"CC" so a second engine's alerts read
+	// correctly without any further change here. Empty only for
+	// ScenarioPreserveFailure (preserveFailurePayload never names an
+	// engine in its own text).
+	EngineName string
 
 	// UsageLimit is non-nil exactly when Scenario == ScenarioUsageLimit --
 	// DiscordMessage/AttachmentMarkdown use it to report the known reset
@@ -194,8 +208,8 @@ func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
 		// Devara only, never Ara-Dev: there's nothing for the `dev` gateway
 		// to unblock here -- the cause is external and clears on its own
 		// once the reset time (if known) passes.
-		return fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
-			mentionID, p.Slug, p.Repo, p.UsageLimit.ResetsAtSuffix())
+		return fmt.Sprintf("<@%s> Task `%s` (%s) hit the %s usage limit -- the pipeline is **paused** until it resets%s. See attached for details.",
+			mentionID, p.Slug, p.Repo, p.EngineName, p.UsageLimit.ResetsAtSuffix())
 	}
 	if p.Scenario == ScenarioDoneWithoutPR {
 		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
@@ -218,14 +232,14 @@ func (p AlertPayload) AttachmentMarkdown() string {
 		b.WriteString("- **Cause**: the runner's idle watchdog killed the process group after it went silent past the configured idle timeout -- not a bare crash.\n")
 	}
 	if p.Scenario == ScenarioDoneWithoutPR {
-		b.WriteString("- **Cause**: CC self-reported `status: done` but left `pr_url` empty -- no crash occurred, claude exited cleanly. The work may be real but is unverified as shipped (no commit/push/PR confirmed).\n")
+		fmt.Fprintf(&b, "- **Cause**: the %s session self-reported `status: done` but left `pr_url` empty -- no crash occurred, %s exited cleanly. The work may be real but is unverified as shipped (no commit/push/PR confirmed).\n", p.EngineName, p.EngineName)
 	}
 	if p.Scenario == ScenarioUsageLimit {
 		reset := "unknown"
 		if p.UsageLimit != nil && p.UsageLimit.ResetsAt != nil {
 			reset = p.UsageLimit.ResetsAt.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(&b, "- **Cause**: claude reported hitting the Claude usage limit (rate_limit_info.status neither \"allowed\" nor \"allowed_warning\", or a result event with is_error+429) -- not a crash. The whole pipeline is paused until the limit resets (%s); this task will auto-resume via `--resume` once it does.\n", reset)
+		fmt.Fprintf(&b, "- **Cause**: %s reported hitting the %s usage limit (rate_limit_info.status neither \"allowed\" nor \"allowed_warning\", or a result event with is_error+429) -- not a crash. The whole pipeline is paused until the limit resets (%s); this task will auto-resume via `--resume` once it does.\n", p.EngineName, p.EngineName, reset)
 	}
 	fmt.Fprintf(&b, "- **Exit code**: %d\n", p.ExitCode)
 	if p.ExitErrText != "" {
@@ -334,6 +348,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		Scenario:              info.scenario,
 		Stage:                 info.stage,
 		DiscordThreadID:       info.discordThreadID,
+		EngineName:            info.engineName,
 		UsageLimit:            info.usageLimit,
 		WatchdogKilled:        errorIsIdleTimeout(info.exitErr),
 		ExitCode:              exitCodeOf(info.exitErr),

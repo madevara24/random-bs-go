@@ -157,7 +157,8 @@ func TestSandboxCleanPass(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		Engine:        engine.NewClaude("claude"),
+		CodingEngine:  engine.NewClaude("claude"),
+		ReviewEngine:  engine.NewClaude("claude"),
 	}}
 
 	err = RunMergeGateLoop(ops)
@@ -221,7 +222,8 @@ func TestSandboxConcernsThenFix(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		Engine:        engine.NewClaude("claude"),
+		CodingEngine:  engine.NewClaude("claude"),
+		ReviewEngine:  engine.NewClaude("claude"),
 		CodingSession: sessionID,
 	}}
 
@@ -282,7 +284,8 @@ func TestSandboxRoundExhaustion(t *testing.T) {
 		RepoPath:      sandboxRepoPath,
 		PRURL:         prURL,
 		DefaultBranch: sandboxDefaultBranch,
-		Engine:        engine.NewClaude("claude"),
+		CodingEngine:  engine.NewClaude("claude"),
+		ReviewEngine:  engine.NewClaude("claude"),
 	}}}
 
 	err := RunMergeGateLoop(ops)

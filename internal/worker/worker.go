@@ -18,6 +18,12 @@ type Job struct {
 	NotePath string
 	Repo     string
 	Slug     string
+
+	// Engine is the coding engine's name, resolved by dispatch at claim
+	// time (see dispatch.EngineResolver) -- "" means dispatch wasn't given
+	// a resolver (e.g. an older test), in which case runner.ProcessTask
+	// falls back to the note's own `engine:`.
+	Engine string
 }
 
 // TaskStatus is what a RepoWorker exposes about its in-flight task, for the

@@ -128,7 +128,7 @@ func TestRunDispatchPass(t *testing.T) {
 	}, "Ready F, already stamped.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil); err != nil {
+	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
 	p.Trip(pause.ReasonUsageLimit, &resetsAt)
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, &p); err != nil {
+	if err := RunDispatchPass(v, enq, &p, nil); err != nil {
 		t.Fatalf("RunDispatchPass while paused: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
 	// proof this is a guard on the pass, not a hidden rejection of this
 	// particular note.
 	p.Clear()
-	if err := RunDispatchPass(v, enq, &p); err != nil {
+	if err := RunDispatchPass(v, enq, &p, nil); err != nil {
 		t.Fatalf("RunDispatchPass after resume: %v", err)
 	}
 	if len(enq.calls) != 1 {
@@ -225,6 +225,69 @@ func TestRunDispatchPassSkipsClaimingWhilePaused(t *testing.T) {
 	n = readNote(t, v.Path, relPath)
 	if n.Frontmatter.Status != "queued" {
 		t.Errorf("status = %q after resume, want %q", n.Frontmatter.Status, "queued")
+	}
+}
+
+// TestRunDispatchPassResolvesEngine confirms a claimed note gets
+// `status: queued` with no `engine:` key written to the vault (dispatch
+// never writes that key -- see Job's doc comment), while Job.Engine is set
+// from the injected resolver: the note's own `engine:` pin when present,
+// else whatever the resolver falls back to (standing in for the real
+// repo/DEFAULT_ENGINE precedence, exercised directly in
+// internal/engineresolve).
+func TestRunDispatchPassResolvesEngine(t *testing.T) {
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	pinnedPath := fmt.Sprintf("Tasks/phase34-%s-pinned.md", run)
+	fallbackPath := fmt.Sprintf("Tasks/phase34-%s-fallback.md", run)
+
+	testvault.Seed(t, pinnedPath, notetask.Frontmatter{
+		Status: "ready", Repo: "repo-engine-pinned", Created: "2026-09-10", Engine: strp("pinned-engine"),
+	}, "Pinned engine task.")
+	testvault.Seed(t, fallbackPath, notetask.Frontmatter{
+		Status: "ready", Repo: "repo-engine-fallback", Created: "2026-09-10",
+	}, "Fallback engine task.")
+
+	resolveEngine := func(repoKey, noteEngine string) string {
+		if noteEngine != "" {
+			return noteEngine
+		}
+		return "resolver-default-engine"
+	}
+
+	enq := &recordingEnqueuer{}
+	if err := RunDispatchPass(v, enq, nil, resolveEngine); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	// The note itself never gets an `engine:` key written by dispatch.
+	if n := readNote(t, v.Path, pinnedPath); n.Frontmatter.Status != "queued" {
+		t.Errorf("pinned note status = %q, want queued", n.Frontmatter.Status)
+	}
+	if n := readNote(t, v.Path, fallbackPath); n.Frontmatter.Engine != nil {
+		t.Errorf("fallback note Engine = %v, want nil (dispatch must never write engine:)", *n.Frontmatter.Engine)
+	}
+
+	var gotPinned, gotFallback string
+	for _, c := range enq.calls {
+		switch c.repoKey {
+		case "repo-engine-pinned":
+			gotPinned = c.job.Engine
+		case "repo-engine-fallback":
+			gotFallback = c.job.Engine
+		}
+	}
+	if gotPinned != "pinned-engine" {
+		t.Errorf("pinned job Engine = %q, want %q", gotPinned, "pinned-engine")
+	}
+	if gotFallback != "resolver-default-engine" {
+		t.Errorf("fallback job Engine = %q, want %q", gotFallback, "resolver-default-engine")
 	}
 }
 

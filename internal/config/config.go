@@ -21,6 +21,16 @@ type RepoConfig struct {
 	DefaultBranch    string `json:"default_branch"`
 	CI               string `json:"ci"`
 	AutoMergeDefault bool   `json:"auto_merge_default"`
+
+	// Engine overrides DEFAULT_ENGINE for every task onboarded to this repo
+	// that doesn't pin its own `engine:` -- "" means no repo-level
+	// override, fall through to DEFAULT_ENGINE.
+	Engine string `json:"engine"`
+
+	// ReviewEngine overrides REVIEW_ENGINE for every task onboarded to this
+	// repo that doesn't pin its own `review_engine:` -- "" means no
+	// repo-level override, fall through to REVIEW_ENGINE.
+	ReviewEngine string `json:"review_engine"`
 }
 
 // Config is the fully loaded, validated configuration for either run mode.
@@ -47,6 +57,23 @@ type Config struct {
 	// this host and Anthropic's, so a grace buffer absorbs that. Optional,
 	// defaults to 60.
 	UsageLimitResumeGraceSeconds int
+
+	// DefaultEngine is the coding engine a task resolves to when neither
+	// its own note's `engine:` nor its repo's "engine" is set. Optional,
+	// defaults to "claude".
+	DefaultEngine string
+
+	// ClaudeBin is the claude CLI's path/name, passed to engine.NewClaude.
+	// Optional, defaults to "claude" (resolved via PATH) -- today's
+	// behavior.
+	ClaudeBin string
+
+	// ReviewEngine is the engine that reviews a PR in the merge gate when
+	// neither the task note's `review_engine:` nor its repo's
+	// "review_engine" is set. Resolved independently of DefaultEngine --
+	// a task can code with one engine and be reviewed by another. Optional,
+	// defaults to "claude".
+	ReviewEngine string
 
 	// From repos.json
 	Repos map[string]RepoConfig
@@ -95,6 +122,16 @@ const defaultHTTPPort = 8420
 // defaultUsageLimitResumeGraceSeconds is USAGE_LIMIT_RESUME_GRACE_SECONDS's
 // default when unset.
 const defaultUsageLimitResumeGraceSeconds = 60
+
+// defaultEngineName is DEFAULT_ENGINE/REVIEW_ENGINE's shared fallback
+// engine name -- the only engine that exists today, so an unset .env keeps
+// every task resolving to exactly today's behavior.
+const defaultEngineName = "claude"
+
+// defaultClaudeBin is CLAUDE_BIN's default -- the bare command name,
+// resolved via PATH, same as every invocation before this config key
+// existed.
+const defaultClaudeBin = "claude"
 
 // parseEnvFile reads a simple KEY=VALUE .env file: blank lines and lines
 // starting with '#' are ignored, no quoting/escaping support (matches the
@@ -161,8 +198,13 @@ func loadRepos(path string) (map[string]RepoConfig, error) {
 
 // Load reads and validates both files. envPath and reposPath must be
 // explicit -- callers (main.go) resolve them from flags/env/defaults, config
-// itself has no opinion on discovery.
-func Load(envPath, reposPath string) (*Config, error) {
+// itself has no opinion on discovery. knownEngines names every engine
+// registered in the running binary (see cmd/pmrunner/runner_mode.go's
+// registeredEngineNames) -- DEFAULT_ENGINE, REVIEW_ENGINE, and every
+// repo's "engine"/"review_engine" must each name one of these, or Load
+// fails with a clear error rather than letting an unrecognized engine
+// name surface only once a task actually tries to run.
+func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	raw, err := parseEnvFile(envPath)
 	if err != nil {
 		return nil, err
@@ -171,6 +213,9 @@ func Load(envPath, reposPath string) (*Config, error) {
 	cfg := &Config{
 		HTTPPort:                     defaultHTTPPort,
 		UsageLimitResumeGraceSeconds: defaultUsageLimitResumeGraceSeconds,
+		DefaultEngine:                defaultEngineName,
+		ClaudeBin:                    defaultClaudeBin,
+		ReviewEngine:                 defaultEngineName,
 		EnvPath:                      envPath,
 		ReposPath:                    reposPath,
 	}
@@ -205,11 +250,53 @@ func Load(envPath, reposPath string) (*Config, error) {
 		cfg.UsageLimitResumeGraceSeconds = n
 	}
 
+	if v, ok := raw["DEFAULT_ENGINE"]; ok && v != "" {
+		cfg.DefaultEngine = v
+	}
+	if v, ok := raw["CLAUDE_BIN"]; ok && v != "" {
+		cfg.ClaudeBin = v
+	}
+	if v, ok := raw["REVIEW_ENGINE"]; ok && v != "" {
+		cfg.ReviewEngine = v
+	}
+
 	repos, err := loadRepos(reposPath)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Repos = repos
 
+	if err := validateEngineNames(cfg, knownEngines); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// validateEngineNames fails Load with a clear error if DEFAULT_ENGINE,
+// REVIEW_ENGINE, or any repo's "engine"/"review_engine" names an engine
+// that isn't in knownEngines -- catching a typo at startup instead of
+// letting it surface only once a task actually tries to run.
+func validateEngineNames(cfg *Config, knownEngines []string) error {
+	known := make(map[string]bool, len(knownEngines))
+	for _, n := range knownEngines {
+		known[n] = true
+	}
+	list := strings.Join(knownEngines, ", ")
+
+	if !known[cfg.DefaultEngine] {
+		return fmt.Errorf("config: DEFAULT_ENGINE %q is not a registered engine (known: %s)", cfg.DefaultEngine, list)
+	}
+	if !known[cfg.ReviewEngine] {
+		return fmt.Errorf("config: REVIEW_ENGINE %q is not a registered engine (known: %s)", cfg.ReviewEngine, list)
+	}
+	for key, r := range cfg.Repos {
+		if r.Engine != "" && !known[r.Engine] {
+			return fmt.Errorf("config: repo %q field \"engine\" %q is not a registered engine (known: %s)", key, r.Engine, list)
+		}
+		if r.ReviewEngine != "" && !known[r.ReviewEngine] {
+			return fmt.Errorf("config: repo %q field \"review_engine\" %q is not a registered engine (known: %s)", key, r.ReviewEngine, list)
+		}
+	}
+	return nil
 }

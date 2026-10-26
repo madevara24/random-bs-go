@@ -111,6 +111,70 @@ func TestAppendRunnerLogAndRoundTrip(t *testing.T) {
 	}
 }
 
+// TestParseWithoutEngineKeysRoundTripsUnchanged confirms a note predating
+// engine:/review_engine: (sampleNote has neither key) parses with both
+// fields nil and round-trips through Bytes()+re-Parse without either
+// field ever picking up a non-nil value -- no engine: pin is invented on
+// a note the runner never claimed.
+func TestParseWithoutEngineKeysRoundTripsUnchanged(t *testing.T) {
+	note, err := Parse([]byte(sampleNote))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if note.Frontmatter.Engine != nil {
+		t.Errorf("Engine = %v, want nil", *note.Frontmatter.Engine)
+	}
+	if note.Frontmatter.ReviewEngine != nil {
+		t.Errorf("ReviewEngine = %v, want nil", *note.Frontmatter.ReviewEngine)
+	}
+
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	reparsed, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-Parse after Bytes(): %v\n%s", err, out)
+	}
+	if reparsed.Frontmatter.Engine != nil {
+		t.Errorf("after round-trip, Engine = %v, want nil", *reparsed.Frontmatter.Engine)
+	}
+	if reparsed.Frontmatter.ReviewEngine != nil {
+		t.Errorf("after round-trip, ReviewEngine = %v, want nil", *reparsed.Frontmatter.ReviewEngine)
+	}
+}
+
+// TestParseWithEngineKeysRoundTrips confirms a note that does pin
+// engine:/review_engine: keeps those exact values through Bytes()+re-Parse.
+func TestParseWithEngineKeysRoundTrips(t *testing.T) {
+	withEngine := "---\nstatus: ready\nrepo: test-repo\nauto_merge: false\nengine: claude\nreview_engine: claude\nsession_id: null\npr_url: null\nlast_updated: null\ncreated: 2026-09-15\nready_at: null\n---\n\nA prompt.\n"
+	note, err := Parse([]byte(withEngine))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if note.Frontmatter.Engine == nil || *note.Frontmatter.Engine != "claude" {
+		t.Fatalf("Engine = %v, want %q", note.Frontmatter.Engine, "claude")
+	}
+	if note.Frontmatter.ReviewEngine == nil || *note.Frontmatter.ReviewEngine != "claude" {
+		t.Fatalf("ReviewEngine = %v, want %q", note.Frontmatter.ReviewEngine, "claude")
+	}
+
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	reparsed, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-Parse after Bytes(): %v\n%s", err, out)
+	}
+	if reparsed.Frontmatter.Engine == nil || *reparsed.Frontmatter.Engine != "claude" {
+		t.Errorf("after round-trip, Engine = %v, want %q", reparsed.Frontmatter.Engine, "claude")
+	}
+	if reparsed.Frontmatter.ReviewEngine == nil || *reparsed.Frontmatter.ReviewEngine != "claude" {
+		t.Errorf("after round-trip, ReviewEngine = %v, want %q", reparsed.Frontmatter.ReviewEngine, "claude")
+	}
+}
+
 func TestSortByReadyThenCreated(t *testing.T) {
 	mk := func(readyAt, created string) *Note {
 		var ra *string
