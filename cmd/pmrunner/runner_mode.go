@@ -39,24 +39,27 @@ func runRunner(cfg *config.Config) {
 	vault := vaultgit.New(cfg.VaultPath, cfg.VaultDefaultBranch)
 	notifier := &notify.Notifier{Vault: vault, WebhookURL: cfg.DiscordWebhookURL, ForumWebhookURL: cfg.DiscordTaskForumWebhookURL}
 
-	// pauseState is the shared pipeline-pause flag -- constructed once here
-	// and threaded into runner.Deps (so ProcessTask can trip it), every
-	// RepoWorker (so the drain loop stops popping), daemon.NewRunner (so
-	// RunDispatchPass stops claiming), and httpapi.New (so GET
-	// /status/tasks can report it and POST /resume can clear it). Not
-	// persisted across a runner restart -- a fresh process starts unpaused
-	// even if the limit is, in reality, still in effect; the next task to
-	// hit it re-trips the pause as normal.
+	// pauseState is the shared pipeline-pause flag, keyed by engine name --
+	// constructed once here and threaded into runner.Deps (so ProcessTask
+	// can trip a specific engine), every RepoWorker (so the drain loop
+	// stops popping that engine's jobs), daemon.NewRunner (so
+	// RunDispatchPass stops claiming that engine's notes), and httpapi.New
+	// (so GET /status/tasks can report it and POST /resume can clear it).
+	// Not persisted across a runner restart -- a fresh process starts
+	// every engine unpaused even if a limit is, in reality, still in
+	// effect; the next task to hit it re-trips that engine's pause as
+	// normal.
 	pauseState := &pause.State{}
 
 	// server is assigned after construction below; resumeMgr's timer
 	// closure captures this variable (not its value at closure-creation
-	// time), so by the time the timer actually fires -- long after boot --
-	// it calls the real server's Resume, which does the actual clear-pause
-	// +flip-notes+wake-dispatch+wake-workers mechanics.
+	// time), so by the time a given engine's timer actually fires -- long
+	// after boot -- it calls the real server's Resume for that engine,
+	// which does the actual clear-pause+flip-notes+wake-dispatch+wake-
+	// workers mechanics.
 	var server *httpapi.Server
-	resumeMgr := newResumeTimerMgr(cfg, notifier, func() ([]string, error) {
-		return server.Resume()
+	resumeMgr := newResumeTimerMgr(cfg, notifier, func(engine string) ([]string, error) {
+		return server.Resume(engine)
 	})
 
 	var postClaim func(threadName, content string) (string, error)
@@ -83,7 +86,7 @@ func runRunner(cfg *config.Config) {
 				job.NotePath, payload.DiscordThreadID,
 				payload.DiscordMessage(cfg.DiscordUserID, cfg.DiscordAraDevUserID), payload.Slug+".md", payload.AttachmentMarkdown())
 			if payload.Scenario == runner.ScenarioUsageLimit {
-				resumeMgr.handleTrip(resetsAtOf(payload.UsageLimit))
+				resumeMgr.handleTrip(payload.EngineName, resetsAtOf(payload.UsageLimit))
 			}
 		},
 		OnTerminal: newTerminalHandler(cfg, notifier, resumeMgr),
@@ -131,7 +134,8 @@ func runRunner(cfg *config.Config) {
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	server = httpapi.New(r.DispatchWake, workers, vault, pauseState)
-	server.CancelResumeTimer = func() { resumeMgr.cancel() }
+	server.EngineNames = registeredEngineNames()
+	server.CancelResumeTimer = func(engine string) { resumeMgr.cancel(engine) }
 	fmt.Printf("[runner] listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
 		fmt.Printf("pmrunner: fatal: http server: %v\n", err)
@@ -211,23 +215,24 @@ func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runn
 // ScenarioUsageLimit block -- there's nothing for Ara-Dev's gateway to
 // unblock, the cause clears on its own.
 //
-// usageLimit != nil arms/re-arms resumeMgr's auto-resume timer regardless
-// of status -- the same hook OnBlocked's ScenarioUsageLimit case uses --
-// since a usage-limit hit pauses the pipeline whether the task itself came
-// out done, blocked, or failed, and the pipeline must resume on its own
-// once the limit resets either way. For done/failed with a non-nil
+// usageLimit != nil arms/re-arms that task's engine's own auto-resume
+// timer regardless of status -- the same hook OnBlocked's ScenarioUsageLimit
+// case uses -- since a usage-limit hit pauses that engine whether the task
+// itself came out done, blocked, or failed, and that engine must resume on
+// its own once its limit resets either way. For done/failed with a non-nil
 // usageLimit, the normal message for that status is sent with one extra
-// sentence appended noting the pause; the blocked+usageLimit message stays
-// exactly as it already was.
-func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr *resumeTimerMgr) func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo) {
-	return func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo) {
+// sentence appended naming the engine and noting the pause; the
+// blocked+usageLimit message stays exactly as it already was, just naming
+// the engine too.
+func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr *resumeTimerMgr) func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string) {
+	return func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string) {
 		if usageLimit != nil {
-			resumeMgr.handleTrip(usageLimit.ResetsAt)
+			resumeMgr.handleTrip(engineName, usageLimit.ResetsAt)
 		}
 		if status == "blocked" && usageLimit != nil {
 			notifier.Send(job.NotePath, discordThreadID,
-				fmt.Sprintf("<@%s> Task `%s` (%s) hit the Claude usage limit -- the pipeline is **paused** until it resets%s. See its Work Log.",
-					cfg.DiscordUserID, job.Slug, job.Repo, usageLimit.ResetsAtSuffix()),
+				fmt.Sprintf("<@%s> Task `%s` (%s) hit the %s usage limit -- %s tasks are **paused** until it resets%s. See its Work Log.",
+					cfg.DiscordUserID, job.Slug, job.Repo, engineName, engineName, usageLimit.ResetsAtSuffix()),
 				job.Slug+".md", "# Task blocked: usage limit\n\n"+workLog+"\n")
 			return
 		}
@@ -244,25 +249,25 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr
 			}
 			msg := fmt.Sprintf("<@%s> Task `%s` (%s) is **done**: %s -- %s.", cfg.DiscordUserID, job.Slug, job.Repo, prURL, mergeNote)
 			if usageLimit != nil {
-				msg += usageLimitPauseNote(usageLimit)
+				msg += usageLimitPauseNote(engineName, usageLimit)
 			}
 			notifier.Send(job.NotePath, discordThreadID, msg, "", "")
 			return
 		}
 		msg := fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **%s**.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, status)
 		if usageLimit != nil {
-			msg += usageLimitPauseNote(usageLimit)
+			msg += usageLimitPauseNote(engineName, usageLimit)
 		}
 		notifier.Send(job.NotePath, discordThreadID, msg, job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
 	}
 }
 
 // usageLimitPauseNote is the one extra sentence appended to a done/failed
-// terminal message when this invocation also hit the Claude usage limit --
-// told apart from the dedicated blocked+usageLimit message above, which
+// terminal message when this invocation also hit engineName's usage limit
+// -- told apart from the dedicated blocked+usageLimit message above, which
 // replaces its wording entirely rather than appending to it.
-func usageLimitPauseNote(usageLimit *runner.UsageLimitInfo) string {
-	return fmt.Sprintf(" The Claude usage limit was hit on this run -- the pipeline is **paused** until it resets%s.", usageLimit.ResetsAtSuffix())
+func usageLimitPauseNote(engineName string, usageLimit *runner.UsageLimitInfo) string {
+	return fmt.Sprintf(" The %s usage limit was hit on this run -- %s tasks are **paused** until it resets%s.", engineName, engineName, usageLimit.ResetsAtSuffix())
 }
 
 // newPanicHandler builds the RepoWorker.OnPanic callback wired into

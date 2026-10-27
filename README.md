@@ -99,6 +99,29 @@ since one engine's `session_id` means nothing to another. The review
 engine is resolved fresh each time the merge gate starts and is never
 written back to the note (the reviewer has no session to resume).
 
+## HTTP API
+
+The runner exposes a local HTTP surface (bound to `127.0.0.1:$HTTP_PORT`,
+default `8420`, no auth). Two of its routes are engine-aware, since a
+usage limit belongs to one engine's account and must never stop tasks
+running on a different engine:
+
+- **`POST /resume`** — the manual counterpart to the runner's own
+  auto-resume timer. An optional `?engine=<name>` query parameter scopes
+  the resume to that one engine only (clearing its pause, flipping its
+  blocked notes to `blocker_resolved`); omitted, it clears every engine
+  currently paused. With only `claude` ever in use, there's at most one
+  paused engine at a time, so `POST /resume` with no parameter behaves
+  exactly as it always has.
+- **`GET /status/tasks`** — per-repo in-flight task info (now including
+  each task's resolved `engine`), plus pause visibility:
+  - `paused` (bool) and `resets_at` — unchanged meaning: true/earliest
+    reset if *any* engine is currently paused.
+  - `engines` (new) — a per-engine breakdown, `{"<name>": {"paused": bool,
+    "resets_at": ...}}`, covering every registered engine (even one
+    that's never been tripped, which reports `{"paused": false}`) plus
+    any engine `pause.State` has ever recorded.
+
 ## Test
 
 ```

@@ -136,10 +136,11 @@ waitLoop:
 }
 
 // TestRepoWorkerDoesNotPopWhilePaused is the worker-side half of RBG-24's
-// pause guard: with a job already queued and Pause tripped, Run's drain
-// loop must leave it in the queue (never pop it) until the pause clears --
-// otherwise a usage-limit event on one task wouldn't stop the very next
-// queued job on this same repo from immediately hitting the same limit.
+// pause guard: with a job already queued and its engine tripped, Run's
+// drain loop must leave it in the queue (never pop it) until that
+// engine's pause clears -- otherwise a usage-limit event on one task
+// wouldn't stop the very next queued job on this same repo from
+// immediately hitting the same limit.
 func TestRepoWorkerDoesNotPopWhilePaused(t *testing.T) {
 	var processed []string
 	var mu sync.Mutex
@@ -153,11 +154,11 @@ func TestRepoWorkerDoesNotPopWhilePaused(t *testing.T) {
 
 	var p pause.State
 	resetsAt := time.Now().Add(time.Hour)
-	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
 	w.Pause = &p
 
 	go w.Run()
-	w.Enqueue(Job{Repo: "repo-a", Slug: "repo-a-1", NotePath: "Tasks/a1.md"})
+	w.Enqueue(Job{Repo: "repo-a", Slug: "repo-a-1", NotePath: "Tasks/a1.md", Engine: "claude"})
 
 	// Give the drain loop every chance to (incorrectly) pop the job.
 	time.Sleep(100 * time.Millisecond)
@@ -174,7 +175,7 @@ func TestRepoWorkerDoesNotPopWhilePaused(t *testing.T) {
 	// Clearing the pause alone isn't enough to wake a goroutine blocked on
 	// <-w.wake -- confirms Wake is the real unstick mechanism main.go's
 	// resume path relies on.
-	p.Clear()
+	p.Clear("claude")
 	w.Wake()
 
 	deadline := time.After(2 * time.Second)
@@ -190,5 +191,79 @@ func TestRepoWorkerDoesNotPopWhilePaused(t *testing.T) {
 			t.Fatal("timed out waiting for the queued job to drain after resume")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// TestRepoWorkerSkipsPausedEngineJobButRunsUnpausedOneBehindIt is RBG-35's
+// worker-side test gate: queue [A-job (engine "a", paused), B-job (engine
+// "b", unpaused)] -- B-job must run despite being queued behind A-job, and
+// A-job must stay queued, in order, until engine "a" clears, at which
+// point it runs too.
+func TestRepoWorkerSkipsPausedEngineJobButRunsUnpausedOneBehindIt(t *testing.T) {
+	var processed []string
+	var mu sync.Mutex
+	globalSlots := NewGlobalSlots(1)
+	w := New("repo-a", globalSlots, func(job Job) error {
+		mu.Lock()
+		processed = append(processed, job.Slug)
+		mu.Unlock()
+		return nil
+	})
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("a", pause.ReasonUsageLimit, &resetsAt)
+	w.Pause = &p
+
+	go w.Run()
+	w.Enqueue(Job{Repo: "repo-a", Slug: "a-job", NotePath: "Tasks/a.md", Engine: "a"})
+	w.Enqueue(Job{Repo: "repo-a", Slug: "b-job", NotePath: "Tasks/b.md", Engine: "b"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		done := len(processed) == 1
+		mu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the unpaused engine's job to run")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	mu.Lock()
+	gotSoFar := append([]string(nil), processed...)
+	mu.Unlock()
+	if len(gotSoFar) != 1 || gotSoFar[0] != "b-job" {
+		t.Fatalf("processed so far = %v, want exactly [b-job]", gotSoFar)
+	}
+	if n := w.QueueLen(); n != 1 {
+		t.Fatalf("QueueLen() = %d, want 1 (a-job left queued, not dropped)", n)
+	}
+
+	p.Clear("a")
+	w.Wake()
+
+	deadline = time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		done := len(processed) == 2
+		mu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for a-job to drain after its engine cleared")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	wantOrder := []string{"b-job", "a-job"}
+	if fmt.Sprint(processed) != fmt.Sprint(wantOrder) {
+		t.Errorf("processed order = %v, want %v", processed, wantOrder)
 	}
 }

@@ -108,7 +108,7 @@ func TestTerminalHandlerDone(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "", nil)
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "", nil, "claude")
 
 			got := waitForAlert(t, alerts)
 			if got.hasFile {
@@ -142,7 +142,7 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "", nil)
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "", nil, "claude")
 
 			got := waitForAlert(t, alerts)
 			if !got.hasFile {
@@ -172,7 +172,7 @@ func TestTerminalHandlerUsageLimitBlockMentionsDevaraOnly(t *testing.T) {
 	handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
 	resetsAt := time.Now().Add(time.Hour)
-	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "blocked", "hit the limit", false, "", "", &runner.UsageLimitInfo{ResetsAt: &resetsAt})
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "blocked", "hit the limit", false, "", "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude")
 
 	got := waitForAlert(t, alerts)
 	if !strings.Contains(got.content, "<@12345>") {
@@ -204,12 +204,9 @@ func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
 
 	resetsAt := time.Now().Add(time.Hour)
 	const prURL = "https://github.com/example/repo/pull/42"
-	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", false, prURL, "", &runner.UsageLimitInfo{ResetsAt: &resetsAt})
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", false, prURL, "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude")
 
-	resumeMgr.mu.Lock()
-	armed := resumeMgr.timer != nil
-	resumeMgr.mu.Unlock()
-	if !armed {
+	if resumeMgr.timerFor("claude") == nil {
 		t.Error("resume timer was not armed for a done task that hit the usage limit")
 	}
 
@@ -220,7 +217,7 @@ func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
 	if !strings.Contains(got.content, "manual merge") {
 		t.Errorf("message %q missing the normal done wording", got.content)
 	}
-	if !strings.Contains(got.content, "The Claude usage limit was hit on this run") {
+	if !strings.Contains(got.content, "The claude usage limit was hit on this run") {
 		t.Errorf("message %q missing the usage-limit pause sentence", got.content)
 	}
 	if got.hasFile {

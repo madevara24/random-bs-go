@@ -303,11 +303,12 @@ func TestResumeRejectsNonPost(t *testing.T) {
 
 // TestStatusTasksReportsPausedAndResetsAt confirms GET /status/tasks
 // reports the shared pause state's paused flag and resets_at alongside the
-// per-repo task map.
+// per-repo task map -- the single-engine-in-use compat case, where the
+// top-level fields must mean exactly what they always have.
 func TestStatusTasksReportsPausedAndResetsAt(t *testing.T) {
 	var p pause.State
 	resetsAt := time.Unix(1791552000, 0)
-	p.Trip(pause.ReasonUsageLimit, &resetsAt)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
 
 	s := New(make(chan struct{}, 1), nil, nil, &p)
 	ts := httptest.NewServer(s)
@@ -327,6 +328,84 @@ func TestStatusTasksReportsPausedAndResetsAt(t *testing.T) {
 	}
 	if got.ResetsAt == nil || !got.ResetsAt.Equal(resetsAt) {
 		t.Errorf("ResetsAt = %v, want %v", got.ResetsAt, resetsAt)
+	}
+	claude, ok := got.Engines["claude"]
+	if !ok {
+		t.Fatalf("Engines missing \"claude\": %+v", got.Engines)
+	}
+	if !claude.Paused {
+		t.Error("Engines[\"claude\"].Paused = false, want true")
+	}
+	if claude.ResetsAt == nil || !claude.ResetsAt.Equal(resetsAt) {
+		t.Errorf("Engines[\"claude\"].ResetsAt = %v, want %v", claude.ResetsAt, resetsAt)
+	}
+}
+
+// TestStatusTasksEnginesReportsEveryKnownEngineEvenUnpaused confirms a
+// registered engine that's never been tripped still shows up in the
+// engines map as unpaused -- the "fresh deploy" shape a human checks
+// after a merge, rather than an empty map that would make it look like no
+// engines are known at all.
+func TestStatusTasksEnginesReportsEveryKnownEngineEvenUnpaused(t *testing.T) {
+	s := New(make(chan struct{}, 1), nil, nil, nil)
+	s.EngineNames = []string{"claude"}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	var got StatusTasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	claude, ok := got.Engines["claude"]
+	if !ok {
+		t.Fatalf("Engines missing \"claude\": %+v", got.Engines)
+	}
+	if claude.Paused {
+		t.Error("Engines[\"claude\"].Paused = true, want false for a never-tripped engine")
+	}
+	if got.Paused {
+		t.Error("top-level Paused = true, want false when no engine is paused")
+	}
+}
+
+// TestStatusTasksEnginesIsolatesOneEnginesPauseFromAnother confirms
+// tripping one engine leaves another's entry unpaused, and the top-level
+// resets_at is the earliest among only the engines actually paused.
+func TestStatusTasksEnginesIsolatesOneEnginesPauseFromAnother(t *testing.T) {
+	var p pause.State
+	resetsAt := time.Unix(1791552000, 0)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+
+	s := New(make(chan struct{}, 1), nil, nil, &p)
+	s.EngineNames = []string{"claude", "other"}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/tasks")
+	if err != nil {
+		t.Fatalf("GET /status/tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	var got StatusTasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if !got.Engines["claude"].Paused {
+		t.Error("Engines[\"claude\"].Paused = false, want true")
+	}
+	if got.Engines["other"].Paused {
+		t.Error("Engines[\"other\"].Paused = true, want false (never tripped)")
+	}
+	if !got.Paused {
+		t.Error("top-level Paused = false, want true (claude is paused)")
+	}
+	if got.ResetsAt == nil || !got.ResetsAt.Equal(resetsAt) {
+		t.Errorf("top-level ResetsAt = %v, want %v (claude's)", got.ResetsAt, resetsAt)
 	}
 }
 
@@ -378,8 +457,8 @@ func TestResumeClearsPauseFlipsNotesAndWakesEverything(t *testing.T) {
 
 	var p pause.State
 	resetsAt := time.Now().Add(time.Hour)
-	p.Trip(pause.ReasonUsageLimit, &resetsAt)
-	p.AddBlockedNote(relPath)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("claude", relPath)
 
 	dispatchWake := make(chan struct{}, 1)
 	globalSlots := worker.NewGlobalSlots(1)
@@ -387,9 +466,9 @@ func TestResumeClearsPauseFlipsNotesAndWakesEverything(t *testing.T) {
 	rw.Pause = &p
 	workers := worker.Workers{"phase6-test-repo": rw}
 
-	var cancelCalled bool
+	var cancelledEngines []string
 	s := New(dispatchWake, workers, v, &p)
-	s.CancelResumeTimer = func() { cancelCalled = true }
+	s.CancelResumeTimer = func(engine string) { cancelledEngines = append(cancelledEngines, engine) }
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -401,10 +480,10 @@ func TestResumeClearsPauseFlipsNotesAndWakesEverything(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	if !cancelCalled {
-		t.Error("CancelResumeTimer was never called")
+	if len(cancelledEngines) != 1 || cancelledEngines[0] != "claude" {
+		t.Errorf("CancelResumeTimer calls = %v, want exactly [claude]", cancelledEngines)
 	}
-	if p.IsPaused() {
+	if p.IsPaused("claude") {
 		t.Error("pause still reports paused after POST /resume")
 	}
 
@@ -453,8 +532,8 @@ func TestResumeDoesNotFlipANormalBlockedNoteItDidNotRecord(t *testing.T) {
 
 	var p pause.State
 	resetsAt := time.Now().Add(time.Hour)
-	p.Trip(pause.ReasonUsageLimit, &resetsAt)
-	// Deliberately not calling p.AddBlockedNote(relPath).
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	// Deliberately not calling p.AddBlockedNote("claude", relPath).
 
 	s := New(make(chan struct{}, 1), nil, v, &p)
 	ts := httptest.NewServer(s)
@@ -474,5 +553,136 @@ func TestResumeDoesNotFlipANormalBlockedNoteItDidNotRecord(t *testing.T) {
 	}
 	if note.Frontmatter.Status != "blocked" {
 		t.Errorf("status = %q, want unchanged %q", note.Frontmatter.Status, "blocked")
+	}
+}
+
+// TestResumeWithEngineQueryParamClearsOnlyThatEngine is RBG-35's HTTP test
+// gate: with both "claude" and "other" paused, POST /resume?engine=claude
+// must clear only claude -- "other" stays paused, its blocked note stays
+// blocked, and its timer is never cancelled.
+func TestResumeWithEngineQueryParamClearsOnlyThatEngine(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	claudePath := fmt.Sprintf("Tasks/httpapi-resume-engine-claude-%s.md", run)
+	otherPath := fmt.Sprintf("Tasks/httpapi-resume-engine-other-%s.md", run)
+	testvault.Seed(t, claudePath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Claude-engine resume test task.")
+	testvault.Seed(t, otherPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Other-engine resume test task.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("claude", claudePath)
+	p.Trip("other", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("other", otherPath)
+
+	var cancelledEngines []string
+	s := New(make(chan struct{}, 1), nil, v, &p)
+	s.CancelResumeTimer = func(engine string) { cancelledEngines = append(cancelledEngines, engine) }
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume?engine=claude", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume?engine=claude: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if len(cancelledEngines) != 1 || cancelledEngines[0] != "claude" {
+		t.Errorf("CancelResumeTimer calls = %v, want exactly [claude]", cancelledEngines)
+	}
+	if p.IsPaused("claude") {
+		t.Error("claude still reports paused after POST /resume?engine=claude")
+	}
+	if !p.IsPaused("other") {
+		t.Error("other no longer reports paused -- ?engine=claude must not have touched it")
+	}
+
+	claudeNote, err := v.ReadNote(claudePath)
+	if err != nil {
+		t.Fatalf("reading claude note back: %v", err)
+	}
+	if claudeNote.Frontmatter.Status != "blocker_resolved" {
+		t.Errorf("claude note status = %q, want %q", claudeNote.Frontmatter.Status, "blocker_resolved")
+	}
+	otherNote, err := v.ReadNote(otherPath)
+	if err != nil {
+		t.Fatalf("reading other note back: %v", err)
+	}
+	if otherNote.Frontmatter.Status != "blocked" {
+		t.Errorf("other note status = %q, want unchanged %q", otherNote.Frontmatter.Status, "blocked")
+	}
+}
+
+// TestResumeWithoutEngineClearsEveryPausedEngine confirms POST /resume
+// with no query parameter clears every currently-paused engine -- the
+// generalization of today's single-engine behavior.
+func TestResumeWithoutEngineClearsEveryPausedEngine(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	claudePath := fmt.Sprintf("Tasks/httpapi-resume-all-claude-%s.md", run)
+	otherPath := fmt.Sprintf("Tasks/httpapi-resume-all-other-%s.md", run)
+	testvault.Seed(t, claudePath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Claude-engine resume-all test task.")
+	testvault.Seed(t, otherPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Other-engine resume-all test task.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("claude", claudePath)
+	p.Trip("other", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("other", otherPath)
+
+	var cancelledEngines []string
+	s := New(make(chan struct{}, 1), nil, v, &p)
+	s.CancelResumeTimer = func(engine string) { cancelledEngines = append(cancelledEngines, engine) }
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if len(cancelledEngines) != 2 {
+		t.Errorf("CancelResumeTimer calls = %v, want exactly 2 (one per paused engine)", cancelledEngines)
+	}
+	if p.IsPaused("claude") || p.IsPaused("other") {
+		t.Error("an engine still reports paused after POST /resume with no query param")
+	}
+
+	for _, path := range []string{claudePath, otherPath} {
+		note, err := v.ReadNote(path)
+		if err != nil {
+			t.Fatalf("reading %s back: %v", path, err)
+		}
+		if note.Frontmatter.Status != "blocker_resolved" {
+			t.Errorf("%s status = %q, want %q", path, note.Frontmatter.Status, "blocker_resolved")
+		}
 	}
 }
