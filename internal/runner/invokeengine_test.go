@@ -41,6 +41,8 @@ func (f *fakePreAssignEngine) ParseReviewAnswer(stdout []byte) (string, error) {
 	return "", nil
 }
 
+func (f *fakePreAssignEngine) StartupTimeout() time.Duration { return 0 }
+
 func TestInvokeEngineUsesPreAssignedSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 	eng := &fakePreAssignEngine{sessionID: "preassigned-session-xyz"}

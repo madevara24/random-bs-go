@@ -22,6 +22,15 @@ type RunState struct {
 	SessionID          string
 	UsageLimitHit      bool
 	UsageLimitResetsAt *time.Time
+
+	// FailureText is a human-readable failure an engine's ParseLine
+	// recorded mid-stream, for a CLI whose exit code alone can't be
+	// trusted to say whether the run actually succeeded (pi's JSON mode
+	// exits 0 even on a failed/aborted model response -- see pi.go) -- ""
+	// means no such signal was seen. ClassifyExit may turn a non-empty
+	// FailureText into an ordinary returned error; claude never sets this
+	// field, so its own ClassifyExit never checks it.
+	FailureText string
 }
 
 // Engine covers exactly what differs between coding-agent CLIs -- argv
@@ -59,6 +68,17 @@ type Engine interface {
 	// ParseReviewAnswer extracts the review's final answer text from the
 	// review invocation's raw stdout.
 	ParseReviewAnswer(stdout []byte) (string, error)
+
+	// StartupTimeout is how long invokeEngine (internal/runner) waits for
+	// this engine's coding invocation to produce its very first stdout
+	// line before concluding it's hung at startup -- most likely a bad
+	// credential that leaves the CLI hanging silently from byte zero (see
+	// pi.go) -- and killing the process group. Zero means "no startup
+	// timeout declared"; the idle watchdog (which only fires after at
+	// least one line already proved the process alive) is this engine's
+	// only protection. claude declares none, since it has never been seen
+	// to hang before its first line.
+	StartupTimeout() time.Duration
 }
 
 // ErrUsageLimit is the sentinel every UsageLimitError wraps (via Unwrap,

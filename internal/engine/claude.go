@@ -145,3 +145,7 @@ func (c *ClaudeEngine) ParseReviewAnswer(stdout []byte) (string, error) {
 	}
 	return result.Result, nil
 }
+
+// StartupTimeout implements Engine -- claude declares none; the idle
+// watchdog alone covers it, unchanged from before this method existed.
+func (c *ClaudeEngine) StartupTimeout() time.Duration { return 0 }

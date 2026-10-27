@@ -33,6 +33,29 @@ import (
 // a bare exit code.
 var ErrIdleTimeout = errors.New("runner: idle timeout exceeded, process group killed")
 
+// ErrStartupTimeout is the sentinel invokeEngine's returned error wraps
+// (via errors.Is) when an engine declares a StartupTimeout (see
+// engine.Engine) and it elapses before the coding invocation's stdout
+// ever produces a single line -- distinct from ErrIdleTimeout, which only
+// fires after at least one line already proved the process alive. A
+// credential problem that leaves an engine's CLI hanging silently from
+// byte zero (pi, see engine/pi.go) is this scenario's whole reason for
+// existing; claude declares no StartupTimeout, so this never fires for
+// it.
+var ErrStartupTimeout = errors.New("runner: startup timeout exceeded, process group killed before any output")
+
+// newStartupTimeoutError builds invokeEngine's actual returned error on a
+// startup-timeout kill: dynamic text naming the engine and the timeout
+// that elapsed, wrapping ErrStartupTimeout so callers can still match it
+// with errors.Is. The wording -- "produced no output" plus "<name> auth
+// check" -- is deliberately generic over any engine's name rather than
+// hardcoding pi's own diagnostic command, since this helper lives in the
+// generic process lifecycle (internal/runner), not engine.Engine itself.
+func newStartupTimeoutError(engineName string, timeout time.Duration) error {
+	return fmt.Errorf("%s produced no output within %ds -- check `%s auth check` for a credential problem: %w",
+		engineName, int(timeout.Seconds()), engineName, ErrStartupTimeout)
+}
+
 // UsageLimitInfo is threaded through AlertPayload and Deps.OnTerminal
 // whenever a blocked (or, in principle, failed/done) task's outcome was
 // caused by hitting the Claude usage limit on this very invocation -- nil
@@ -882,8 +905,25 @@ func invokeEngine(eng engine.Engine, dir, prompt, resumeSessionID string, idleTi
 
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
+
+	// startupTimeout is this engine's own declared bound (0 for claude --
+	// see engine.Engine.StartupTimeout) on how long it may go without
+	// producing even its first stdout line -- distinct from idleTimeout,
+	// which only starts protecting once a process has already proven
+	// itself alive. A nil channel in the select below simply never fires,
+	// so an engine that declares none behaves exactly as it always has.
+	startupTimeout := eng.StartupTimeout()
+	var startupTimer *time.Timer
+	var startupC <-chan time.Time
+	if startupTimeout > 0 {
+		startupTimer = time.NewTimer(startupTimeout)
+		defer startupTimer.Stop()
+		startupC = startupTimer.C
+	}
+
 	killDone := make(chan struct{})
 	var watchdogFired atomic.Bool
+	var startupTimeoutFired atomic.Bool
 	go func() {
 		select {
 		case <-idleTimer.C:
@@ -894,6 +934,10 @@ func invokeEngine(eng engine.Engine, dir, prompt, resumeSessionID string, idleTi
 			watchdogFired.Store(true)
 			pgid := cmd.Process.Pid
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		case <-startupC:
+			startupTimeoutFired.Store(true)
+			pgid := cmd.Process.Pid
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		case <-killDone:
 		}
 	}()
@@ -901,8 +945,22 @@ func invokeEngine(eng engine.Engine, dir, prompt, resumeSessionID string, idleTi
 	state := engine.RunState{SessionID: preAssignedSessionID}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	firstLine := true
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if firstLine {
+			firstLine = false
+			// The process proved itself alive -- the startup timer never
+			// gets another chance to fire, same stop-then-drain pattern as
+			// idleTimer below.
+			if startupTimer != nil && !startupTimer.Stop() {
+				select {
+				case <-startupTimer.C:
+				default:
+				}
+			}
+		}
 
 		if !idleTimer.Stop() {
 			select {
@@ -926,7 +984,11 @@ func invokeEngine(eng engine.Engine, dir, prompt, resumeSessionID string, idleTi
 
 	// state.UsageLimitHit is checked first: the engine's CLI can report the
 	// limit and then hang (rather than exit) until the idle watchdog kills
-	// it, and that real signal must win over ErrIdleTimeout.
+	// it, and that real signal must win over ErrIdleTimeout/
+	// ErrStartupTimeout.
+	if !state.UsageLimitHit && startupTimeoutFired.Load() {
+		return state.SessionID, stderrTail.String(), newStartupTimeoutError(eng.Name(), startupTimeout)
+	}
 	if !state.UsageLimitHit && watchdogFired.Load() {
 		return state.SessionID, stderrTail.String(), ErrIdleTimeout
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -75,6 +76,33 @@ type Config struct {
 	// defaults to "claude".
 	ReviewEngine string
 
+	// PiBin is the pi CLI's path/name, passed to engine.NewPi. Optional,
+	// defaults to "pi" (resolved via PATH).
+	PiBin string
+
+	// PiModel is the --model value for pi's coding invocation. Optional,
+	// defaults to "" -- omit --model entirely, so pi falls back to its own
+	// configured default model (pi's settings for the runner's OS user).
+	PiModel string
+
+	// PiReviewModel is the --model value for pi's review invocation.
+	// Optional, defaults to PiModel's own resolved value (itself "" unless
+	// set), independent of it once set.
+	PiReviewModel string
+
+	// PiSessionDir is the directory pi's --session-dir points at.
+	// Optional, defaults to "pi-sessions" under the config directory
+	// (alongside .env/repos.json) -- created once at startup, never by the
+	// engine constructor itself (see cmd/pmrunner/runner_mode.go).
+	PiSessionDir string
+
+	// PiStartupTimeoutSeconds is how long invokeEngine waits for pi's
+	// coding invocation to produce its first stdout line before
+	// concluding it's hung (most likely a bad DeepSeek credential, which
+	// leaves pi silent indefinitely) and killing it. Optional, defaults to
+	// 90.
+	PiStartupTimeoutSeconds int
+
 	// From repos.json
 	Repos map[string]RepoConfig
 
@@ -132,6 +160,18 @@ const defaultEngineName = "claude"
 // resolved via PATH, same as every invocation before this config key
 // existed.
 const defaultClaudeBin = "claude"
+
+// defaultPiBin is PI_BIN's default -- the bare command name, resolved via
+// PATH.
+const defaultPiBin = "pi"
+
+// defaultPiSessionDirName is PI_SESSION_DIR's default directory name,
+// created under the config directory (alongside .env/repos.json).
+const defaultPiSessionDirName = "pi-sessions"
+
+// defaultPiStartupTimeoutSeconds is PI_STARTUP_TIMEOUT_SECONDS's default
+// when unset.
+const defaultPiStartupTimeoutSeconds = 90
 
 // parseEnvFile reads a simple KEY=VALUE .env file: blank lines and lines
 // starting with '#' are ignored, no quoting/escaping support (matches the
@@ -216,6 +256,9 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 		DefaultEngine:                defaultEngineName,
 		ClaudeBin:                    defaultClaudeBin,
 		ReviewEngine:                 defaultEngineName,
+		PiBin:                        defaultPiBin,
+		PiSessionDir:                 filepath.Join(filepath.Dir(envPath), defaultPiSessionDirName),
+		PiStartupTimeoutSeconds:      defaultPiStartupTimeoutSeconds,
 		EnvPath:                      envPath,
 		ReposPath:                    reposPath,
 	}
@@ -258,6 +301,28 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	}
 	if v, ok := raw["REVIEW_ENGINE"]; ok && v != "" {
 		cfg.ReviewEngine = v
+	}
+	if v, ok := raw["PI_BIN"]; ok && v != "" {
+		cfg.PiBin = v
+	}
+	if v, ok := raw["PI_MODEL"]; ok && v != "" {
+		cfg.PiModel = v
+	}
+	if v, ok := raw["PI_SESSION_DIR"]; ok && v != "" {
+		cfg.PiSessionDir = v
+	}
+	if v, ok := raw["PI_STARTUP_TIMEOUT_SECONDS"]; ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: PI_STARTUP_TIMEOUT_SECONDS must be a positive integer, got %q (in %s)", v, envPath)
+		}
+		cfg.PiStartupTimeoutSeconds = n
+	}
+	// PI_REVIEW_MODEL defaults to PiModel's own just-resolved value --
+	// parsed after PI_MODEL above so that default actually reflects it.
+	cfg.PiReviewModel = cfg.PiModel
+	if v, ok := raw["PI_REVIEW_MODEL"]; ok && v != "" {
+		cfg.PiReviewModel = v
 	}
 
 	repos, err := loadRepos(reposPath)
