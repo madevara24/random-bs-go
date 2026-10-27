@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -69,9 +70,19 @@ func runRunner(cfg *config.Config) {
 		}
 	}
 
+	// PI_SESSION_DIR must exist before pi's own --session-dir ever points
+	// at it -- created once here at startup, never inside engine.NewPi
+	// itself, since that constructor is also called with empty arguments
+	// just to list registered engine names (registeredEngineNames below)
+	// and must stay I/O-free.
+	if err := os.MkdirAll(cfg.PiSessionDir, 0o755); err != nil {
+		fmt.Printf("pmrunner: fatal: creating pi session dir %s: %v\n", cfg.PiSessionDir, err)
+		return
+	}
+
 	// Built once, shared by every task's ProcessTask/MergeGateFactory call
 	// below -- the same registry, not a fresh one per task.
-	engineRegistry := buildEngineRegistry(cfg.ClaudeBin)
+	engineRegistry := buildEngineRegistry(cfg.ClaudeBin, cfg.PiBin, cfg.PiModel, cfg.PiReviewModel, cfg.PiSessionDir, time.Duration(cfg.PiStartupTimeoutSeconds)*time.Second)
 
 	runnerDeps := runner.Deps{
 		Vault:               vault,
@@ -143,12 +154,18 @@ func runRunner(cfg *config.Config) {
 }
 
 // buildEngineRegistry builds the name->Engine map runner.Deps/
-// MergeGateFactory resolve against -- today it holds only claude.
-// claudeBin is CLAUDE_BIN's resolved value ("" from config.Load means
-// "claude", resolved via PATH, same as always).
-func buildEngineRegistry(claudeBin string) map[string]engine.Engine {
+// MergeGateFactory resolve against -- claude and pi. claudeBin is
+// CLAUDE_BIN's resolved value ("" from config.Load means "claude",
+// resolved via PATH, same as always); piBin/piModel/piReviewModel/
+// piSessionDir/piStartupTimeout are PI_BIN/PI_MODEL/PI_REVIEW_MODEL/
+// PI_SESSION_DIR/PI_STARTUP_TIMEOUT_SECONDS's resolved values. Must do no
+// I/O: registeredEngineNames below calls this with every argument empty
+// just to list names, so PI_SESSION_DIR's creation happens once in
+// runRunner instead, never inside engine.NewPi itself.
+func buildEngineRegistry(claudeBin, piBin, piModel, piReviewModel, piSessionDir string, piStartupTimeout time.Duration) map[string]engine.Engine {
 	return map[string]engine.Engine{
 		"claude": engine.NewClaude(claudeBin),
+		"pi":     engine.NewPi(piBin, piModel, piReviewModel, piSessionDir, piStartupTimeout),
 	}
 }
 
@@ -156,10 +173,10 @@ func buildEngineRegistry(claudeBin string) map[string]engine.Engine {
 // what config.Load validates DEFAULT_ENGINE/REVIEW_ENGINE and repos.json's
 // per-repo "engine"/"review_engine" fields against. Derived from
 // buildEngineRegistry itself (rather than a separately maintained literal)
-// so the two can never drift apart; the bin argument doesn't affect which
-// names come out, so "" is fine here.
+// so the two can never drift apart; none of the arguments affect which
+// names come out, so every one is "" (or zero) here.
 func registeredEngineNames() []string {
-	reg := buildEngineRegistry("")
+	reg := buildEngineRegistry("", "", "", "", "", 0)
 	names := make([]string, 0, len(reg))
 	for name := range reg {
 		names = append(names, name)

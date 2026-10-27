@@ -225,6 +225,27 @@ func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
 	}
 }
 
+// TestRegisteredEngineNamesIncludesPi confirms GET /status/tasks (which
+// reads this list via server.EngineNames) will report pi alongside claude
+// -- and that calling it (empty-argument buildEngineRegistry, per its own
+// doc comment) does no I/O: it must never create PI_SESSION_DIR, which is
+// runRunner's job at real startup.
+func TestRegisteredEngineNamesIncludesPi(t *testing.T) {
+	names := registeredEngineNames()
+	var gotClaude, gotPi bool
+	for _, n := range names {
+		switch n {
+		case "claude":
+			gotClaude = true
+		case "pi":
+			gotPi = true
+		}
+	}
+	if !gotClaude || !gotPi {
+		t.Errorf("registeredEngineNames() = %v, want it to include both %q and %q", names, "claude", "pi")
+	}
+}
+
 // TestBuildWorkersWiresOnPanicAndOnError is this package's wiring test: for
 // every configured repo, buildWorkers must hand back a RepoWorker whose
 // OnPanic and OnError are both non-nil -- OnError already defaults to a

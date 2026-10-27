@@ -50,8 +50,17 @@ Each config directory needs two files:
   the note's `review_engine:` nor the repo's `"review_engine"` is set,
   resolved independently of `DEFAULT_ENGINE`). `DEFAULT_ENGINE`,
   `REVIEW_ENGINE`, and every repo's `"engine"`/`"review_engine"` must each
-  name a registered engine (today, only `claude`) — an unregistered name
-  fails startup with a clear error.
+  name a registered engine (`claude` or `pi`) — an unregistered name fails
+  startup with a clear error.
+
+  **`pi` engine config** (all optional, all about the `pi` engine
+  specifically — see "Engine selection" below): `PI_BIN` (default `pi`,
+  resolved via `PATH`), `PI_MODEL` (default empty — no `--model` is passed,
+  so `pi` falls back to whatever model is configured in *its own* settings,
+  see below), `PI_REVIEW_MODEL` (default: same as `PI_MODEL`, independent
+  once set), `PI_SESSION_DIR` (default `pi-sessions` under the config
+  directory; created once at startup if missing), `PI_STARTUP_TIMEOUT_SECONDS`
+  (default `90` — see "Startup timeout" below).
 - **`repos.json`** — a map of repo key to onboarding config:
 
   ```json
@@ -82,9 +91,10 @@ engine: claude
 review_engine: claude
 ```
 
-Both are optional; a note without either key resolves to `claude` today
-(the only engine that exists). Resolution order, highest precedence
-first:
+Both are optional; a note without either key resolves to `claude` (the
+default engine) unless `DEFAULT_ENGINE`/`REVIEW_ENGINE` or the repo's own
+config say otherwise. Two engines are registered today: `claude` and
+`pi`. Resolution order, highest precedence first:
 
 - **Coding engine**: the note's `engine:` → the repo's `"engine"` →
   `DEFAULT_ENGINE`.
@@ -97,7 +107,48 @@ earlier — until then, an `engine:` key on the note always means the task
 author pinned it). A resume always reuses the note's existing `engine:`,
 since one engine's `session_id` means nothing to another. The review
 engine is resolved fresh each time the merge gate starts and is never
-written back to the note (the reviewer has no session to resume).
+written back to the note (the reviewer has no session to resume). A task
+can code with one engine and be reviewed by another — e.g. `engine:
+claude` with `review_engine: pi`.
+
+### The `pi` engine (DeepSeek)
+
+`pi` drives the `pi` coding-agent CLI configured against a DeepSeek model.
+Unlike `claude`, this engine carries no credentials or model choice of its
+own in `pmrunner`'s config:
+
+- **Credentials** live entirely in `pi`'s own credential store, for
+  whatever OS user the runner process runs as. `pmrunner` never passes
+  `--api-key` or otherwise handles a DeepSeek key — if `pi auth check
+  --provider deepseek` fails for that user, every `pi` task will hang (see
+  "Startup timeout" below) until it's fixed outside `pmrunner` entirely.
+- **The default model** comes from `pi`'s own settings for that user
+  (`~/.pi/agent/settings.json`'s `defaultProvider`/`defaultModel`) unless
+  `PI_MODEL`/`PI_REVIEW_MODEL` is set, in which case `pmrunner` passes
+  `--model <value>` explicitly. Changing the model without touching
+  `pmrunner`'s config at all means editing `pi`'s own settings file.
+- **Sessions**: every fresh `pi` coding run gets a freshly minted session
+  ID (`rbg-` plus 16 random hex characters — never derived from the task
+  slug, so a task note re-filed under the same slug never accidentally
+  resumes an old session) and is stored under `PI_SESSION_DIR` as
+  `<timestamp>_<id>.jsonl`, same as `pi` always stores its sessions. A
+  resume reuses the exact `session_id` the note already recorded.
+  `pmrunner` never reads these transcript files itself.
+- **Exit code is not trustworthy.** `pi --mode json` still exits `0` on a
+  failed or aborted model response — `pmrunner` detects that from the
+  JSONL event stream instead (an assistant turn whose `stopReason` is
+  `"error"`/`"aborted"`, or an `auto_retry_end` reporting `success: false`)
+  and turns it into an ordinary task error either way, never a
+  usage-limit pause (DeepSeek quota/balance detection doesn't exist yet).
+- **Startup timeout**: a bad DeepSeek credential makes `pi` hang
+  completely silently — no stdout, no stderr, no exit. `pi` is the only
+  engine that declares a startup timeout (`PI_STARTUP_TIMEOUT_SECONDS`,
+  default `90`): if its coding invocation produces no stdout at all within
+  that window, the runner kills it and blocks the task with an alert
+  naming the timeout and suggesting `pi auth check`. `claude` declares no
+  startup timeout and is unaffected; the ordinary idle watchdog
+  (`IDLE_TIMEOUT_MINUTES`) still applies to `pi` as well, for a hang any
+  time *after* its first line of output.
 
 ## HTTP API
 
