@@ -311,6 +311,18 @@ func (g *GhMergeGateOps) Merge() error {
 	return err
 }
 
+// PRState implements MergeGateOps -- the PR's current GitHub state
+// (OPEN, MERGED, CLOSED), re-fetched fresh on every call rather than
+// cached like headBranch, since the whole point is noticing a change
+// made after the loop started.
+func (g *GhMergeGateOps) PRState() (string, error) {
+	out, err := g.runGh("pr", "view", g.PRURL, "--json", "state", "--jq", ".state")
+	if err != nil {
+		return "", fmt.Errorf("checking PR state for %s: %w", g.PRURL, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // ResumeWithFeedback implements MergeGateOps -- resumes the *coding*
 // session (not the review session, which is always fresh) with the
 // review's CONCERNS or CI's failure text.

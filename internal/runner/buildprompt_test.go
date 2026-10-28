@@ -31,6 +31,12 @@ func TestBuildPromptCarriesPRContract(t *testing.T) {
 		if !strings.Contains(prompt, "treated as blocked") {
 			t.Errorf("resume=%v: prompt missing the done-without-pr_url-is-blocked statement:\n%s", resume, prompt)
 		}
+		if !strings.Contains(prompt, "Never merge the pull request") {
+			t.Errorf("resume=%v: prompt missing the no-self-merge instruction:\n%s", resume, prompt)
+		}
+		if !strings.Contains(prompt, "the runner's setting, not an instruction to you") {
+			t.Errorf("resume=%v: prompt missing the auto_merge-is-the-runner's-setting clarification:\n%s", resume, prompt)
+		}
 	}
 }
 
