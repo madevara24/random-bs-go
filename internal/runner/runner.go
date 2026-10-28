@@ -400,9 +400,9 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		fmt.Printf("[runner] task %s: captured session_id=%s\n", job.Slug, sessionID)
 	}
 	if exitErr != nil {
-		fmt.Printf("[runner] task %s: claude exited with error: %v\n", job.Slug, exitErr)
+		fmt.Printf("[runner] task %s: %s exited with error: %v\n", job.Slug, codingEngineName, exitErr)
 	} else {
-		fmt.Printf("[runner] task %s: claude exited cleanly\n", job.Slug)
+		fmt.Printf("[runner] task %s: %s exited cleanly\n", job.Slug, codingEngineName)
 	}
 
 	// A usage-limit hit on this very invocation trips the shared pause
@@ -577,6 +577,11 @@ func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.Re
 		fmt.Printf("[runner] task %s: merge-gate loop hit its round limit without merging\n", job.Slug)
 		if deps.OnRoundLimitHit != nil {
 			deps.OnRoundLimitHit(job, prURL, discordThreadID)
+		}
+	case errors.Is(err, ErrMergedOutsideGate):
+		fmt.Printf("[runner] task %s: merge-gate loop stopped -- PR was merged or closed outside the gate: %v\n", job.Slug, err)
+		if deps.OnMergeGateError != nil {
+			deps.OnMergeGateError(job, prURL, discordThreadID, err)
 		}
 	default:
 		fmt.Printf("[runner] task %s: merge-gate loop ended with an error: %v\n", job.Slug, err)
@@ -819,7 +824,7 @@ func excludeFromGit(repoPath, name string) error {
 // branches can't drift apart on what "done" requires. A resumed session is
 // the one most likely to be sitting on an uncommitted tree, so it needs
 // this just as much as a fresh one.
-const prCompletionContract = "The task is only done once your work is committed on the task branch, pushed to `origin`, and opened as a pull request, with the PR's URL recorded in `pr_url`. Setting `status` to `done` with an empty `pr_url` is treated as blocked, not done. If you genuinely cannot open a PR, set `status` to `blocked` and explain why in the Work Log."
+const prCompletionContract = "The task is only done once your work is committed on the task branch, pushed to `origin`, and opened as a pull request, with the PR's URL recorded in `pr_url`. Setting `status` to `done` with an empty `pr_url` is treated as blocked, not done. If you genuinely cannot open a PR, set `status` to `blocked` and explain why in the Work Log. Never merge the pull request, enable auto-merge on it, or approve it yourself: the runner reviews and merges it. The `auto_merge` field in the task file is the runner's setting, not an instruction to you."
 
 // resumeReconciliationNotice tells a resumed session that the runner's own
 // git surface for resume is deterministic-only (fetch + checkout the

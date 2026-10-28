@@ -50,6 +50,12 @@ type MergeGateOps interface {
 	// AlertRoundLimitHit fires once, only if the loop exhausts its budget
 	// without a clean merge.
 	AlertRoundLimitHit()
+	// PRState reports the PR's current GitHub state (OPEN, MERGED, CLOSED)
+	// -- checked before the loop ever reviews, and again right before each
+	// Merge() call, since a resumed coding session could merge the PR
+	// itself (see prCompletionContract's no-self-merge instruction, and
+	// TFO-10's incident) at any point while the loop is running.
+	PRState() (string, error)
 }
 
 // ErrRoundLimitHit is returned when the loop exhausts MaxMergeGateRounds
@@ -57,10 +63,22 @@ type MergeGateOps interface {
 // stays whatever the last round left it at.
 var ErrRoundLimitHit = fmt.Errorf("runner: hit round limit (%d) without a clean merge -- needs judgment", MaxMergeGateRounds)
 
+// ErrMergedOutsideGate is wrapped by RunMergeGateLoop's returned error
+// whenever PRState() reports anything other than OPEN -- a coding session
+// (or a human) merged or closed the PR outside the gate's own review+CI
+// check, same as TFO-10's incident (the pi builder ran `gh pr merge
+// --auto` itself, so GitHub merged before CI or review ever ran). The
+// loop never reviews, waits for CI, or merges once this fires.
+var ErrMergedOutsideGate = fmt.Errorf("runner: PR was merged or closed outside the merge gate")
+
 // RunMergeGateLoop is the loop itself: both triggers (CONCERNS, CI
 // failure) always re-enter through review before re-checking CI -- a fix
 // for one thing could plausibly break something the reviewer would catch.
 func RunMergeGateLoop(ops MergeGateOps) error {
+	if err := checkPROpen(ops); err != nil {
+		return err
+	}
+
 	for round := 0; round < MaxMergeGateRounds; round++ {
 		verdict, feedback, err := ops.RunReview(round)
 		if err != nil {
@@ -79,6 +97,9 @@ func RunMergeGateLoop(ops MergeGateOps) error {
 			return fmt.Errorf("runner: waiting for CI (round %d): %w", round, err)
 		}
 		if conclusion == "success" {
+			if err := checkPROpen(ops); err != nil {
+				return err
+			}
 			return ops.Merge()
 		}
 		if err := ops.ResumeWithFeedback(failureLog); err != nil {
@@ -88,4 +109,19 @@ func RunMergeGateLoop(ops MergeGateOps) error {
 
 	ops.AlertRoundLimitHit()
 	return ErrRoundLimitHit
+}
+
+// checkPROpen calls PRState() and turns anything other than OPEN into an
+// error wrapping ErrMergedOutsideGate, naming the actual state -- called
+// before the loop's first review and again right before every Merge()
+// call (see RunMergeGateLoop).
+func checkPROpen(ops MergeGateOps) error {
+	state, err := ops.PRState()
+	if err != nil {
+		return fmt.Errorf("runner: checking PR state: %w", err)
+	}
+	if state != "OPEN" {
+		return fmt.Errorf("runner: PR state is %s, not OPEN: %w", state, ErrMergedOutsideGate)
+	}
+	return nil
 }

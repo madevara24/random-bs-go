@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -223,6 +224,56 @@ func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
 	if got.hasFile {
 		t.Errorf("done message attached a file, want none")
 	}
+}
+
+// TestMergeGateErrorHandlerOutsideMergeMessage covers RBG-40: an error
+// matching runner.ErrMergedOutsideGate (TFO-10's incident -- a coding
+// session merged or closed the PR itself, outside the gate's own
+// review/CI check) must get a distinct message that does NOT claim the
+// PR "is still open", since it isn't. Any other merge-gate loop error
+// must keep the existing "still open" wording, byte-identical.
+func TestMergeGateErrorHandlerOutsideMergeMessage(t *testing.T) {
+	const prURL = "https://github.com/example/repo/pull/10"
+	cfg := &config.Config{DiscordUserID: "12345", DiscordAraDevUserID: "67890"}
+
+	t.Run("outside merge", func(t *testing.T) {
+		srv, alerts := capturingDiscordServer(t)
+		defer srv.Close()
+		notifier := &notify.Notifier{WebhookURL: srv.URL}
+		handler := newMergeGateErrorHandler(cfg, notifier)
+
+		handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, prURL, "",
+			fmt.Errorf("runner: PR state is MERGED, not OPEN: %w", runner.ErrMergedOutsideGate))
+
+		got := waitForAlert(t, alerts)
+		if strings.Contains(got.content, "is still open") {
+			t.Errorf("message %q claims the PR is still open, which is false for an outside merge", got.content)
+		}
+		if !strings.Contains(got.content, "merged or closed outside the merge gate") {
+			t.Errorf("message %q missing the outside-merge wording", got.content)
+		}
+		if !strings.Contains(got.content, "review and CI gate were skipped") {
+			t.Errorf("message %q missing the skipped-review/CI wording", got.content)
+		}
+		if !strings.Contains(got.content, "<@12345>") || !strings.Contains(got.content, "<@67890>") {
+			t.Errorf("message %q missing both mentions", got.content)
+		}
+	})
+
+	t.Run("other error unchanged", func(t *testing.T) {
+		srv, alerts := capturingDiscordServer(t)
+		defer srv.Close()
+		notifier := &notify.Notifier{WebhookURL: srv.URL}
+		handler := newMergeGateErrorHandler(cfg, notifier)
+
+		handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, prURL, "", errors.New("gh pr merge: some failure"))
+
+		got := waitForAlert(t, alerts)
+		want := fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit an error in the review/CI merge-gate loop -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, "task-1", "repo-a", prURL)
+		if got.content != want {
+			t.Errorf("message = %q, want %q (byte-identical, unchanged)", got.content, want)
+		}
+	})
 }
 
 // TestRegisteredEngineNamesIncludesPi confirms GET /status/tasks (which
