@@ -18,10 +18,33 @@ type fakeMergeGateOps struct {
 	// ciConclusion is returned by every WaitForCI call.
 	ciConclusion string
 
+	// prStates[i] is what PRState returns on its i-th call (0-indexed); if
+	// there are fewer entries than calls actually made, the last one
+	// repeats. Defaults to "OPEN" (via prState()) when empty, so every
+	// existing test that never sets this keeps behaving exactly as before.
+	prStates   []string
+	prStateErr error
+
 	reviewCalls   []int
 	resumeCalls   []string
 	mergeCalls    int
 	roundLimitHit int
+	prStateCalls  int
+}
+
+func (f *fakeMergeGateOps) PRState() (string, error) {
+	f.prStateCalls++
+	if f.prStateErr != nil {
+		return "", f.prStateErr
+	}
+	if len(f.prStates) == 0 {
+		return "OPEN", nil
+	}
+	i := f.prStateCalls - 1
+	if i >= len(f.prStates) {
+		i = len(f.prStates) - 1
+	}
+	return f.prStates[i], nil
 }
 
 func (f *fakeMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
@@ -137,7 +160,8 @@ func (f *flakyCIOps) ResumeWithFeedback(text string) error {
 	f.resumeCalls = append(f.resumeCalls, text)
 	return nil
 }
-func (f *flakyCIOps) AlertRoundLimitHit() {}
+func (f *flakyCIOps) AlertRoundLimitHit()      {}
+func (f *flakyCIOps) PRState() (string, error) { return "OPEN", nil }
 
 // TestMergeGateLoopExhaustsRoundLimit is Phase 11's third test gate:
 // forced round exhaustion leaves the PR open (no Merge call) with a "hit
@@ -156,5 +180,80 @@ func TestMergeGateLoopExhaustsRoundLimit(t *testing.T) {
 	}
 	if ops.roundLimitHit != 1 {
 		t.Errorf("AlertRoundLimitHit called %d times, want exactly 1", ops.roundLimitHit)
+	}
+}
+
+// TestMergeGateLoopDetectsOutsideMergeBeforeFirstReview covers RBG-40 /
+// TFO-10: if the PR is already MERGED (or CLOSED) before the loop's first
+// review, the loop must stop immediately -- no review, no CI wait, no
+// merge -- and return an error matching ErrMergedOutsideGate.
+func TestMergeGateLoopDetectsOutsideMergeBeforeFirstReview(t *testing.T) {
+	for _, state := range []string{"MERGED", "CLOSED"} {
+		t.Run(state, func(t *testing.T) {
+			ops := &fakeMergeGateOps{
+				verdicts:     []ReviewVerdict{VerdictApprove},
+				ciConclusion: "success",
+				prStates:     []string{state},
+			}
+			err := RunMergeGateLoop(ops)
+			if !errors.Is(err, ErrMergedOutsideGate) {
+				t.Fatalf("RunMergeGateLoop error = %v, want ErrMergedOutsideGate", err)
+			}
+			if len(ops.reviewCalls) != 0 {
+				t.Errorf("reviewCalls = %v, want none", ops.reviewCalls)
+			}
+			if ops.mergeCalls != 0 {
+				t.Errorf("mergeCalls = %d, want 0", ops.mergeCalls)
+			}
+			if len(ops.resumeCalls) != 0 {
+				t.Errorf("resumeCalls = %v, want none", ops.resumeCalls)
+			}
+		})
+	}
+}
+
+// TestMergeGateLoopDetectsOutsideMergeBeforeMerge covers the resumed-
+// coding-session case: the PR is OPEN when the loop starts (review and CI
+// both run normally) but has been merged by the time the loop is about to
+// call Merge() itself -- the loop must re-check PRState right before
+// Merge() and never call it.
+func TestMergeGateLoopDetectsOutsideMergeBeforeMerge(t *testing.T) {
+	ops := &fakeMergeGateOps{
+		verdicts:     []ReviewVerdict{VerdictApprove},
+		ciConclusion: "success",
+		prStates:     []string{"OPEN", "MERGED"},
+	}
+	err := RunMergeGateLoop(ops)
+	if !errors.Is(err, ErrMergedOutsideGate) {
+		t.Fatalf("RunMergeGateLoop error = %v, want ErrMergedOutsideGate", err)
+	}
+	if ops.mergeCalls != 0 {
+		t.Errorf("mergeCalls = %d, want 0 (never merged)", ops.mergeCalls)
+	}
+	if len(ops.reviewCalls) != 1 {
+		t.Errorf("reviewCalls = %v, want exactly 1 (review did run before the pre-merge check)", ops.reviewCalls)
+	}
+}
+
+// TestMergeGateLoopPRStateErrorIsOrdinaryLoopError confirms a PRState
+// error surfaces as a plain loop error, not one matching
+// ErrMergedOutsideGate -- the two must stay distinguishable so the alert
+// wiring (cmd/pmrunner/runner_mode.go) doesn't send the outside-merge
+// message for a plain gh/network failure.
+func TestMergeGateLoopPRStateErrorIsOrdinaryLoopError(t *testing.T) {
+	ops := &fakeMergeGateOps{
+		verdicts:     []ReviewVerdict{VerdictApprove},
+		ciConclusion: "success",
+		prStateErr:   errors.New("gh pr view: network error"),
+	}
+	err := RunMergeGateLoop(ops)
+	if err == nil {
+		t.Fatal("RunMergeGateLoop error = nil, want a loop error")
+	}
+	if errors.Is(err, ErrMergedOutsideGate) {
+		t.Errorf("RunMergeGateLoop error = %v, want it NOT to match ErrMergedOutsideGate", err)
+	}
+	if ops.mergeCalls != 0 {
+		t.Errorf("mergeCalls = %d, want 0", ops.mergeCalls)
 	}
 }

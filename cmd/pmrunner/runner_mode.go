@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -116,11 +117,7 @@ func runRunner(cfg *config.Config) {
 				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit the review/CI round limit without merging -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
 				job.Slug+"-round-limit.md", fmt.Sprintf("# Merge-gate round limit hit\n\n- PR: %s\n- Repo: %s\n\nThe review/CI loop used all %d rounds without a clean merge. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, runner.MaxMergeGateRounds))
 		},
-		OnMergeGateError: func(job worker.Job, prURL, discordThreadID string, err error) {
-			notifier.Send(job.NotePath, discordThreadID,
-				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit an error in the review/CI merge-gate loop -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
-				job.Slug+"-mergegate-error.md", fmt.Sprintf("# Merge-gate loop error\n\n- PR: %s\n- Repo: %s\n- Error: %v\n\nThe review/CI loop ended with an error before reaching a clean merge or exhausting its round budget. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, err))
-		},
+		OnMergeGateError: newMergeGateErrorHandler(cfg, notifier),
 	}
 
 	globalSlots := worker.NewGlobalSlots(cfg.GlobalSlots)
@@ -276,6 +273,27 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr
 			msg += usageLimitPauseNote(engineName, usageLimit)
 		}
 		notifier.Send(job.NotePath, discordThreadID, msg, job.Slug+".md", "# Task "+status+"\n\n"+workLog+"\n")
+	}
+}
+
+// newMergeGateErrorHandler builds Deps.OnMergeGateError: every non-round-
+// limit merge-gate loop error gets the same "PR is still open" message,
+// except errors.Is(err, runner.ErrMergedOutsideGate) -- TFO-10's incident,
+// where a coding session merged (or closed) the PR itself before the
+// gate's review/CI ever ran, so "still open" would be false. That case
+// gets its own message instead: the review and CI gate were skipped, and
+// a human must check the merged change and its deploy.
+func newMergeGateErrorHandler(cfg *config.Config, notifier *notify.Notifier) func(job worker.Job, prURL, discordThreadID string, err error) {
+	return func(job worker.Job, prURL, discordThreadID string, err error) {
+		if errors.Is(err, runner.ErrMergedOutsideGate) {
+			notifier.Send(job.NotePath, discordThreadID,
+				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) PR %s was merged or closed outside the merge gate -- the review and CI gate were skipped, a human must check the merged change and its deploy.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
+				job.Slug+"-mergegate-error.md", fmt.Sprintf("# Merge-gate loop error\n\n- PR: %s\n- Repo: %s\n- Error: %v\n\nThe PR was merged or closed outside the merge gate -- the review and CI gate were skipped, a human must check the merged change and its deploy.\n", prURL, job.Repo, err))
+			return
+		}
+		notifier.Send(job.NotePath, discordThreadID,
+			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) hit an error in the review/CI merge-gate loop -- PR is still open at %s, needs a human's judgment.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, prURL),
+			job.Slug+"-mergegate-error.md", fmt.Sprintf("# Merge-gate loop error\n\n- PR: %s\n- Repo: %s\n- Error: %v\n\nThe review/CI loop ended with an error before reaching a clean merge or exhausting its round budget. The PR is left open; status stays \"done\" in the vault note.\n", prURL, job.Repo, err))
 	}
 }
 
