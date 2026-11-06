@@ -90,6 +90,7 @@ func runRunner(cfg *config.Config) {
 		Repos:               cfg.Repos,
 		EngineRegistry:      engineRegistry,
 		ReviewEngineDefault: cfg.ReviewEngine,
+		PlanEngineDefault:   cfg.PlanEngine,
 		IdleTimeout:         time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
 		PostClaim:           postClaim,
 		Pause:               pauseState,

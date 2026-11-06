@@ -32,6 +32,11 @@ type RepoConfig struct {
 	// repo that doesn't pin its own `review_engine:` -- "" means no
 	// repo-level override, fall through to REVIEW_ENGINE.
 	ReviewEngine string `json:"review_engine"`
+
+	// PlanEngine overrides PLAN_ENGINE for every task onboarded to this
+	// repo that doesn't pin its own `plan_engine:` -- "" means no
+	// repo-level override, fall through to PLAN_ENGINE.
+	PlanEngine string `json:"plan_engine"`
 }
 
 // Config is the fully loaded, validated configuration for either run mode.
@@ -75,6 +80,13 @@ type Config struct {
 	// a task can code with one engine and be reviewed by another. Optional,
 	// defaults to "claude".
 	ReviewEngine string
+
+	// PlanEngine is the engine that runs a task's planner session when
+	// neither the task note's `plan_engine:` nor its repo's "plan_engine"
+	// is set. Resolved independently of DefaultEngine and ReviewEngine --
+	// a task can be planned, coded, and reviewed by three different
+	// engines. Optional, defaults to "claude".
+	PlanEngine string
 
 	// PiBin is the pi CLI's path/name, passed to engine.NewPi. Optional,
 	// defaults to "pi" (resolved via PATH).
@@ -253,10 +265,11 @@ func loadRepos(path string) (map[string]RepoConfig, error) {
 // explicit -- callers (main.go) resolve them from flags/env/defaults, config
 // itself has no opinion on discovery. knownEngines names every engine
 // registered in the running binary (see cmd/pmrunner/runner_mode.go's
-// registeredEngineNames) -- DEFAULT_ENGINE, REVIEW_ENGINE, and every
-// repo's "engine"/"review_engine" must each name one of these, or Load
-// fails with a clear error rather than letting an unrecognized engine
-// name surface only once a task actually tries to run.
+// registeredEngineNames) -- DEFAULT_ENGINE, REVIEW_ENGINE, PLAN_ENGINE,
+// and every repo's "engine"/"review_engine"/"plan_engine" must each name
+// one of these, or Load fails with a clear error rather than letting an
+// unrecognized engine name surface only once a task actually tries to
+// run.
 func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	raw, err := parseEnvFile(envPath)
 	if err != nil {
@@ -269,6 +282,7 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 		DefaultEngine:                defaultEngineName,
 		ClaudeBin:                    defaultClaudeBin,
 		ReviewEngine:                 defaultEngineName,
+		PlanEngine:                   defaultEngineName,
 		PiBin:                        defaultPiBin,
 		PiSessionDir:                 filepath.Join(filepath.Dir(envPath), defaultPiSessionDirName),
 		PiStartupTimeoutSeconds:      defaultPiStartupTimeoutSeconds,
@@ -316,6 +330,9 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	if v, ok := raw["REVIEW_ENGINE"]; ok && v != "" {
 		cfg.ReviewEngine = v
 	}
+	if v, ok := raw["PLAN_ENGINE"]; ok && v != "" {
+		cfg.PlanEngine = v
+	}
 	if v, ok := raw["PI_BIN"]; ok && v != "" {
 		cfg.PiBin = v
 	}
@@ -360,9 +377,10 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 }
 
 // validateEngineNames fails Load with a clear error if DEFAULT_ENGINE,
-// REVIEW_ENGINE, or any repo's "engine"/"review_engine" names an engine
-// that isn't in knownEngines -- catching a typo at startup instead of
-// letting it surface only once a task actually tries to run.
+// REVIEW_ENGINE, PLAN_ENGINE, or any repo's
+// "engine"/"review_engine"/"plan_engine" names an engine that isn't in
+// knownEngines -- catching a typo at startup instead of letting it
+// surface only once a task actually tries to run.
 func validateEngineNames(cfg *Config, knownEngines []string) error {
 	known := make(map[string]bool, len(knownEngines))
 	for _, n := range knownEngines {
@@ -376,12 +394,18 @@ func validateEngineNames(cfg *Config, knownEngines []string) error {
 	if !known[cfg.ReviewEngine] {
 		return fmt.Errorf("config: REVIEW_ENGINE %q is not a registered engine (known: %s)", cfg.ReviewEngine, list)
 	}
+	if !known[cfg.PlanEngine] {
+		return fmt.Errorf("config: PLAN_ENGINE %q is not a registered engine (known: %s)", cfg.PlanEngine, list)
+	}
 	for key, r := range cfg.Repos {
 		if r.Engine != "" && !known[r.Engine] {
 			return fmt.Errorf("config: repo %q field \"engine\" %q is not a registered engine (known: %s)", key, r.Engine, list)
 		}
 		if r.ReviewEngine != "" && !known[r.ReviewEngine] {
 			return fmt.Errorf("config: repo %q field \"review_engine\" %q is not a registered engine (known: %s)", key, r.ReviewEngine, list)
+		}
+		if r.PlanEngine != "" && !known[r.PlanEngine] {
+			return fmt.Errorf("config: repo %q field \"plan_engine\" %q is not a registered engine (known: %s)", key, r.PlanEngine, list)
 		}
 	}
 	return nil

@@ -138,6 +138,21 @@ func TestLoadPiReviewModelDefaultsToPiModelWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadPlanEngineDefault(t *testing.T) {
+	envPath, reposPath := writeConfigFiles(t, baseEnv, baseRepos)
+	cfg, err := Load(envPath, reposPath, []string{"claude"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PlanEngine != "claude" {
+		t.Errorf("PlanEngine = %q, want %q", cfg.PlanEngine, "claude")
+	}
+	repo := cfg.Repos["repo-a"]
+	if repo.PlanEngine != "" {
+		t.Errorf("repo-a PlanEngine = %q, want empty when unset", repo.PlanEngine)
+	}
+}
+
 // TestLoadDefaultsJevKeysWhenUnset covers RBG-43's config defaults:
 // TYPESAFE_API_KEY defaults to "", JEV_MODEL defaults to "jev-latest".
 func TestLoadDefaultsJevKeysWhenUnset(t *testing.T) {
@@ -186,6 +201,24 @@ func TestLoadRejectsUnknownReviewEngine(t *testing.T) {
 	_, err := Load(envPath, reposPath, []string{"claude"})
 	if err == nil {
 		t.Fatal("Load: want an error for an unregistered REVIEW_ENGINE, got nil")
+	}
+}
+
+func TestLoadRejectsUnknownPlanEngine(t *testing.T) {
+	env := baseEnv + "PLAN_ENGINE=nope\n"
+	envPath, reposPath := writeConfigFiles(t, env, baseRepos)
+	_, err := Load(envPath, reposPath, []string{"claude"})
+	if err == nil {
+		t.Fatal("Load: want an error for an unregistered PLAN_ENGINE, got nil")
+	}
+}
+
+func TestLoadRejectsUnknownRepoPlanEngine(t *testing.T) {
+	repos := `{"repo-a": {"path": "/tmp/repo-a", "remote": "git@example.com:a.git", "default_branch": "main", "plan_engine": "nope"}}`
+	envPath, reposPath := writeConfigFiles(t, baseEnv, repos)
+	_, err := Load(envPath, reposPath, []string{"claude"})
+	if err == nil {
+		t.Fatal("Load: want an error for an unregistered repo \"plan_engine\", got nil")
 	}
 }
 

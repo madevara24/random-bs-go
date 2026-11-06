@@ -40,6 +40,25 @@ func TestReview(t *testing.T) {
 	}
 }
 
+func TestPlanPrecedence(t *testing.T) {
+	cases := []struct {
+		name                                 string
+		notePlanEngine, repoPlanEngine, dflt string
+		want                                 string
+	}{
+		{"note pin wins over everything", "pinned-plan", "repo-plan", "default-plan", "pinned-plan"},
+		{"repo default wins when note unset", "", "repo-plan", "default-plan", "repo-plan"},
+		{"global default when both unset", "", "", "default-plan", "default-plan"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Plan(c.notePlanEngine, c.repoPlanEngine, c.dflt); got != c.want {
+				t.Errorf("Plan(%q, %q, %q) = %q, want %q", c.notePlanEngine, c.repoPlanEngine, c.dflt, got, c.want)
+			}
+		})
+	}
+}
+
 // TestCodingAndReviewAreIndependent confirms the two roles never leak into
 // each other -- a task coded with one engine can be reviewed by a
 // completely different one.
