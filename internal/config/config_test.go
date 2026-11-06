@@ -153,6 +153,39 @@ func TestLoadPlanEngineDefault(t *testing.T) {
 	}
 }
 
+// TestLoadDefaultsJevKeysWhenUnset covers RBG-43's config defaults:
+// TYPESAFE_API_KEY defaults to "", JEV_MODEL defaults to "jev-latest".
+func TestLoadDefaultsJevKeysWhenUnset(t *testing.T) {
+	envPath, reposPath := writeConfigFiles(t, baseEnv, baseRepos)
+	cfg, err := Load(envPath, reposPath, []string{"claude"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TypesafeAPIKey != "" {
+		t.Errorf("TypesafeAPIKey = %q, want empty", cfg.TypesafeAPIKey)
+	}
+	if cfg.JevModel != "jev-latest" {
+		t.Errorf("JevModel = %q, want %q", cfg.JevModel, "jev-latest")
+	}
+}
+
+// TestLoadHonorsJevKeysWhenSet confirms TYPESAFE_API_KEY/JEV_MODEL
+// override their defaults when set.
+func TestLoadHonorsJevKeysWhenSet(t *testing.T) {
+	env := baseEnv + "TYPESAFE_API_KEY=sk-test-key\nJEV_MODEL=jev-2026-01\n"
+	envPath, reposPath := writeConfigFiles(t, env, baseRepos)
+	cfg, err := Load(envPath, reposPath, []string{"claude"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TypesafeAPIKey != "sk-test-key" {
+		t.Errorf("TypesafeAPIKey = %q, want the configured key", cfg.TypesafeAPIKey)
+	}
+	if cfg.JevModel != "jev-2026-01" {
+		t.Errorf("JevModel = %q, want %q", cfg.JevModel, "jev-2026-01")
+	}
+}
+
 func TestLoadRejectsUnknownDefaultEngine(t *testing.T) {
 	env := baseEnv + "DEFAULT_ENGINE=nope\n"
 	envPath, reposPath := writeConfigFiles(t, env, baseRepos)
