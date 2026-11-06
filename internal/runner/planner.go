@@ -71,8 +71,10 @@ func validatePlanUnits(units []notetask.PlanUnit) error {
 // the note-copy, exactly like a coding run (same invokeEngine, same
 // usage-limit trip), retrying on an unusable plan up to maxPlanRounds
 // before blocking the task. A valid plan is merged into the real note and
-// handed to runPlanGate.
-func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig) error {
+// handed to runPlanGate. branchName/codingEng/reviewEng are threaded
+// through purely to reach runUnitLoop once a plan clears the gate -- the
+// planner engine itself is resolved independently, right below.
+func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, branchName string, codingEng, reviewEng engine.Engine) error {
 	registry := deps.engineRegistry()
 	planEngineName := resolvePlanEngineName(note, repoCfg, deps.planEngineDefault())
 	planEng, err := lookupEngine(registry, planEngineName)
@@ -99,13 +101,33 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 		}
 
 		prompt := buildPlannerPrompt(note, copyName, round)
-		_, _, exitErr := invokeEngine(planEng, repoCfg.Path, prompt, "", deps.idleTimeout(), reporter)
+		_, stderrTail, exitErr := invokeEngine(planEng, repoCfg.Path, prompt, "", deps.idleTimeout(), reporter)
 
 		var usageLimitErr *engine.UsageLimitError
 		if errors.As(exitErr, &usageLimitErr) {
+			// Stop the round loop here rather than falling through to the
+			// plan-parse check below: that check would find no usable plan
+			// (the engine never got a chance to write one), increment
+			// plan_round, and immediately re-run the planner while this
+			// engine is still paused -- burning all maxPlanRounds attempts
+			// near-instantly instead of actually waiting for the limit to
+			// clear. Block through the same path a crashed coding
+			// invocation would (ScenarioUsageLimit), which also registers
+			// this note for main.go's auto-resume once the limit resets.
 			if deps.Pause != nil {
 				deps.Pause.Trip(planEngineName, pause.ReasonUsageLimit, usageLimitErr.ResetsAt)
 			}
+			return handleCrashFallback(deps, job, crashInfo{
+				scenario:        ScenarioUsageLimit,
+				stage:           "planner",
+				exitErr:         exitErr,
+				stderrTail:      stderrTail,
+				repoPath:        repoCfg.Path,
+				branchName:      branchName,
+				engineName:      planEngineName,
+				discordThreadID: threadIDOf(note),
+				usageLimit:      usageLimitInfoOf(usageLimitErr),
+			})
 		}
 
 		copyAfter, copyErr := readNoteCopy(copyPath)
@@ -156,7 +178,7 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 			return fmt.Errorf("runner: re-reading note after plan write for %s: %w", job.NotePath, err)
 		}
 
-		return runPlanGate(deps, job, note, repoCfg, units, questions)
+		return runPlanGate(deps, reporter, job, note, repoCfg, units, questions, branchName, codingEng, reviewEng)
 	}
 }
 
@@ -213,12 +235,14 @@ func gateLogLine(askErr error, answers map[string]jev.Answer, plannerQuestionIDs
 // validated cleanly, whether it can run straight on or must wait for a
 // human: plangate.HardRules plus one Jev call against
 // plangate.GateQuestions. No stop seeds `units` (one pending entry per
-// plan unit, same order) and sets current_unit to the first id, ready for
-// the next task's unit loop. A stop posts the full Plan for human review
-// via notify.PostToThread, records the returned message id, appends a
-// fresh "### Round <n>" heading to Plan Review, and flips status to
-// plan_review -- the task's slot frees as ProcessTask returns right after.
-func runPlanGate(deps Deps, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, units []notetask.PlanUnit, questions map[string]notetask.PlanQuestion) error {
+// plan unit, same order), sets current_unit to the first id, and hands
+// straight into runUnitLoop -- there's no reason to wait for a separate
+// ProcessTask run once the gate has already cleared. A stop posts the
+// full Plan for human review via notify.PostToThread, records the
+// returned message id, appends a fresh "### Round <n>" heading to Plan
+// Review, and flips status to plan_review -- the task's slot frees as
+// ProcessTask returns right after.
+func runPlanGate(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, units []notetask.PlanUnit, questions map[string]notetask.PlanQuestion, branchName string, codingEng, reviewEng engine.Engine) error {
 	hard := plangate.HardRules(units)
 
 	plannerQuestions := plannerQuestionsToJev(questions)
@@ -240,7 +264,10 @@ func runPlanGate(deps Deps, job worker.Job, note *notetask.Note, repoCfg config.
 	logLine := oneLine(gateLogLine(askErr, answers, plannerQuestionIDs, result.Stop), oneLineMaxRunes)
 
 	if !result.Stop {
-		return seedUnits(deps, job, units, logLine)
+		if err := seedUnits(deps, job, units, logLine); err != nil {
+			return err
+		}
+		return runUnitLoop(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)
 	}
 	return stopForPlanReview(deps, job, note, repoCfg, result, logLine)
 }

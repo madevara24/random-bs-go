@@ -101,7 +101,17 @@ func (f *fakePlannerEngine) ClassifyExit(waitErr error, stderrTail string, state
 
 func (f *fakePlannerEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("true") }
 
-func (f *fakePlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+// ParseReviewAnswer always approves -- fakePlannerEngine is reused as the
+// unit loop's coding/review engine (via processMultiUnit's hook-in,
+// RBG-45) whenever a test's registry only registers one engine under
+// "claude", since that's every one of coding/review/plan's default
+// resolution. A planner-shaped fake has no way to make real commits per
+// round, so an always-CONCERNS answer would never let a unit's review
+// resolve -- always-APPROVE instead lets these tests reach a clean
+// terminal state without needing a second, dedicated fake per test.
+func (f *fakePlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) {
+	return "VERDICT: APPROVE\n\nfake planner engine always approves.", nil
+}
 
 func (f *fakePlannerEngine) StartupTimeout() time.Duration { return 0 }
 

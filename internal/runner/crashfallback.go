@@ -85,6 +85,17 @@ const ScenarioPreserveFailure Scenario = 6
 // what actually happened here.
 const ScenarioPlannerFailure Scenario = 7
 
+// ScenarioUnitLoopBlocked: a multi-unit task's unit loop (RBG-45,
+// internal/runner/unitloop.go) couldn't continue a unit -- its own
+// per-unit review-round cap or the task-wide round budget was hit, the
+// coding session's note-copy never showed up or failed to parse, or the
+// session itself self-reported status: blocked. Distinct from
+// ScenarioUsageLimit, which the unit loop also uses (for a coding or
+// review engine's usage limit tripping mid-loop) and which gets the
+// auto-resume registration this scenario doesn't -- see
+// unitloop.go's blockUnitTask.
+const ScenarioUnitLoopBlocked Scenario = 8
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -103,6 +114,8 @@ func (s Scenario) String() string {
 		return "preserve_failure"
 	case ScenarioPlannerFailure:
 		return "planner_failure"
+	case ScenarioUnitLoopBlocked:
+		return "unit_loop_blocked"
 	default:
 		return "unknown"
 	}

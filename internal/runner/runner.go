@@ -453,7 +453,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// read, for a resume), gated on the flag so a flag-off run never takes
 	// this branch regardless of what the note's own multi_unit says.
 	if deps.MultiUnitEnabled && note.Frontmatter.MultiUnit != nil && *note.Frontmatter.MultiUnit {
-		return processMultiUnit(deps, reporter, job, note, repoCfg)
+		return processMultiUnit(deps, reporter, job, note, repoCfg, branchName, codingEng, reviewEng)
 	}
 
 	prompt := buildPrompt(note, copyName, resume, repoCfg.DefaultBranch, branchName, localOnlyResume)
