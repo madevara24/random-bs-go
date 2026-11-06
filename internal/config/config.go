@@ -103,6 +103,16 @@ type Config struct {
 	// 90.
 	PiStartupTimeoutSeconds int
 
+	// TypesafeAPIKey is the bearer key for Jev (TypeSafe's judgment
+	// model), passed to jev.Client. Optional, defaults to "" -- an empty
+	// key means jev.Client.Ask returns jev.ErrNoAPIKey without making a
+	// request. Never logged or included in an error.
+	TypesafeAPIKey string
+
+	// JevModel is the "model" field sent on every Jev request. Optional,
+	// defaults to "jev-latest".
+	JevModel string
+
 	// From repos.json
 	Repos map[string]RepoConfig
 
@@ -172,6 +182,9 @@ const defaultPiSessionDirName = "pi-sessions"
 // defaultPiStartupTimeoutSeconds is PI_STARTUP_TIMEOUT_SECONDS's default
 // when unset.
 const defaultPiStartupTimeoutSeconds = 90
+
+// defaultJevModel is JEV_MODEL's default when unset.
+const defaultJevModel = "jev-latest"
 
 // parseEnvFile reads a simple KEY=VALUE .env file: blank lines and lines
 // starting with '#' are ignored, no quoting/escaping support (matches the
@@ -259,6 +272,7 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 		PiBin:                        defaultPiBin,
 		PiSessionDir:                 filepath.Join(filepath.Dir(envPath), defaultPiSessionDirName),
 		PiStartupTimeoutSeconds:      defaultPiStartupTimeoutSeconds,
+		JevModel:                     defaultJevModel,
 		EnvPath:                      envPath,
 		ReposPath:                    reposPath,
 	}
@@ -323,6 +337,13 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	cfg.PiReviewModel = cfg.PiModel
 	if v, ok := raw["PI_REVIEW_MODEL"]; ok && v != "" {
 		cfg.PiReviewModel = v
+	}
+
+	if v, ok := raw["TYPESAFE_API_KEY"]; ok && v != "" {
+		cfg.TypesafeAPIKey = v
+	}
+	if v, ok := raw["JEV_MODEL"]; ok && v != "" {
+		cfg.JevModel = v
 	}
 
 	repos, err := loadRepos(reposPath)
