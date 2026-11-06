@@ -287,7 +287,20 @@ func TestTriageLargeGoesMultiUnit(t *testing.T) {
 		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName := "task/" + slug
 	cleanupTaskBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	// A clear gate pass seeds units and runs the unit loop to completion
+	// (fakePlannerEngine always approves its own review, verify is "true"),
+	// which also reaches this task's finish step (RBG-46): a fake `gh`
+	// stands in for the real GitHub-hosted remote testTargetRepoPath
+	// doesn't have.
+	binDir := t.TempDir()
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), "https://github.com/fake-owner/fake-repo/pull/1")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
@@ -462,5 +475,168 @@ func TestResumeNeverRetriages(t *testing.T) {
 
 	if got := jevHits.Load(); got != 0 {
 		t.Errorf("Jev was hit %d times on a resume, want 0", got)
+	}
+}
+
+// writeFakeGhPRCreate writes an executable fake `gh` script that answers
+// `gh pr create` by appending one static "call" line to logPath (a plain
+// invocation counter -- the real --body argument can itself contain
+// embedded newlines, which would otherwise corrupt a line-count check) and
+// echoing prURL (gh pr create's own real behavior: print the new PR's URL,
+// and nothing else, to stdout) -- any other invocation fails loudly so a
+// test using this notices if it ever calls gh for anything else.
+func writeFakeGhPRCreate(t *testing.T, path, logPath, prURL string) {
+	t.Helper()
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo call >> %q
+  echo %q
+  exit 0
+fi
+echo "fake gh: unexpected invocation: $*" >&2
+exit 1
+`, logPath, prURL)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake gh script: %v", err)
+	}
+}
+
+// writeFakeGhPRCreateFails is writeFakeGhPRCreate's failure counterpart --
+// `gh pr create` exits 1 (TestOpenPRFailureBlocks' subject), any other
+// invocation also fails loudly.
+func writeFakeGhPRCreateFails(t *testing.T, path string) {
+	t.Helper()
+	script := `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "fake gh: pr create deliberately fails" >&2
+  exit 1
+fi
+echo "fake gh: unexpected invocation: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake gh script: %v", err)
+	}
+}
+
+// TestMultiUnitDoneOpensOnePR confirms that once every unit in a
+// multi-unit task reaches done, runUnitLoopAndFinish opens exactly one PR
+// (git push then `gh pr create`, see multiunit.go's openTaskPR) and the
+// vault note ends status: done with that PR's URL.
+func TestMultiUnitDoneOpensOnePR(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "multiunit-donepr-" + run
+
+	units := []notetask.UnitState{
+		{ID: "U1", Status: notetask.UnitStatusPending},
+		{ID: "U2", Status: notetask.UnitStatusPending},
+	}
+	v, relPath := seedUnitLoopNote(t, slug, twoUnitPlan, units, "U1")
+	branchName, _ := setupUnitLoopBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "gh-calls.log")
+	fakePRURL := "https://github.com/fake-owner/fake-repo/pull/99"
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), logPath, fakePRURL)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	codingEng := &fakeUnitCodingEngine{copyName: copyFileName(slug)}
+	reviewEng := &fakeUnitReviewEngine{verdicts: []string{"VERDICT: APPROVE\n\nfine."}}
+
+	deps := Deps{Vault: v, Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()}}
+	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+	if err := runUnitLoopAndFinish(deps, noopReporter{}, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng); err != nil {
+		t.Fatalf("runUnitLoopAndFinish: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading gh call log: %v", err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	if len(calls) != 1 {
+		t.Errorf("gh pr create called %d time(s), want exactly 1: %q", len(calls), logData)
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "done" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "done")
+	}
+	if noteAfter.Frontmatter.PRURL == nil || *noteAfter.Frontmatter.PRURL != fakePRURL {
+		t.Errorf("pr_url = %v, want %q", noteAfter.Frontmatter.PRURL, fakePRURL)
+	}
+}
+
+// TestOpenPRFailureBlocks confirms that a `gh pr create` failure after
+// every unit is done blocks the task (not a crash scenario of any other
+// kind), fires the usual alert, and leaves the branch preserved -- the
+// git push openTaskPR does before gh pr create already landed the unit
+// loop's work on origin, so there's nothing left to lose.
+func TestOpenPRFailureBlocks(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "multiunit-prfail-" + run
+
+	units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusPending}}
+	v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "U1")
+	branchName, _ := setupUnitLoopBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGhPRCreateFails(t, filepath.Join(binDir, "gh"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	codingEng := &fakeUnitCodingEngine{copyName: copyFileName(slug)}
+	reviewEng := &fakeUnitReviewEngine{verdicts: []string{"VERDICT: APPROVE\n\nfine."}}
+
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault: v,
+		Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+	err := runUnitLoopAndFinish(deps, noopReporter{}, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng)
+	if err == nil {
+		t.Fatal("runUnitLoopAndFinish returned nil error, want an error when gh pr create fails")
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.Scenario != ScenarioOpenPRFailure {
+		t.Errorf("alert scenario = %v, want %v", gotAlert.Scenario, ScenarioOpenPRFailure)
+	}
+	if gotAlert.PreserveErr != "" {
+		t.Errorf("PreserveErr = %q, want the branch to have been preserved cleanly", gotAlert.PreserveErr)
+	}
+
+	if err := exec.Command("git", "-C", testTargetRepoPath, "fetch", "origin", branchName).Run(); err != nil {
+		t.Errorf("branch %s not preserved on origin: %v", branchName, err)
 	}
 }

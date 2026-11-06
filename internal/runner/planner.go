@@ -267,7 +267,7 @@ func runPlanGate(deps Deps, reporter ActivityReporter, job worker.Job, note *not
 		if err := seedUnits(deps, job, units, logLine); err != nil {
 			return err
 		}
-		return runUnitLoop(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)
+		return runUnitLoopAndFinish(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)
 	}
 	return stopForPlanReview(deps, job, note, repoCfg, result, logLine)
 }

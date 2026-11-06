@@ -50,6 +50,21 @@ type GhMergeGateOps struct {
 	// own bound against a hang. Defaults to 5 minutes if zero.
 	ReviewTimeout time.Duration
 
+	// IntegrationCheck, set only by the multi-unit finish path (see
+	// multiunit.go's finishMultiUnitTask), swaps RunReview's prompt from
+	// the whole-diff review every single-session task gets to
+	// buildIntegrationPrompt's: the PR body, a `git diff --stat`, and
+	// Handoff below -- never the full diff, which can be too large for one
+	// review session to hold once several units' worth of changes are
+	// combined into it. false (the default) leaves RunReview's behavior
+	// byte-identical to before this field existed.
+	IntegrationCheck bool
+
+	// Handoff is the multi-unit task's full `## Handoff` text -- every
+	// unit's own "what changed, interfaces later units rely on" entry,
+	// concatenated in plan order. Only read when IntegrationCheck is true.
+	Handoff string
+
 	// headRef caches the PR's actual head branch name, resolved once from
 	// PRURL via `gh pr view --json headRefName` -- needed anywhere a real
 	// git ref is required (gh run list --branch, gitDiff), since PRURL
@@ -117,22 +132,36 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("resolving head branch: %w", err)
 	}
-	diff, err := gitDiff(g.RepoPath, g.DefaultBranch, branch)
-	if err != nil {
-		return "", "", fmt.Errorf("fetching diff: %w", err)
-	}
 
-	var priorComments string
-	if round > 0 {
-		// Best-effort -- reading the thread failing shouldn't block the
-		// review itself, it just loses this round's "was my feedback
-		// addressed" framing.
-		priorComments, _ = fetchPRComments(g.RepoPath, g.PRURL)
-	}
+	var verdict ReviewVerdict
+	var feedback string
+	if g.IntegrationCheck {
+		diffStat, err := gitDiffStat(g.RepoPath, g.DefaultBranch, branch)
+		if err != nil {
+			return "", "", fmt.Errorf("fetching diff stat: %w", err)
+		}
+		verdict, feedback, err = reviewIntegrationOnce(g.reviewEngine(), g.RepoPath, g.reviewTimeout(), prBody, diffStat, g.Handoff)
+		if err != nil {
+			return "", "", err
+		}
+	} else {
+		diff, err := gitDiff(g.RepoPath, g.DefaultBranch, branch)
+		if err != nil {
+			return "", "", fmt.Errorf("fetching diff: %w", err)
+		}
 
-	verdict, feedback, err := reviewOnce(g.reviewEngine(), g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
-	if err != nil {
-		return "", "", err
+		var priorComments string
+		if round > 0 {
+			// Best-effort -- reading the thread failing shouldn't block the
+			// review itself, it just loses this round's "was my feedback
+			// addressed" framing.
+			priorComments, _ = fetchPRComments(g.RepoPath, g.PRURL)
+		}
+
+		verdict, feedback, err = reviewOnce(g.reviewEngine(), g.RepoPath, g.reviewTimeout(), round, prBody, diff, priorComments)
+		if err != nil {
+			return "", "", err
+		}
 	}
 
 	// Post the verdict as a real PR comment -- best-effort: a comment-post
@@ -162,7 +191,22 @@ func (g *GhMergeGateOps) RunReview(round int) (ReviewVerdict, string, error) {
 // coding session's idle watchdog guards against) if it outlives timeout.
 func reviewOnce(eng engine.Engine, repoPath string, timeout time.Duration, round int, prBody, diff, priorComments string) (ReviewVerdict, string, error) {
 	prompt := buildReviewPrompt(round, prBody, diff, priorComments)
+	return runReviewPrompt(eng, repoPath, timeout, prompt)
+}
 
+// reviewIntegrationOnce is reviewOnce's multi-unit counterpart: same
+// invocation + verdict parsing, built from buildIntegrationPrompt's prompt
+// instead of buildReviewPrompt's -- see GhMergeGateOps.IntegrationCheck.
+func reviewIntegrationOnce(eng engine.Engine, repoPath string, timeout time.Duration, prBody, diffStat, handoff string) (ReviewVerdict, string, error) {
+	prompt := buildIntegrationPrompt(prBody, diffStat, handoff)
+	return runReviewPrompt(eng, repoPath, timeout, prompt)
+}
+
+// runReviewPrompt is reviewOnce/reviewIntegrationOnce's shared invocation
+// body: start eng's review command with prompt, enforce timeout, and parse
+// the verdict -- the actual mechanics, generic over whichever prompt the
+// caller built.
+func runReviewPrompt(eng engine.Engine, repoPath string, timeout time.Duration, prompt string) (ReviewVerdict, string, error) {
 	cmd := eng.BuildReviewCommand(repoPath, prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -215,6 +259,31 @@ func buildReviewPrompt(round int, prBody, diff, priorComments string) string {
 	b.WriteString("\n\n## Diff\n\n```diff\n")
 	b.WriteString(diff)
 	b.WriteString("\n```\n")
+	return b.String()
+}
+
+// buildIntegrationPrompt is RunReview's prompt when IntegrationCheck is
+// true: a multi-unit PR's diff can be too large for one review session to
+// hold, so this carries the PR body, a `git diff --stat` (file-level shape
+// only, never the full diff), and the task's full `## Handoff` -- every
+// unit's own "what changed, interfaces later units rely on" note -- and
+// asks the reviewer to run the repo's own test suite itself (nothing here
+// does that for it) and judge whether the units fit together as a whole
+// (interfaces, contracts, scope), not re-review each unit's code line by
+// line -- that already happened once per unit, see unitreview.go's
+// reviewUnit. Same VERDICT/feedback format as buildReviewPrompt, so
+// parseReviewVerdict needs no changes to handle either.
+func buildIntegrationPrompt(prBody, diffStat, handoff string) string {
+	var b strings.Builder
+	b.WriteString("You are reviewing a multi-unit pull request as an independent integration reviewer. Each unit's own diff was already reviewed on its own merits by a separate review session -- your job is judging whether the units fit together as a whole (interfaces, contracts, scope), not re-reviewing each unit's code line by line. The PR's diff is too large to include here in full, so you are given its shape (a diff stat) and the handoff each unit's coding session left for the next -- run this repository's own test suite yourself (nothing has run it for you) and judge the result together with the integration question. Do not run any git/gh commands beyond what you need to inspect the checked-out working tree; you are given everything else you need.\n\n")
+	b.WriteString("Respond with your verdict as the exact first line `VERDICT: APPROVE` or `VERDICT: CONCERNS`, followed by a blank line, then your reasoning (and, if CONCERNS, exactly what needs to change).\n\n")
+	b.WriteString("## PR description\n\n")
+	b.WriteString(prBody)
+	b.WriteString("\n\n## Diff stat\n\n```\n")
+	b.WriteString(diffStat)
+	b.WriteString("\n```\n\n## Handoff\n\n")
+	b.WriteString(handoff)
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -377,6 +446,20 @@ func gitDiff(repoPath, base, branch string) (string, error) {
 	out, err := exec.Command("git", "-C", repoPath, "diff", base+"...FETCH_HEAD").CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("git diff %s...FETCH_HEAD (branch %s): %w", base, branch, err)
+	}
+	return string(out), nil
+}
+
+// gitDiffStat is gitDiff's --stat counterpart -- the integration review's
+// one input besides the PR body and Handoff, deliberately never the full
+// diff (see buildIntegrationPrompt).
+func gitDiffStat(repoPath, base, branch string) (string, error) {
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+		return string(out), fmt.Errorf("git fetch origin %s: %w", branch, err)
+	}
+	out, err := exec.Command("git", "-C", repoPath, "diff", "--stat", base+"...FETCH_HEAD").CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("git diff --stat %s...FETCH_HEAD (branch %s): %w", base, branch, err)
 	}
 	return string(out), nil
 }

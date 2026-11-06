@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -84,7 +86,20 @@ func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName := "task/" + slug
 	cleanupTaskBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	// Every unit reaching done also reaches this task's finish step (RBG-46):
+	// it opens the task's one PR for real (git push + `gh pr create`), so a
+	// fake `gh` stands in for the real GitHub-hosted remote
+	// testTargetRepoPath doesn't have.
+	binDir := t.TempDir()
+	fakePRURL := "https://github.com/fake-owner/fake-repo/pull/1"
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), fakePRURL)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
@@ -107,6 +122,12 @@ func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 	}
 	if noteAfter.Frontmatter.CurrentUnit != nil {
 		t.Errorf("current_unit = %v, want nil once every unit is done", *noteAfter.Frontmatter.CurrentUnit)
+	}
+	if noteAfter.Frontmatter.Status != "done" {
+		t.Errorf("status = %q, want %q (the finish step should have opened the PR)", noteAfter.Frontmatter.Status, "done")
+	}
+	if noteAfter.Frontmatter.PRURL == nil || *noteAfter.Frontmatter.PRURL != fakePRURL {
+		t.Errorf("pr_url = %v, want %q", noteAfter.Frontmatter.PRURL, fakePRURL)
 	}
 }
 

@@ -96,6 +96,15 @@ const ScenarioPlannerFailure Scenario = 7
 // unitloop.go's blockUnitTask.
 const ScenarioUnitLoopBlocked Scenario = 8
 
+// ScenarioOpenPRFailure: a multi-unit task finished every one of its units,
+// but opening the task's single PR (git push + gh pr create, see
+// multiunit.go's openTaskPR) failed -- blocked with the branch preserved,
+// same as every other blocked family. Distinct from ScenarioDoneWithoutPR
+// (a coding session's own self-report with no PR) and ScenarioUnitLoopBlocked
+// (a unit itself couldn't continue): here every unit genuinely finished, the
+// runner's own PR-open step is what failed.
+const ScenarioOpenPRFailure Scenario = 9
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -116,6 +125,8 @@ func (s Scenario) String() string {
 		return "planner_failure"
 	case ScenarioUnitLoopBlocked:
 		return "unit_loop_blocked"
+	case ScenarioOpenPRFailure:
+		return "open_pr_failure"
 	default:
 		return "unknown"
 	}
