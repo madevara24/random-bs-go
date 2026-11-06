@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -586,27 +588,37 @@ func TestUnitLoopResumeAtReview(t *testing.T) {
 
 // TestUnitVerifyTimeoutKillsChildren confirms a verify command that
 // outlives its timeout has every descendant killed, not just the `sh`
-// wrapper exec.CommandContext alone would reach -- `sleep 300 & wait`
-// backgrounds a child sleep process directly under sh, so a kill scoped to
-// sh's own PID would leave that sleep running on the host indefinitely
-// (the bug this fix addresses). A 1-second timeout against a 300-second
-// sleep makes the pass/fail obvious well within the test's own budget.
+// wrapper exec.CommandContext alone would reach. The verify command
+// backgrounds one child and writes that child's own PID to a file, so the
+// test can check for that exact PID afterward -- never find or kill
+// processes by command-line pattern (`pgrep -f`, `pkill -f`, `killall`)
+// here, or anywhere else: the runner passes this whole task note to the
+// coding engine as a command-line argument, so any such pattern written
+// into a test (or even this comment, which is why it never names one) also
+// matches the builder's own process and would kill it -- confirmed live
+// during this very task, see its Work Log.
 func TestUnitVerifyTimeoutKillsChildren(t *testing.T) {
-	if _, err := exec.LookPath("pgrep"); err != nil {
-		t.Skip("pgrep not on PATH, skipping")
-	}
+	tmp := t.TempDir()
+	pidFile := filepath.Join(tmp, "child.pid")
 
-	_, err := runUnitVerify(t.TempDir(), "sleep 300 & wait", time.Second)
+	_, err := runUnitVerify(tmp, fmt.Sprintf("sleep 300 & echo $! > %s; wait", pidFile), time.Second)
 	if err == nil {
 		t.Fatal("runUnitVerify returned nil error, want a timeout error")
+	}
+
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("reading child pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		t.Fatalf("parsing child pid %q: %v", pidData, err)
 	}
 
 	// Give the SIGKILL a brief moment to actually land before checking.
 	time.Sleep(200 * time.Millisecond)
 
-	out, _ := exec.Command("pgrep", "-f", "sleep 300").CombinedOutput()
-	if strings.TrimSpace(string(out)) != "" {
-		t.Errorf("pgrep -f 'sleep 300' still finds a process after the verify timeout: %q", out)
-		exec.Command("pkill", "-f", "sleep 300").Run()
+	if killErr := syscall.Kill(pid, 0); killErr != syscall.ESRCH {
+		t.Errorf("syscall.Kill(%d, 0) = %v, want ESRCH (child still running after the verify timeout)", pid, killErr)
 	}
 }

@@ -309,3 +309,172 @@ func TestGhMergeGateOpsRunReviewAndResumeUseDistinctEngines(t *testing.T) {
 		t.Errorf("call log after ResumeWithFeedback = %q, want %q (coding engine appended, never review again)", got, "review\ncoding")
 	}
 }
+
+// TestIntegrationPromptHasNoFullDiff confirms buildIntegrationPrompt's
+// prompt carries the diff stat and the handoff, but never a full diff -- a
+// multi-unit PR's whole diff can be too large for one review session to
+// hold, so the integration check only ever gets the file-level shape (a
+// `git diff --stat`), never a `@@` hunk header.
+func TestIntegrationPromptHasNoFullDiff(t *testing.T) {
+	prBody := "## Plan\n\nDoes X and Y.\n"
+	diffStat := " internal/foo.go | 10 ++++++----\n internal/bar.go |  5 +++--\n 2 files changed, 11 insertions(+), 4 deletions(-)\n"
+	handoff := "### U1\n\nDid the first thing.\n\n### U2\n\nDid the second thing, built on U1's interface."
+
+	prompt := buildIntegrationPrompt(prBody, diffStat, handoff)
+
+	if !strings.Contains(prompt, diffStat) {
+		t.Error("prompt missing the diff stat")
+	}
+	if !strings.Contains(prompt, handoff) {
+		t.Error("prompt missing the handoff")
+	}
+	if !strings.Contains(prompt, prBody) {
+		t.Error("prompt missing the PR body")
+	}
+	if strings.Contains(prompt, "@@") {
+		t.Errorf("prompt contains a full diff hunk header (@@), want diff stat only: %s", prompt)
+	}
+}
+
+// TestMergeGatePromptUnchangedWhenNotIntegration confirms that with
+// IntegrationCheck false, RunReview's prompt is byte-identical to
+// buildReviewPrompt's own output for the same inputs -- the Compatibility
+// section's requirement that a single-session task's review prompt never
+// changed. A fake claude script captures the exact prompt text RunReview
+// handed the review engine (via its own `-p <prompt>` argument) and
+// compares it against calling buildReviewPrompt directly with the same
+// prBody/diff/priorComments.
+func TestMergeGatePromptUnchangedWhenNotIntegration(t *testing.T) {
+	branch := fmt.Sprintf("mergegate-prompt-unchanged-test-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branch)
+
+	readme := testTargetRepoPath + "/README.md"
+	marker := fmt.Sprintf("prompt-unchanged test line %d\n", time.Now().UnixNano())
+	f, err := os.OpenFile(readme, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("opening README: %v", err)
+	}
+	if _, err := f.WriteString(marker); err != nil {
+		f.Close()
+		t.Fatalf("writing README: %v", err)
+	}
+	f.Close()
+
+	runGit(t, testTargetRepoPath, "add", "README.md")
+	runGit(t, testTargetRepoPath, "commit", "-m", "mergegate prompt-unchanged test commit")
+	runGit(t, testTargetRepoPath, "push", "-u", "origin", branch)
+
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branch).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branch).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGh(t, filepath.Join(binDir, "gh"), branch, "fake PR body")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	capturedPath := filepath.Join(binDir, "captured-prompt.txt")
+	claudeScript := filepath.Join(binDir, "fake-claude-capture.sh")
+	script := "#!/bin/sh\nprintf '%s' \"$2\" > " + capturedPath + "\n" + `echo '{"result":"VERDICT: APPROVE"}'` + "\n"
+	if err := os.WriteFile(claudeScript, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake claude script: %v", err)
+	}
+
+	g := &GhMergeGateOps{
+		RepoPath:      testTargetRepoPath,
+		PRURL:         "https://github.com/fake-owner/fake-repo/pull/42",
+		DefaultBranch: "main",
+		ReviewEngine:  engine.NewClaude(claudeScript),
+	}
+	if _, _, err := g.RunReview(0); err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+
+	captured, err := os.ReadFile(capturedPath)
+	if err != nil {
+		t.Fatalf("reading captured prompt: %v", err)
+	}
+
+	prBody, err := fetchPRBody(testTargetRepoPath, "https://github.com/fake-owner/fake-repo/pull/42")
+	if err != nil {
+		t.Fatalf("fetchPRBody: %v", err)
+	}
+	diff, err := gitDiff(testTargetRepoPath, "main", branch)
+	if err != nil {
+		t.Fatalf("gitDiff: %v", err)
+	}
+	want := buildReviewPrompt(0, prBody, diff, "")
+	if string(captured) != want {
+		t.Errorf("RunReview's non-integration prompt diverged from buildReviewPrompt's own output:\ngot:  %q\nwant: %q", captured, want)
+	}
+}
+
+// TestIntegrationFeedbackResumesLastUnit confirms that for a multi-unit
+// task's finish-time integration check, a CONCERNS verdict's
+// ResumeWithFeedback resumes the exact session_id finishMultiUnitTask
+// hands the merge gate as CodingSession (the last plan-ordered unit's own
+// session, see multiunit.go's lastUnitSessionID) -- a fake review script
+// forces CONCERNS, and a fake coding script records every argument it was
+// invoked with so the test can confirm `--resume last-unit-session`
+// actually appears.
+func TestIntegrationFeedbackResumesLastUnit(t *testing.T) {
+	branch := fmt.Sprintf("mergegate-integration-resume-test-%d", time.Now().UnixNano())
+	runGit(t, testTargetRepoPath, "checkout", "main")
+	runGit(t, testTargetRepoPath, "checkout", "-b", branch)
+	runGit(t, testTargetRepoPath, "push", "-u", "origin", branch)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branch).Run()
+		exec.Command("git", "-C", testTargetRepoPath, "checkout", "main").Run()
+		exec.Command("git", "-C", testTargetRepoPath, "branch", "-D", branch).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGh(t, filepath.Join(binDir, "gh"), branch, "fake PR body")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	reviewScript := filepath.Join(binDir, "fake-review-concerns.sh")
+	if err := os.WriteFile(reviewScript, []byte(
+		"#!/bin/sh\necho '{\"result\":\"VERDICT: CONCERNS\"}'\n"), 0o755); err != nil {
+		t.Fatalf("writing fake review script: %v", err)
+	}
+
+	logPath := filepath.Join(binDir, "resume-args.log")
+	codingScript := filepath.Join(binDir, "fake-coding-capture.sh")
+	if err := os.WriteFile(codingScript, []byte(
+		"#!/bin/sh\necho \"$@\" >> "+logPath+"\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"resume-session\"}'\n"), 0o755); err != nil {
+		t.Fatalf("writing fake coding script: %v", err)
+	}
+
+	g := &GhMergeGateOps{
+		RepoPath:         testTargetRepoPath,
+		PRURL:            "https://github.com/fake-owner/fake-repo/pull/42",
+		DefaultBranch:    "main",
+		CodingEngine:     engine.NewClaude(codingScript),
+		ReviewEngine:     engine.NewClaude(reviewScript),
+		CodingSession:    "last-unit-session",
+		IntegrationCheck: true,
+		Handoff:          "### U1\n\ndid stuff.\n\n### U2\n\ndid more stuff.",
+	}
+
+	verdict, feedback, err := g.RunReview(0)
+	if err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+	if verdict != VerdictConcerns {
+		t.Fatalf("verdict = %v, want CONCERNS", verdict)
+	}
+
+	if err := g.ResumeWithFeedback(feedback); err != nil {
+		t.Fatalf("ResumeWithFeedback: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading resume args log: %v", err)
+	}
+	if !strings.Contains(string(logData), "--resume last-unit-session") {
+		t.Errorf("coding invocation args = %q, want them to include --resume last-unit-session", logData)
+	}
+}
