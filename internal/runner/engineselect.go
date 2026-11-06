@@ -52,6 +52,19 @@ func resolveReviewEngineName(note *notetask.Note, repoCfg config.RepoConfig, def
 	return engineresolve.Review(noteReviewEngine, repoCfg.ReviewEngine, defaultReviewEngine)
 }
 
+// resolvePlanEngineName picks the name a planner session looks up in the
+// registry: the note's own `plan_engine:` pin -> the repo's configured
+// plan_engine -> defaultPlanEngine. Resolved independently of
+// resolveCodingEngineName/resolveReviewEngineName -- a task can be
+// planned, coded, and reviewed by three different engines.
+func resolvePlanEngineName(note *notetask.Note, repoCfg config.RepoConfig, defaultPlanEngine string) string {
+	var notePlanEngine string
+	if note != nil && note.Frontmatter.PlanEngine != nil {
+		notePlanEngine = *note.Frontmatter.PlanEngine
+	}
+	return engineresolve.Plan(notePlanEngine, repoCfg.PlanEngine, defaultPlanEngine)
+}
+
 // lookupEngine resolves name in registry, or an "unknown engine" error
 // naming every registered engine -- the exact message
 // setupStageResolveEngine's alert/Work Log text uses.

@@ -116,6 +116,13 @@ type Deps struct {
 	// reviewEngineDefault()).
 	ReviewEngineDefault string
 
+	// PlanEngineDefault is PLAN_ENGINE's resolved value -- the planner
+	// role's global default, resolved independently of DefaultEngine and
+	// ReviewEngineDefault. "" falls back to "claude" (see
+	// planEngineDefault()). Nothing resolves this yet besides tests --
+	// no caller invokes a planner session.
+	PlanEngineDefault string
+
 	// PostClaim, if non-nil, posts a fresh task's Discord forum claim
 	// message (thread_name + content, no mentions) and returns the new
 	// thread's ID -- nil means DISCORD_TASK_FORUM_WEBHOOK_URL is unset, so
@@ -238,6 +245,15 @@ func (d Deps) reviewEngineDefault() string {
 		return fallbackCodingEngineName
 	}
 	return d.ReviewEngineDefault
+}
+
+// planEngineDefault is PLAN_ENGINE's resolved value -- "claude" if
+// Deps.PlanEngineDefault was never set.
+func (d Deps) planEngineDefault() string {
+	if d.PlanEngineDefault == "" {
+		return fallbackCodingEngineName
+	}
+	return d.PlanEngineDefault
 }
 
 func (d Deps) idleTimeout() time.Duration {
