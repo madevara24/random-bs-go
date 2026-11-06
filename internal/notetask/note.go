@@ -1,6 +1,7 @@
 // Package notetask parses and serializes a PM task note: YAML frontmatter
-// plus three body sections in order -- the freeform task prompt, "## Work
-// Log" (CC's own narrative), and "## Runner Log" (runner-only, append-only,
+// plus body sections in order -- the freeform task prompt, "## Plan" and
+// "## Plan Review" and "## Handoff" (multi-unit tasks only), "## Work Log"
+// (CC's own narrative), and "## Runner Log" (runner-only, append-only,
 // never sourced from or written to CC's note-copy).
 package notetask
 
@@ -31,7 +32,36 @@ type Frontmatter struct {
 	Created         string  `yaml:"created"`
 	ReadyAt         *string `yaml:"ready_at"`
 	DiscordThreadID *string `yaml:"discord_thread_id"`
+
+	PlanEngine    *string     `yaml:"plan_engine,omitempty"`
+	MultiUnit     *bool       `yaml:"multi_unit,omitempty"`
+	PlanRound     int         `yaml:"plan_round,omitempty"`
+	PlanMessageID *string     `yaml:"plan_message_id,omitempty"`
+	CurrentUnit   *string     `yaml:"current_unit,omitempty"`
+	Units         []UnitState `yaml:"units,omitempty"`
 }
+
+// UnitState is one entry in a multi-unit task's units: frontmatter list --
+// the runner's bookkeeping for one planned unit as it moves through its own
+// build/review cycle within the shared PR.
+type UnitState struct {
+	ID           string `yaml:"id"`
+	Status       string `yaml:"status"`
+	SessionID    string `yaml:"session_id"`
+	BaseSHA      string `yaml:"base_sha"`
+	HeadSHA      string `yaml:"head_sha"`
+	ReviewRounds int    `yaml:"review_rounds"`
+}
+
+// Unit statuses, in the order a unit moves through them (blocked is a
+// side exit from building or review, not a step after done).
+const (
+	UnitStatusPending  = "pending"
+	UnitStatusBuilding = "building"
+	UnitStatusReview   = "review"
+	UnitStatusDone     = "done"
+	UnitStatusBlocked  = "blocked"
+)
 
 // RunnerLogEntry is one line of the "## Runner Log" section.
 type RunnerLogEntry struct {
@@ -39,14 +69,24 @@ type RunnerLogEntry struct {
 	Event     string
 }
 
-// Note is a parsed task note. HasWorkLog/HasRunnerLog distinguish "section
-// absent" from "section present but empty" -- a freshly authored draft note
-// has neither section, and Serialize must not invent them; AppendRunnerLog
-// is what turns HasRunnerLog on.
+// Note is a parsed task note. HasPlan/HasPlanReview/HasHandoff/HasWorkLog/
+// HasRunnerLog distinguish "section absent" from "section present but
+// empty" -- a freshly authored draft note has none of these sections, and
+// Serialize must not invent them; AppendRunnerLog and AppendPlanReviewRound
+// are what turn HasRunnerLog/HasPlanReview on.
 type Note struct {
 	Path        string // absolute path on disk; empty if not yet written
 	Frontmatter Frontmatter
 	Prompt      string
+
+	HasPlan bool
+	Plan    string
+
+	HasPlanReview bool
+	PlanReview    string
+
+	HasHandoff bool
+	Handoff    string
 
 	HasWorkLog bool
 	WorkLog    string
@@ -56,9 +96,16 @@ type Note struct {
 }
 
 const (
-	workLogHeading   = "## Work Log"
-	runnerLogHeading = "## Runner Log"
+	planHeading       = "## Plan"
+	planReviewHeading = "## Plan Review"
+	handoffHeading    = "## Handoff"
+	workLogHeading    = "## Work Log"
+	runnerLogHeading  = "## Runner Log"
 )
+
+// bodyHeadings lists the five possible section headings in the order they
+// must appear in a note's body, after the prompt.
+var bodyHeadings = []string{planHeading, planReviewHeading, handoffHeading, workLogHeading, runnerLogHeading}
 
 // Parse splits raw note bytes into frontmatter + body sections. A malformed
 // or missing frontmatter delimiter, or YAML that fails to parse, is a hard
@@ -95,36 +142,53 @@ func Parse(data []byte) (*Note, error) {
 		bodyLines = bodyLines[1:]
 	}
 
-	workLogLine, runnerLogLine := -1, -1
-	for i, l := range bodyLines {
-		t := strings.TrimSpace(l)
-		if t == workLogHeading && workLogLine == -1 {
-			workLogLine = i
-		} else if t == runnerLogHeading && runnerLogLine == -1 {
-			runnerLogLine = i
+	// headingLines[i] is the line index of bodyHeadings[i]'s first
+	// occurrence, or -1 if that heading isn't present.
+	headingLines := make([]int, len(bodyHeadings))
+	for hi, heading := range bodyHeadings {
+		headingLines[hi] = -1
+		for i, l := range bodyLines {
+			if strings.TrimSpace(l) == heading {
+				headingLines[hi] = i
+				break
+			}
 		}
+	}
+
+	// sectionEnd finds the line index of the next present heading after
+	// startLine, or the end of the body if there is none.
+	sectionEnd := func(startLine int) int {
+		end := len(bodyLines)
+		for _, l := range headingLines {
+			if l != -1 && l > startLine && l < end {
+				end = l
+			}
+		}
+		return end
 	}
 
 	note := &Note{Frontmatter: fm}
 
-	promptEnd := len(bodyLines)
-	if workLogLine != -1 {
-		promptEnd = workLogLine
-	} else if runnerLogLine != -1 {
-		promptEnd = runnerLogLine
-	}
+	promptEnd := sectionEnd(-1)
 	note.Prompt = strings.TrimSpace(strings.Join(bodyLines[:promptEnd], "\n"))
 
-	if workLogLine != -1 {
-		note.HasWorkLog = true
-		workLogEnd := len(bodyLines)
-		if runnerLogLine != -1 {
-			workLogEnd = runnerLogLine
-		}
-		note.WorkLog = strings.TrimSpace(strings.Join(bodyLines[workLogLine+1:workLogEnd], "\n"))
+	if planLine := headingLines[0]; planLine != -1 {
+		note.HasPlan = true
+		note.Plan = strings.TrimSpace(strings.Join(bodyLines[planLine+1:sectionEnd(planLine)], "\n"))
 	}
-
-	if runnerLogLine != -1 {
+	if planReviewLine := headingLines[1]; planReviewLine != -1 {
+		note.HasPlanReview = true
+		note.PlanReview = strings.TrimSpace(strings.Join(bodyLines[planReviewLine+1:sectionEnd(planReviewLine)], "\n"))
+	}
+	if handoffLine := headingLines[2]; handoffLine != -1 {
+		note.HasHandoff = true
+		note.Handoff = strings.TrimSpace(strings.Join(bodyLines[handoffLine+1:sectionEnd(handoffLine)], "\n"))
+	}
+	if workLogLine := headingLines[3]; workLogLine != -1 {
+		note.HasWorkLog = true
+		note.WorkLog = strings.TrimSpace(strings.Join(bodyLines[workLogLine+1:sectionEnd(workLogLine)], "\n"))
+	}
+	if runnerLogLine := headingLines[4]; runnerLogLine != -1 {
 		note.HasRunnerLog = true
 		section := strings.TrimSpace(strings.Join(bodyLines[runnerLogLine+1:], "\n"))
 		entries, err := parseRunnerLog(section)
@@ -164,9 +228,9 @@ func parseRunnerLog(section string) ([]RunnerLogEntry, error) {
 }
 
 // Bytes serializes the note back to disk-ready form. Sections not present
-// (HasWorkLog/HasRunnerLog false) are omitted entirely, not written as
-// empty headings -- a note dispatch only touches frontmatter on should come
-// back byte-identical in its body.
+// (their Has... flag false) are omitted entirely, not written as empty
+// headings -- a note dispatch only touches frontmatter on should come back
+// byte-identical in its body.
 func (n *Note) Bytes() ([]byte, error) {
 	var buf strings.Builder
 
@@ -181,13 +245,21 @@ func (n *Note) Bytes() ([]byte, error) {
 	buf.WriteString(strings.TrimRight(n.Prompt, "\n"))
 	buf.WriteString("\n")
 
-	if n.HasWorkLog {
-		buf.WriteString("\n" + workLogHeading + "\n")
-		if wl := strings.TrimSpace(n.WorkLog); wl != "" {
-			buf.WriteString(wl)
+	writeTextSection := func(heading string, has bool, content string) {
+		if !has {
+			return
+		}
+		buf.WriteString("\n" + heading + "\n")
+		if c := strings.TrimSpace(content); c != "" {
+			buf.WriteString(c)
 			buf.WriteString("\n")
 		}
 	}
+
+	writeTextSection(planHeading, n.HasPlan, n.Plan)
+	writeTextSection(planReviewHeading, n.HasPlanReview, n.PlanReview)
+	writeTextSection(handoffHeading, n.HasHandoff, n.Handoff)
+	writeTextSection(workLogHeading, n.HasWorkLog, n.WorkLog)
 
 	if n.HasRunnerLog {
 		buf.WriteString("\n" + runnerLogHeading + "\n")
