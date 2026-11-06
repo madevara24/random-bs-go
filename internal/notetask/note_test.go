@@ -175,6 +175,154 @@ func TestParseWithEngineKeysRoundTrips(t *testing.T) {
 	}
 }
 
+// legacyFinishedNote is shaped like a real finished note predating the
+// multi-unit schema: engine/review_engine/session_id/pr_url/
+// discord_thread_id all set, a prompt, a Work Log, and a Runner Log.
+const legacyFinishedNote = `---
+status: done
+repo: test-repo
+auto_merge: false
+engine: claude
+review_engine: claude
+session_id: abc-123
+pr_url: https://github.com/madevara24/random-bs-go/pull/1
+last_updated: "2026-09-15T12:00:00Z"
+created: "2026-09-15"
+ready_at: "2026-09-15T08:00:00Z"
+discord_thread_id: "1234567890"
+---
+
+Fix the thing.
+
+## Work Log
+- Did the thing.
+
+## Runner Log
+- 2026-09-15T10:03:00Z — queued
+- 2026-09-15T10:04:12Z — done
+`
+
+func TestRoundTripLegacyNoteByteIdentical(t *testing.T) {
+	note, err := Parse([]byte(legacyFinishedNote))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if note.HasPlan || note.HasPlanReview || note.HasHandoff {
+		t.Fatalf("legacy note gained a new section: HasPlan=%v HasPlanReview=%v HasHandoff=%v", note.HasPlan, note.HasPlanReview, note.HasHandoff)
+	}
+
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(out) != legacyFinishedNote {
+		t.Errorf("round-trip not byte-identical.\ngot:\n%s\nwant:\n%s", out, legacyFinishedNote)
+	}
+	for _, key := range []string{"plan_engine", "multi_unit", "plan_round", "plan_message_id", "current_unit", "units"} {
+		if strings.Contains(string(out), key) {
+			t.Errorf("round-tripped legacy note gained new frontmatter key %q:\n%s", key, out)
+		}
+	}
+}
+
+const multiUnitNote = `---
+status: in_progress
+repo: test-repo
+auto_merge: false
+engine: claude
+review_engine: claude
+session_id: null
+pr_url: null
+last_updated: null
+created: "2026-11-06"
+ready_at: null
+discord_thread_id: null
+plan_engine: claude
+multi_unit: true
+plan_round: 2
+plan_message_id: "999"
+current_unit: U2
+units:
+    - id: U1
+      status: done
+      session_id: sess-1
+      base_sha: aaa111
+      head_sha: bbb222
+      review_rounds: 1
+    - id: U2
+      status: building
+      session_id: sess-2
+      base_sha: bbb222
+      head_sha: ""
+      review_rounds: 0
+---
+
+Build the feature in two units.
+
+## Plan
+` + "```yaml" + `
+- id: U1
+  title: Add the schema
+  paths: ["internal/notetask"]
+  depends_on: []
+  accept: Fields parse.
+  verify: go test ./...
+` + "```" + `
+
+## Plan Review
+### Round 1
+Looks good, approved.
+### Round 2
+
+## Handoff
+U1 landed on bbb222. U2 starts from there.
+
+## Work Log
+- Finished U1.
+
+## Runner Log
+- 2026-11-06T09:00:00Z — queued
+`
+
+func TestRoundTripMultiUnitNote(t *testing.T) {
+	note, err := Parse([]byte(multiUnitNote))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if !note.HasPlan || !note.HasPlanReview || !note.HasHandoff || !note.HasWorkLog || !note.HasRunnerLog {
+		t.Fatalf("expected all six sections present: HasPlan=%v HasPlanReview=%v HasHandoff=%v HasWorkLog=%v HasRunnerLog=%v",
+			note.HasPlan, note.HasPlanReview, note.HasHandoff, note.HasWorkLog, note.HasRunnerLog)
+	}
+	if len(note.Frontmatter.Units) != 2 {
+		t.Fatalf("Units = %+v, want 2 entries", note.Frontmatter.Units)
+	}
+	if note.Frontmatter.Units[0].ID != "U1" || note.Frontmatter.Units[0].Status != UnitStatusDone {
+		t.Errorf("Units[0] = %+v", note.Frontmatter.Units[0])
+	}
+	if note.Frontmatter.Units[1].ID != "U2" || note.Frontmatter.Units[1].Status != UnitStatusBuilding {
+		t.Errorf("Units[1] = %+v", note.Frontmatter.Units[1])
+	}
+
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(out) != multiUnitNote {
+		t.Errorf("round-trip not byte-identical.\ngot:\n%s\nwant:\n%s", out, multiUnitNote)
+	}
+
+	// Body section order: Plan, Plan Review, Handoff, Work Log, Runner Log.
+	idxPlan := strings.Index(string(out), "## Plan\n")
+	idxPlanReview := strings.Index(string(out), "## Plan Review")
+	idxHandoff := strings.Index(string(out), "## Handoff")
+	idxWorkLog := strings.Index(string(out), "## Work Log")
+	idxRunnerLog := strings.Index(string(out), "## Runner Log")
+	if !(idxPlan < idxPlanReview && idxPlanReview < idxHandoff && idxHandoff < idxWorkLog && idxWorkLog < idxRunnerLog) {
+		t.Errorf("sections out of order: plan=%d planReview=%d handoff=%d workLog=%d runnerLog=%d", idxPlan, idxPlanReview, idxHandoff, idxWorkLog, idxRunnerLog)
+	}
+}
+
 func TestSortByReadyThenCreated(t *testing.T) {
 	mk := func(readyAt, created string) *Note {
 		var ra *string

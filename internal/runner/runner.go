@@ -780,10 +780,16 @@ func localBranchExists(repoPath, branchName string) bool {
 // Runner Log -- CC never sees runner-only bookkeeping.
 func writeNoteCopy(note *notetask.Note, copyPath string) error {
 	copyNote := &notetask.Note{
-		Frontmatter: note.Frontmatter,
-		Prompt:      note.Prompt,
-		HasWorkLog:  note.HasWorkLog,
-		WorkLog:     note.WorkLog,
+		Frontmatter:   note.Frontmatter,
+		Prompt:        note.Prompt,
+		HasPlan:       note.HasPlan,
+		Plan:          note.Plan,
+		HasPlanReview: note.HasPlanReview,
+		PlanReview:    note.PlanReview,
+		HasHandoff:    note.HasHandoff,
+		Handoff:       note.Handoff,
+		HasWorkLog:    note.HasWorkLog,
+		WorkLog:       note.WorkLog,
 		// HasRunnerLog deliberately left false: never copied.
 	}
 	out, err := copyNote.Bytes()

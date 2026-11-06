@@ -12,6 +12,18 @@ import (
 // TasksDir is the vault-relative directory every task note lives under.
 const TasksDir = "Tasks"
 
+// Multi-unit plan statuses: a planner session writes StatusPlanReview when
+// its unit list is ready for human review, which a human then moves to
+// either StatusPlanApproved (dispatch proceeds unit by unit) or
+// StatusPlanRejected (planner re-runs). Nothing reads these yet -- added
+// here only so the schema exists ahead of the dispatch/runner changes that
+// will act on them.
+const (
+	StatusPlanReview   = "plan_review"
+	StatusPlanApproved = "plan_approved"
+	StatusPlanRejected = "plan_rejected"
+)
+
 // IsTerminalStatus reports whether status is one a task note never leaves
 // once reached.
 func IsTerminalStatus(status string) bool {
