@@ -23,6 +23,12 @@ func Review(noteReviewEngine, repoReviewEngine, defaultReviewEngine string) stri
 	return resolve(noteReviewEngine, repoReviewEngine, defaultReviewEngine)
 }
 
+// Plan resolves which engine runs a task's planner session: the note's own
+// plan_engine pin -> the repo's configured plan_engine -> defaultPlanEngine.
+func Plan(notePlanEngine, repoPlanEngine, defaultPlanEngine string) string {
+	return resolve(notePlanEngine, repoPlanEngine, defaultPlanEngine)
+}
+
 func resolve(pinned, repoDefault, globalDefault string) string {
 	if pinned != "" {
 		return pinned

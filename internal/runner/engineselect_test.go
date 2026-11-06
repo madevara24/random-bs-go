@@ -82,6 +82,50 @@ func TestResolveReviewEngineName(t *testing.T) {
 	}
 }
 
+// TestResolvePlanEngineName covers all three precedence levels: the
+// note's own `plan_engine:` -> the repo's "plan_engine" ->
+// defaultPlanEngine.
+func TestResolvePlanEngineName(t *testing.T) {
+	notePinned := notePtr(notetask.Frontmatter{PlanEngine: strp("note-plan-engine")})
+	noteUnset := notePtr(notetask.Frontmatter{})
+	repoWithOverride := config.RepoConfig{PlanEngine: "repo-plan-engine"}
+	repoWithoutOverride := config.RepoConfig{}
+
+	cases := []struct {
+		name    string
+		note    *notetask.Note
+		repoCfg config.RepoConfig
+		dflt    string
+		want    string
+	}{
+		{"note's pin wins over everything", notePinned, repoWithOverride, "default-plan-engine", "note-plan-engine"},
+		{"repo override wins when note unset", noteUnset, repoWithOverride, "default-plan-engine", "repo-plan-engine"},
+		{"global default when both unset", noteUnset, repoWithoutOverride, "default-plan-engine", "default-plan-engine"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolvePlanEngineName(c.note, c.repoCfg, c.dflt); got != c.want {
+				t.Errorf("resolvePlanEngineName(...) = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestPlanEngineDefaultFallsBackToClaude confirms Deps.planEngineDefault
+// falls back to "claude" when PlanEngineDefault is unset, same as
+// reviewEngineDefault -- nothing wires this into ProcessTask yet besides
+// this test (a later task runs a planner session).
+func TestPlanEngineDefaultFallsBackToClaude(t *testing.T) {
+	var d Deps
+	if got := d.planEngineDefault(); got != "claude" {
+		t.Errorf("planEngineDefault() = %q, want %q", got, "claude")
+	}
+	d.PlanEngineDefault = "custom-plan-engine"
+	if got := d.planEngineDefault(); got != "custom-plan-engine" {
+		t.Errorf("planEngineDefault() = %q, want %q", got, "custom-plan-engine")
+	}
+}
+
 // TestProcessTaskWritesEngineOnFreshRun confirms a fresh run's claim write
 // (status -> in_progress) also writes `engine:` when the note didn't
 // already pin one.
