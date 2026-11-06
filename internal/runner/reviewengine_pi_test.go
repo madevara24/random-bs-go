@@ -61,7 +61,7 @@ func TestReviewEnginePiOnNoteSelectsPiForReview(t *testing.T) {
 		Repos: map[string]config.RepoConfig{
 			"phase6-test-repo": {Path: testTargetRepoPath, Remote: "local/phase6-test-repo", DefaultBranch: "main"},
 		},
-		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) MergeGateOps {
+		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine, integrationCheck bool, handoff string) MergeGateOps {
 			gotCodingEngineName = codingEngine.Name()
 			gotReviewEngineName = reviewEngine.Name()
 			// Fail the very first round deliberately -- this test only

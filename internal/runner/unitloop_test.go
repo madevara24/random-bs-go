@@ -583,3 +583,30 @@ func TestUnitLoopResumeAtReview(t *testing.T) {
 		t.Errorf("current_unit = %v, want nil once both units are done", *noteAfter.Frontmatter.CurrentUnit)
 	}
 }
+
+// TestUnitVerifyTimeoutKillsChildren confirms a verify command that
+// outlives its timeout has every descendant killed, not just the `sh`
+// wrapper exec.CommandContext alone would reach -- `sleep 300 & wait`
+// backgrounds a child sleep process directly under sh, so a kill scoped to
+// sh's own PID would leave that sleep running on the host indefinitely
+// (the bug this fix addresses). A 1-second timeout against a 300-second
+// sleep makes the pass/fail obvious well within the test's own budget.
+func TestUnitVerifyTimeoutKillsChildren(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not on PATH, skipping")
+	}
+
+	_, err := runUnitVerify(t.TempDir(), "sleep 300 & wait", time.Second)
+	if err == nil {
+		t.Fatal("runUnitVerify returned nil error, want a timeout error")
+	}
+
+	// Give the SIGKILL a brief moment to actually land before checking.
+	time.Sleep(200 * time.Millisecond)
+
+	out, _ := exec.Command("pgrep", "-f", "sleep 300").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("pgrep -f 'sleep 300' still finds a process after the verify timeout: %q", out)
+		exec.Command("pkill", "-f", "sleep 300").Run()
+	}
+}

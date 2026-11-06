@@ -204,7 +204,12 @@ type Deps struct {
 	// with (for ResumeWithFeedback); reviewEngine is the merge gate's own
 	// resolved review engine (independent of codingEngine, see
 	// resolveReviewEngineName), used for the fresh reviewer session.
-	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) MergeGateOps
+	// integrationCheck and handoff are the multi-unit finish path's own
+	// extra inputs (see multiunit.go's finishMultiUnitTask): a
+	// single-session task always passes (false, ""), which must leave
+	// GhMergeGateOps's review prompt byte-identical to before these two
+	// parameters existed.
+	MergeGateFactory func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine, integrationCheck bool, handoff string) MergeGateOps
 
 	// OnRoundLimitHit fires if the merge-gate loop exhausts its round
 	// budget without a clean merge -- the PR stays open, status stays
@@ -619,7 +624,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {
-		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID, codingEng, reviewEng)
+		runMergeGateForTask(deps, reporter, repoCfg, job, branchName, sessionID, prURL, discordThreadID, codingEng, reviewEng, false, "")
 	}
 
 	return nil
@@ -631,11 +636,13 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 // vault note's status, which stays "done" even when the loop exhausts.
 // codingEngine is the same engine this task just coded/resumed with (for
 // ResumeWithFeedback); reviewEngine is the merge gate's own resolved
-// review engine, for the fresh reviewer session.
-func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, discordThreadID string, codingEngine, reviewEngine engine.Engine) {
+// review engine, for the fresh reviewer session. integrationCheck and
+// handoff are the multi-unit finish path's own extra inputs -- (false, "")
+// for the single-session path, unchanged from before these existed.
+func runMergeGateForTask(deps Deps, reporter ActivityReporter, repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL, discordThreadID string, codingEngine, reviewEngine engine.Engine, integrationCheck bool, handoff string) {
 	reporter.SetStage("review/CI merge-gate loop")
 
-	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL, codingEngine, reviewEngine)
+	ops := deps.MergeGateFactory(repoCfg, job, branchName, sessionID, prURL, codingEngine, reviewEngine, integrationCheck, handoff)
 	err := RunMergeGateLoop(ops)
 	switch {
 	case err == nil:

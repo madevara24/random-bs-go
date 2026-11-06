@@ -9,13 +9,14 @@
 package runner
 
 import (
-	"context"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
@@ -162,16 +163,34 @@ func gitRevParse(repoPath, ref string) (string, error) {
 // timeout, returning its combined output. A nil error means it exited
 // zero; output is returned either way, since a failure's output is exactly
 // what gets fed back to the coding session as feedback.
+//
+// Started in its own process group (same SysProcAttr as invokeEngine) so a
+// timeout kill reaches every descendant the verify command spawned (e.g.
+// `go test` under `sh -c`), not just the `sh` wrapper itself -- plain
+// exec.CommandContext only ever kills the top-level PID, which on timeout
+// left the real child running on the production host indefinitely.
 func runUnitVerify(repoPath, verifyCmd string, timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", verifyCmd)
+	cmd := exec.Command("sh", "-c", verifyCmd)
 	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("verify command `%s` failed: %w", verifyCmd, err)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("starting verify command `%s`: %w", verifyCmd, err)
 	}
-	return string(out), nil
+
+	timer := time.AfterFunc(timeout, func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	})
+	err := cmd.Wait()
+	timer.Stop()
+
+	if err != nil {
+		return out.String(), fmt.Errorf("verify command `%s` failed: %w", verifyCmd, err)
+	}
+	return out.String(), nil
 }
 
 // blockUnitTask writes status: blocked to the vault note (and, if unitID

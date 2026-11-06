@@ -107,14 +107,16 @@ func runRunner(cfg *config.Config) {
 			}
 		},
 		OnTerminal: newTerminalHandler(cfg, notifier, resumeMgr),
-		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine) runner.MergeGateOps {
+		MergeGateFactory: func(repoCfg config.RepoConfig, job worker.Job, branchName, sessionID, prURL string, codingEngine, reviewEngine engine.Engine, integrationCheck bool, handoff string) runner.MergeGateOps {
 			return &runner.GhMergeGateOps{
-				RepoPath:      repoCfg.Path,
-				PRURL:         prURL,
-				DefaultBranch: repoCfg.DefaultBranch,
-				CodingEngine:  codingEngine,
-				ReviewEngine:  reviewEngine,
-				CodingSession: sessionID,
+				RepoPath:         repoCfg.Path,
+				PRURL:            prURL,
+				DefaultBranch:    repoCfg.DefaultBranch,
+				CodingEngine:     codingEngine,
+				ReviewEngine:     reviewEngine,
+				CodingSession:    sessionID,
+				IntegrationCheck: integrationCheck,
+				Handoff:          handoff,
 			}
 		},
 		OnRoundLimitHit: func(job worker.Job, prURL, discordThreadID string) {
