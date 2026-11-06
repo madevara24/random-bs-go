@@ -287,7 +287,20 @@ func TestTriageLargeGoesMultiUnit(t *testing.T) {
 		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
 	}
 	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName := "task/" + slug
 	cleanupTaskBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	// A clear gate pass seeds units and runs the unit loop to completion
+	// (fakePlannerEngine always approves its own review, verify is "true"),
+	// which also reaches this task's finish step (RBG-46): a fake `gh`
+	// stands in for the real GitHub-hosted remote testTargetRepoPath
+	// doesn't have.
+	binDir := t.TempDir()
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), "https://github.com/fake-owner/fake-repo/pull/1")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
