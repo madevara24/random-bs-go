@@ -14,6 +14,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/engineresolve"
 	"github.com/madevara24/random-bs-go/internal/httpapi"
+	"github.com/madevara24/random-bs-go/internal/jev"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/pause"
@@ -94,6 +95,9 @@ func runRunner(cfg *config.Config) {
 		IdleTimeout:         time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
 		PostClaim:           postClaim,
 		Pause:               pauseState,
+		Jev:                 &jev.Client{APIKey: cfg.TypesafeAPIKey, Model: cfg.JevModel},
+		MultiUnitEnabled:    cfg.MultiUnitEnabled,
+		ForumWebhookURL:     cfg.DiscordTaskForumWebhookURL,
 		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.Send(
 				job.NotePath, payload.DiscordThreadID,
