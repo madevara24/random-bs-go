@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/config"
+	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/jev"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/plangate"
@@ -90,12 +91,21 @@ func askJev(client *jev.Client, state any, questions map[string]jev.Question, ti
 	return client.Ask(ctx, state, questions)
 }
 
-// processMultiUnit is ProcessTask's branch for a task triaged multi-unit.
-// Today it only handles "no ## Plan yet" -- run the planner through the
-// plan gate; running the units a clean plan seeds is a later task.
-func processMultiUnit(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig) error {
+// processMultiUnit is ProcessTask's branch for a task triaged multi-unit:
+// "no ## Plan yet" runs the planner through the plan gate (which itself
+// hands a clean pass straight into runUnitLoop, see planner.go's
+// runPlanGate), and "units already seeded, not all done" re-enters
+// runUnitLoop directly -- the normal resume path, and also how a task
+// whose status flipped blocked -> blocker_resolved (main.go's auto-resume,
+// e.g. after a usage limit cleared mid-unit) picks back up at
+// current_unit: ProcessTask's own resume branch reaches here exactly the
+// same way regardless of which status string got it there.
+func processMultiUnit(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, branchName string, codingEng, reviewEng engine.Engine) error {
 	if !note.HasPlan || strings.TrimSpace(note.Plan) == "" {
-		return runPlanner(deps, reporter, job, note, repoCfg)
+		return runPlanner(deps, reporter, job, note, repoCfg, branchName, codingEng, reviewEng)
+	}
+	if len(note.Frontmatter.Units) > 0 && !allUnitsDone(note.Frontmatter.Units) {
+		return runUnitLoop(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)
 	}
 	return nil
 }

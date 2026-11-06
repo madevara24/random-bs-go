@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/jev"
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
@@ -46,8 +49,11 @@ func discordThreadServer(t *testing.T, messageID string) *httptest.Server {
 }
 
 // TestPlannerCleanPlanSeedsUnits confirms a plan that clears the gate
-// (clear low risky/ambiguous, no hard-rule hits) seeds `units` as pending
-// entries in plan order and sets current_unit to the first one.
+// (clear low risky/ambiguous, no hard-rule hits) seeds `units` in plan
+// order and, per RBG-45's hook-in, hands straight into the unit loop
+// rather than stopping there -- with fakePlannerEngine standing in for
+// both the coding and review engine (always approving, see its own doc
+// comment), both units run to completion in this same ProcessTask call.
 func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 	testvault.SkipIfAbsent(t)
 	t.Cleanup(testvault.Lock(t))
@@ -92,15 +98,15 @@ func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 		t.Fatalf("units = %+v, want 2 entries", noteAfter.Frontmatter.Units)
 	}
 	for _, u := range noteAfter.Frontmatter.Units {
-		if u.Status != notetask.UnitStatusPending {
-			t.Errorf("unit %q status = %q, want %q", u.ID, u.Status, notetask.UnitStatusPending)
+		if u.Status != notetask.UnitStatusDone {
+			t.Errorf("unit %q status = %q, want %q (the unit loop should have run both to completion)", u.ID, u.Status, notetask.UnitStatusDone)
 		}
 	}
 	if noteAfter.Frontmatter.Units[0].ID != "U1" || noteAfter.Frontmatter.Units[1].ID != "U2" {
 		t.Errorf("units = %+v, want order U1, U2", noteAfter.Frontmatter.Units)
 	}
-	if noteAfter.Frontmatter.CurrentUnit == nil || *noteAfter.Frontmatter.CurrentUnit != "U1" {
-		t.Errorf("current_unit = %v, want %q", noteAfter.Frontmatter.CurrentUnit, "U1")
+	if noteAfter.Frontmatter.CurrentUnit != nil {
+		t.Errorf("current_unit = %v, want nil once every unit is done", *noteAfter.Frontmatter.CurrentUnit)
 	}
 }
 
@@ -275,5 +281,118 @@ func TestPlannerBadYAMLBlocksAfter3(t *testing.T) {
 	}
 	if !strings.Contains(blockedPayload.ExitErrText, "unusable plan") {
 		t.Errorf("alert ExitErrText = %q, want it to name the parse error", blockedPayload.ExitErrText)
+	}
+}
+
+// fakeUsageLimitPlannerEngine always reports a usage limit, regardless of
+// how its underlying process actually exits -- a minimal fake for driving
+// runPlanner straight into the usage-limit branch without needing a real
+// claude invocation or stream-json fixture.
+type fakeUsageLimitPlannerEngine struct {
+	calls atomic.Int32
+}
+
+func (f *fakeUsageLimitPlannerEngine) Name() string { return "fake-planner-usagelimit" }
+
+func (f *fakeUsageLimitPlannerEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.Cmd, string) {
+	f.calls.Add(1)
+	return exec.Command("true"), ""
+}
+
+func (f *fakeUsageLimitPlannerEngine) ParseLine(line string, state *engine.RunState) {}
+
+func (f *fakeUsageLimitPlannerEngine) ClassifyExit(waitErr error, stderrTail string, state engine.RunState) error {
+	return &engine.UsageLimitError{}
+}
+
+func (f *fakeUsageLimitPlannerEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("true") }
+
+func (f *fakeUsageLimitPlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+
+func (f *fakeUsageLimitPlannerEngine) StartupTimeout() time.Duration { return 0 }
+
+// TestPlannerUsageLimitBlocksForAutoResume is RBG-45's fix for runPlanner's
+// usage-limit handling: hitting the limit must stop the round loop right
+// there (plan_round never increments, since the engine never got a chance
+// to write a plan at all) and block through the same path a crashed
+// coding invocation would -- which also registers the note for main.go's
+// auto-resume once the limit resets. Before the fix, this fell through to
+// the plan-parse check, burned a round, and immediately re-ran the
+// (still-paused) planner, reaching blocked after 3 instant rounds instead
+// of waiting for the reset.
+func TestPlannerUsageLimitBlocksForAutoResume(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "plannerusagelimit-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue,
+	}, "Trivial multi-unit task.")
+
+	planner := &fakeUsageLimitPlannerEngine{}
+	var p pause.State
+
+	var gotJob *worker.Job
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		EngineRegistry:   map[string]engine.Engine{"claude": planner},
+		MultiUnitEnabled: true,
+		Jev:              &jev.Client{APIKey: ""},
+		Pause:            &p,
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			gotJob = &j
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	cleanupTaskBranch(t, slug)
+
+	if err := ProcessTask(deps, noopReporter{}, job); err == nil {
+		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
+	}
+
+	if got := planner.calls.Load(); got != 1 {
+		t.Errorf("planner engine ran %d times, want exactly 1 (the usage limit must stop the round loop, not retry instantly)", got)
+	}
+
+	assertBlocked(t, v, relPath, ScenarioUsageLimit, gotJob, gotAlert)
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.PlanRound != 0 {
+		t.Errorf("plan_round = %d, want 0 (unchanged -- the usage limit must not burn a round)", noteAfter.Frontmatter.PlanRound)
+	}
+
+	// Trip/AddBlockedNote are keyed by the resolved plan-engine *role* name
+	// (planEngineName in runPlanner -- "claude" here, since nothing pins
+	// plan_engine and PlanEngineDefault is unset), not the fake engine's
+	// own Name() -- same distinction resolveCodingEngineName/
+	// resolveReviewEngineName draw elsewhere in this package.
+	if !p.IsPaused("claude") {
+		t.Error("pause was not tripped by the planner's usage-limit block")
+	}
+	snap := p.Snapshot("claude")
+	found := false
+	for _, n := range snap.BlockedNotes {
+		if n == relPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("BlockedNotes = %v, want it to contain %q (registered for auto-resume)", snap.BlockedNotes, relPath)
 	}
 }
