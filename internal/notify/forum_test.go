@@ -102,6 +102,34 @@ func TestPostForumClaimFailsAfterExhaustingRetry(t *testing.T) {
 	}
 }
 
+// TestPostToThreadReturnsMessageID confirms PostToThread posts into the
+// given thread (?wait=true&thread_id=) and decodes the posted message's
+// own id out of the response, as opposed to PostForumClaim's channel_id.
+func TestPostToThreadReturnsMessageID(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"123"}`))
+	}))
+	defer srv.Close()
+
+	messageID, err := PostToThread(srv.URL, "999888777", "plan needs review", "plan-round-1.md", "# Plan\n\nsome content\n")
+	if err != nil {
+		t.Fatalf("PostToThread: %v", err)
+	}
+	if messageID != "123" {
+		t.Errorf("messageID = %q, want %q", messageID, "123")
+	}
+	if !strings.Contains(gotQuery, "wait=true") {
+		t.Errorf("query = %q, want it to contain wait=true", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "thread_id=999888777") {
+		t.Errorf("query = %q, want it to contain thread_id=999888777", gotQuery)
+	}
+}
+
 // TestSendRoutesToForumWebhookWhenThreadIDAndForumURLSet confirms Send
 // posts into the task's own thread (via ForumWebhookURL, ?thread_id=) when
 // both a threadID and a configured ForumWebhookURL are present, not the

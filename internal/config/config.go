@@ -125,6 +125,12 @@ type Config struct {
 	// defaults to "jev-latest".
 	JevModel string
 
+	// MultiUnitEnabled gates the whole multi-unit path (triage, planner,
+	// plan gate) on or off. Optional, defaults to false -- with it false,
+	// ProcessTask behaves exactly as it did before the multi-unit path
+	// existed: no triage, and a note's `multi_unit` field is ignored.
+	MultiUnitEnabled bool
+
 	// From repos.json
 	Repos map[string]RepoConfig
 
@@ -361,6 +367,14 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 	}
 	if v, ok := raw["JEV_MODEL"]; ok && v != "" {
 		cfg.JevModel = v
+	}
+
+	if v, ok := raw["MULTI_UNIT_ENABLED"]; ok && v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: MULTI_UNIT_ENABLED must be a boolean, got %q (in %s)", v, envPath)
+		}
+		cfg.MultiUnitEnabled = b
 	}
 
 	repos, err := loadRepos(reposPath)

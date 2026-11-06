@@ -206,6 +206,77 @@ func postDiscordAlert(webhookURL, threadID, content, attachmentName, attachmentB
 	return nil
 }
 
+// PostToThread posts one message, with an optional attachment, into an
+// existing Discord thread via a forum-channel webhook -- same payload_json
+// + fileN multipart shape as postDiscordAlert, but synchronous and
+// decoding the posted message's own id from the ?wait=true response,
+// since the plan gate's caller needs that id back to store as
+// plan_message_id for a later reaction poller. No retry of its own: a
+// caller that needs one wraps this itself.
+func PostToThread(webhookURL, threadID, content, attachmentName, attachmentBody string) (messageID string, err error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	payloadJSON, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		return "", fmt.Errorf("marshaling payload_json: %w", err)
+	}
+	if err := w.WriteField("payload_json", string(payloadJSON)); err != nil {
+		return "", fmt.Errorf("writing payload_json field: %w", err)
+	}
+
+	if attachmentName != "" || attachmentBody != "" {
+		part, err := w.CreatePart(map[string][]string{
+			"Content-Disposition": {fmt.Sprintf(`form-data; name="file1"; filename=%q`, attachmentName)},
+			"Content-Type":        {"text/markdown"},
+		})
+		if err != nil {
+			return "", fmt.Errorf("creating file1 part: %w", err)
+		}
+		if _, err := part.Write([]byte(attachmentBody)); err != nil {
+			return "", fmt.Errorf("writing attachment body: %w", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("closing multipart writer: %w", err)
+	}
+
+	url := webhookURL + "?wait=true"
+	if threadID != "" {
+		url += "&thread_id=" + threadID
+	}
+	req, err := http.NewRequest(http.MethodPost, url, &buf)
+	if err != nil {
+		return "", fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("posting to discord: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("discord returned status %d: %s", resp.StatusCode, data)
+	}
+
+	var decoded struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	if decoded.ID == "" {
+		return "", fmt.Errorf("discord response missing id")
+	}
+	return decoded.ID, nil
+}
+
 // PostForumClaim creates a new Discord forum post (thread_name in the
 // body) via a forum-channel webhook -- the claim message that gives a
 // freshly claimed task its own thread. Synchronous, with a short timeout

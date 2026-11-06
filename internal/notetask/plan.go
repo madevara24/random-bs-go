@@ -58,6 +58,67 @@ func ParsePlanUnits(planSection string) ([]PlanUnit, error) {
 	return units, nil
 }
 
+// PlanQuestion is one entry in a multi-unit plan's optional `questions:`
+// block -- a question the planner itself was unsure about, re-asked at
+// gate time (see plangate.GateQuestions) so Jev can judge its confidence
+// against the finished plan.
+type PlanQuestion struct {
+	Instructions string            `yaml:"instructions"`
+	Options      map[string]string `yaml:"options"`
+}
+
+// planQuestionsBlock is the wire shape of the Plan section's optional
+// second ```yaml fenced block.
+type planQuestionsBlock struct {
+	Questions map[string]PlanQuestion `yaml:"questions"`
+}
+
+// ParsePlanQuestions parses planSection's optional `questions:` fenced
+// block, trying every ```yaml fenced block in order (not just the second
+// one positionally) and returning the first that actually has a non-empty
+// `questions:` key -- the units list block is also YAML but unmarshals to
+// an empty Questions map, so it's skipped naturally. Returns nil, nil if
+// no such block exists; this section is optional, unlike the units list.
+func ParsePlanQuestions(planSection string) (map[string]PlanQuestion, error) {
+	for _, block := range fencedBlocks(planSection, planYAMLFenceOpen) {
+		var parsed planQuestionsBlock
+		if err := yaml.Unmarshal([]byte(block), &parsed); err != nil {
+			continue
+		}
+		if len(parsed.Questions) > 0 {
+			return parsed.Questions, nil
+		}
+	}
+	return nil, nil
+}
+
+// fencedBlocks returns the contents of every fenced block opened by
+// openFence (e.g. "```yaml") and closed by a bare "```" line, in order.
+func fencedBlocks(text, openFence string) []string {
+	lines := strings.Split(text, "\n")
+	var blocks []string
+	i := 0
+	for i < len(lines) {
+		if strings.TrimSpace(lines[i]) != openFence {
+			i++
+			continue
+		}
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) == planFenceClose {
+				end = j
+				break
+			}
+		}
+		if end == -1 {
+			break
+		}
+		blocks = append(blocks, strings.Join(lines[i+1:end], "\n"))
+		i = end + 1
+	}
+	return blocks
+}
+
 // firstFencedBlock returns the contents of the first fenced block opened by
 // openFence (e.g. "```yaml") and closed by a bare "```" line, or false if no
 // such block exists.

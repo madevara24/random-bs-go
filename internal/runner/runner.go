@@ -18,6 +18,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/engine"
+	"github.com/madevara24/random-bs-go/internal/jev"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/taskmeta"
@@ -218,6 +219,28 @@ type Deps struct {
 	// with status still "done" in the vault note and no signal anywhere
 	// else that the loop never finished.
 	OnMergeGateError func(job worker.Job, prURL, discordThreadID string, err error)
+
+	// Jev calls TypeSafe's judgment model for triage and the plan gate --
+	// nil is valid (every call site here falls back to jev.ErrNoAPIKey's
+	// fail-safe behavior) for a caller that doesn't wire one in. Unlike
+	// most of this Deps struct, this is a concrete client, not a
+	// callback: the multi-unit path (internal/runner/multiunit.go,
+	// planner.go) is new enough that it doesn't carry the older
+	// no-notify/no-jev-import discipline the rest of this struct follows.
+	Jev *jev.Client
+
+	// MultiUnitEnabled gates the whole multi-unit path (triage, planner,
+	// plan gate) on or off -- false means ProcessTask behaves exactly as
+	// it did before this path existed: no triage, and a note's
+	// `multi_unit` field is ignored.
+	MultiUnitEnabled bool
+
+	// ForumWebhookURL, if set, is the forum-channel webhook the plan
+	// gate's stop branch posts the Plan into for human review via
+	// notify.PostToThread -- "" means that post is skipped (no thread to
+	// post into), and the task still flips to status: plan_review with no
+	// plan_message_id.
+	ForumWebhookURL string
 }
 
 func (d Deps) engine() engine.Engine {
@@ -313,11 +336,30 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 
 	resume := note.Frontmatter.SessionID != nil && *note.Frontmatter.SessionID != ""
 
+	// Triage runs (if at all) before the in_progress write, so its result
+	// and Runner Log line land in that same commit -- triagePath itself is
+	// a no-op (false, "") whenever the flag is off, this is a resume, or
+	// the author already pinned multi_unit, so this is always safe to call.
+	var triagedMultiUnit bool
+	var triageLogLine string
+	if !resume {
+		triagedMultiUnit, triageLogLine = triagePath(deps, job, note)
+	}
+
 	if !resume {
 		err := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: start %s", job.Slug), func(n *notetask.Note) error {
 			n.Frontmatter.Status = "in_progress"
 			if n.Frontmatter.Engine == nil || *n.Frontmatter.Engine == "" {
 				n.Frontmatter.Engine = &codingEngineName
+			}
+			if deps.MultiUnitEnabled {
+				if n.Frontmatter.MultiUnit == nil {
+					mu := triagedMultiUnit
+					n.Frontmatter.MultiUnit = &mu
+				}
+				if triageLogLine != "" {
+					notetask.AppendRunnerLog(n, triageLogLine, time.Now())
+				}
 			}
 			notetask.AppendRunnerLog(n, "in_progress", time.Now())
 			return nil
@@ -404,6 +446,15 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	}
 
 	reporter.SetStage("invocation")
+
+	// multi_unit routes to the planner/plan-gate path instead of today's
+	// single coding run -- resolved from the note as it stands now (after
+	// the in_progress write + triage above, for a fresh run; as originally
+	// read, for a resume), gated on the flag so a flag-off run never takes
+	// this branch regardless of what the note's own multi_unit says.
+	if deps.MultiUnitEnabled && note.Frontmatter.MultiUnit != nil && *note.Frontmatter.MultiUnit {
+		return processMultiUnit(deps, reporter, job, note, repoCfg)
+	}
 
 	prompt := buildPrompt(note, copyName, resume, repoCfg.DefaultBranch, branchName, localOnlyResume)
 	var priorSessionID string

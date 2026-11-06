@@ -75,6 +75,16 @@ const ScenarioUsageLimit Scenario = 5
 // handleCrashFallback and ProcessTask's self-reported-blocked block.
 const ScenarioPreserveFailure Scenario = 6
 
+// ScenarioPlannerFailure: a multi-unit task's planner session couldn't be
+// resolved, or ran out its round budget (3) without producing a plan whose
+// units all parse and have a non-empty id/title/verify -- see
+// internal/runner/planner.go's runPlanner. Not a crash in the sense the
+// other scenarios are (the planner engine, if it ran at all, exited
+// cleanly every time); it's its own family because neither "setup failed
+// before invocation" nor "the coding engine didn't finish cleanly" fits
+// what actually happened here.
+const ScenarioPlannerFailure Scenario = 7
+
 func (s Scenario) String() string {
 	switch s {
 	case ScenarioNoCopy:
@@ -91,6 +101,8 @@ func (s Scenario) String() string {
 		return "usage_limit"
 	case ScenarioPreserveFailure:
 		return "preserve_failure"
+	case ScenarioPlannerFailure:
+		return "planner_failure"
 	default:
 		return "unknown"
 	}
