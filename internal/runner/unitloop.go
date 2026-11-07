@@ -171,10 +171,19 @@ func gitRevParse(repoPath, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// errVerifyStartFailed marks a verify command that never got to run at all
+// (e.g. the shell itself couldn't start) -- distinct from one that ran and
+// failed verification, which the unit loop retries as a normal round:
+// retrying a command that can't even start will never succeed, so
+// runUnitLoop blocks on this immediately instead of burning a review round
+// (and feeding the coding session an empty, uninformative "failure").
+var errVerifyStartFailed = errors.New("verify command failed to start")
+
 // runUnitVerify runs unit's verify command in repoPath under a hard
 // timeout, returning its combined output. A nil error means it exited
 // zero; output is returned either way, since a failure's output is exactly
-// what gets fed back to the coding session as feedback.
+// what gets fed back to the coding session as feedback -- unless the error
+// wraps errVerifyStartFailed, which the caller blocks on instead.
 //
 // Started in its own process group (same SysProcAttr as invokeEngine) so a
 // timeout kill reaches every descendant the verify command spawned (e.g.
@@ -190,7 +199,7 @@ func runUnitVerify(repoPath, verifyCmd string, timeout time.Duration) (string, e
 	cmd.Stderr = &out
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("starting verify command `%s`: %w", verifyCmd, err)
+		return "", fmt.Errorf("%w: starting verify command `%s`: %v", errVerifyStartFailed, verifyCmd, err)
 	}
 
 	timer := time.AfterFunc(timeout, func() {
@@ -260,15 +269,35 @@ func blockUnitTask(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchN
 	return fmt.Errorf("runner: task %s blocked (unit loop): %s", job.Slug, reason)
 }
 
+// blockUnitTaskOnErr is runUnitLoop's shared conversion for a plain
+// infrastructure error (a vault read/write, a note-copy write, a git
+// command, a verify command that couldn't even start) that would
+// otherwise bubble a bare error out of processMultiUnit and strand the
+// task at in_progress. Routes through blockUnitTask, forcing this unit's
+// own status to blocked -- unlike a coding or review engine's own failure
+// (see runCodingRound and runUnitLoop's review step), there's no specific
+// resumable state worth preserving for an infrastructure error, so the
+// unit-level status is just informational here. unitID may be "" when the
+// failure happened before a unit was even identified (e.g. the unit
+// loop's own top-of-iteration note read).
+func blockUnitTaskOnErr(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchName, unitID, codingEngineName, label string, err error) error {
+	reason := fmt.Sprintf("%s: %v", label, err)
+	if unitID != "" {
+		reason = fmt.Sprintf("unit %s: %s", unitID, reason)
+	}
+	return blockUnitTask(deps, job, repoCfg, branchName, unitID, ScenarioUnitLoopBlocked, reason, nil, codingEngineName)
+}
+
 // runCodingRound runs one coding-engine invocation (fresh or resumed,
 // prompt supplied by the caller) for the unit named unitID, then records
 // whatever happened: the new session_id/head_sha always, and -- once a
 // note-copy shows up and parses -- the merged `## Handoff`/Work Log, in one
 // vault write. Blocks the whole task itself (via blockUnitTask) and
-// returns a non-nil error if the engine hits the usage limit, the copy
-// never shows up or fails to parse, or the copy self-reports status:
-// blocked; the caller only needs to propagate that error up, never build
-// its own alert for those cases.
+// returns a non-nil error if the engine itself fails (usage limit, or any
+// other invocation failure), the copy never shows up or fails to parse,
+// the copy self-reports status: blocked, or the vault write/re-read after
+// a successful copy read itself fails; the caller only needs to propagate
+// that error up, never build its own alert for those cases.
 func runCodingRound(deps Deps, reporter ActivityReporter, job worker.Job, repoCfg config.RepoConfig, branchName, copyPath, codingEngineName string, codingEng engine.Engine, unitID, prompt, resumeSessionID string) (*notetask.Note, error) {
 	sessionID, _, exitErr := invokeEngine(codingEng, repoCfg.Path, prompt, resumeSessionID, deps.idleTimeout(), reporter)
 	headSHA, _ := gitRevParse(repoCfg.Path, branchName)
@@ -303,11 +332,28 @@ func runCodingRound(deps Deps, reporter ActivityReporter, job worker.Job, repoCf
 			fmt.Sprintf("unit %s: coding engine %s hit its usage limit", unitID, codingEngineName),
 			usageLimitInfoOf(usageLimitErr), codingEngineName)
 	}
+	if exitErr != nil {
+		_ = deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: unit %s session %s", unitID, job.Slug), recordSessionHead)
+		// unitID="" here, not unitID: an invocation that failed outright
+		// leaves the unit's own status exactly as it already is
+		// (building), per RBG-49's resume rule -- a later
+		// blocker_resolved re-enters the building branch and tries a
+		// fresh coding round.
+		return nil, blockUnitTask(deps, job, repoCfg, branchName, "", ScenarioUnitLoopBlocked,
+			fmt.Sprintf("unit %s: coding engine %s invocation failed: %v", unitID, codingEngineName, exitErr),
+			nil, codingEngineName)
+	}
 
 	copyAfter, copyErr := readNoteCopy(copyPath)
 	if copyErr != nil {
 		_ = deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: unit %s session %s", unitID, job.Slug), recordSessionHead)
-		return nil, blockUnitTask(deps, job, repoCfg, branchName, unitID, ScenarioUnitLoopBlocked,
+		// unitID="" here, not unitID: a coding invocation that never
+		// produced a usable copy leaves the unit's own status exactly as
+		// it already is (building), per RBG-49's resume rule -- a later
+		// blocker_resolved re-enters the building branch and tries a
+		// fresh coding round, same as it would for any other
+		// still-building unit.
+		return nil, blockUnitTask(deps, job, repoCfg, branchName, "", ScenarioUnitLoopBlocked,
 			fmt.Sprintf("unit %s: coding session ended without a usable note-copy: %v", unitID, copyErr),
 			nil, codingEngineName)
 	}
@@ -323,7 +369,7 @@ func runCodingRound(deps Deps, reporter ActivityReporter, job worker.Job, repoCf
 		return nil
 	})
 	if writeErr != nil {
-		return nil, fmt.Errorf("runner: writing unit %s round for %s: %w", unitID, job.Slug, writeErr)
+		return nil, blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing coding round", writeErr)
 	}
 
 	if copyAfter.Frontmatter.Status == "blocked" {
@@ -333,7 +379,7 @@ func runCodingRound(deps Deps, reporter ActivityReporter, job worker.Job, repoCf
 
 	refreshed, err := deps.Vault.ReadNote(job.NotePath)
 	if err != nil {
-		return nil, fmt.Errorf("runner: re-reading note after unit %s round for %s: %w", unitID, job.Slug, err)
+		return nil, blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "re-reading note after coding round", err)
 	}
 	return refreshed, nil
 }
@@ -358,7 +404,7 @@ unitLoop:
 	for {
 		note, err := deps.Vault.ReadNote(job.NotePath)
 		if err != nil {
-			return fmt.Errorf("runner: reading note for unit loop %s: %w", job.Slug, err)
+			return blockUnitTaskOnErr(deps, job, repoCfg, branchName, "", codingEngineName, "reading note for unit loop", err)
 		}
 		if note.Frontmatter.CurrentUnit == nil {
 			return nil
@@ -367,17 +413,17 @@ unitLoop:
 
 		planUnits, err := notetask.ParsePlanUnits(note.Plan)
 		if err != nil {
-			return fmt.Errorf("runner: parsing plan units for %s: %w", job.Slug, err)
+			return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "parsing plan units", err)
 		}
 		unit, ok := findPlanUnit(planUnits, unitID)
 		if !ok {
-			return fmt.Errorf("runner: current_unit %q has no matching plan unit for %s", unitID, job.Slug)
+			return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "current_unit", errors.New("has no matching plan unit"))
 		}
 		unitPos := planUnitPosition(planUnits, unitID)
 		totalUnits := len(planUnits)
 		unitState, ok := findUnitState(note.Frontmatter.Units, unitID)
 		if !ok {
-			return fmt.Errorf("runner: current_unit %q has no matching units: entry for %s", unitID, job.Slug)
+			return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "current_unit", errors.New("has no matching units entry"))
 		}
 
 		// Building step: skipped entirely when resuming a unit already at
@@ -387,7 +433,7 @@ unitLoop:
 			if unitState.SessionID == "" {
 				headSHA, err := gitRevParse(repoCfg.Path, branchName)
 				if err != nil {
-					return fmt.Errorf("runner: resolving base_sha for unit %s on %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "resolving base_sha", err)
 				}
 				if err := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: unit %s building %s", unitID, job.Slug), func(n *notetask.Note) error {
 					mutateUnit(n, unitID, func(us *notetask.UnitState) {
@@ -397,16 +443,16 @@ unitLoop:
 					notetask.AppendRunnerLog(n, fmt.Sprintf("unit %s building", unitID), time.Now())
 					return nil
 				}); err != nil {
-					return fmt.Errorf("runner: writing unit %s building for %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing building status", err)
 				}
 				if note, err = deps.Vault.ReadNote(job.NotePath); err != nil {
-					return fmt.Errorf("runner: re-reading note after unit %s building write for %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "re-reading note after building write", err)
 				}
 				unitState, _ = findUnitState(note.Frontmatter.Units, unitID)
 			}
 
 			if err := writeNoteCopy(note, copyPath); err != nil {
-				return fmt.Errorf("runner: writing unit %s note-copy for %s: %w", unitID, job.Slug, err)
+				return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing note-copy", err)
 			}
 			prompt := buildUnitPrompt(unit, note.Handoff, copyName)
 			reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): building", unitID, unitPos, totalUnits))
@@ -423,7 +469,7 @@ unitLoop:
 		for {
 			unitState, ok = findUnitState(note.Frontmatter.Units, unitID)
 			if !ok {
-				return fmt.Errorf("runner: unit %s disappeared from units for %s", unitID, job.Slug)
+				return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "unit disappeared from units", errors.New("not found"))
 			}
 
 			if unitState.Status != notetask.UnitStatusReview {
@@ -435,12 +481,20 @@ unitLoop:
 						notetask.AppendRunnerLog(n, fmt.Sprintf("unit %s review", unitID), time.Now())
 						return nil
 					}); err != nil {
-						return fmt.Errorf("runner: writing unit %s review for %s: %w", unitID, job.Slug, err)
+						return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing review status", err)
 					}
 					if note, err = deps.Vault.ReadNote(job.NotePath); err != nil {
-						return fmt.Errorf("runner: re-reading note after unit %s review write for %s: %w", unitID, job.Slug, err)
+						return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "re-reading note after review-status write", err)
 					}
 					continue
+				}
+
+				// A verify command that couldn't even start would never
+				// succeed on retry -- block immediately instead of
+				// counting it as a review round and feeding the coding
+				// session empty, uninformative "failure" output.
+				if errors.Is(verifyErr, errVerifyStartFailed) {
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "verify", verifyErr)
 				}
 
 				if blocked, reason := checkUnitRoundCap(note.Frontmatter.Units, unitID); blocked {
@@ -450,10 +504,10 @@ unitLoop:
 					mutateUnit(n, unitID, func(us *notetask.UnitState) { us.ReviewRounds++ })
 					return nil
 				}); err != nil {
-					return fmt.Errorf("runner: writing unit %s verify-round for %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing verify-round", err)
 				}
 				if note, err = deps.Vault.ReadNote(job.NotePath); err != nil {
-					return fmt.Errorf("runner: re-reading note after unit %s verify-round write for %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "re-reading note after verify-round write", err)
 				}
 				unitState, _ = findUnitState(note.Frontmatter.Units, unitID)
 
@@ -480,7 +534,14 @@ unitLoop:
 					// coding call, re-reviewing fresh.
 					return nil
 				}
-				return fmt.Errorf("runner: reviewing unit %s for %s: %w", unitID, job.Slug, reviewErr)
+				// unitID="" here, not unitID: a review invocation that
+				// failed outright (crashed, couldn't start, timed out)
+				// leaves the unit's own status exactly as it already is
+				// (review), per RBG-49's resume rule -- a later
+				// blocker_resolved re-enters this same case and runs a
+				// fresh review, never a coding round.
+				return blockUnitTask(deps, job, repoCfg, branchName, "", ScenarioUnitLoopBlocked,
+					fmt.Sprintf("unit %s: reviewing: %v", unitID, reviewErr), nil, codingEngineName)
 			}
 
 			if verdict == VerdictApprove {
@@ -491,7 +552,7 @@ unitLoop:
 					notetask.AppendRunnerLog(n, fmt.Sprintf("unit %s done", unitID), time.Now())
 					return nil
 				}); err != nil {
-					return fmt.Errorf("runner: writing unit %s done for %s: %w", unitID, job.Slug, err)
+					return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing done status", err)
 				}
 				continue unitLoop
 			}
@@ -507,10 +568,10 @@ unitLoop:
 				})
 				return nil
 			}); err != nil {
-				return fmt.Errorf("runner: writing unit %s concerns for %s: %w", unitID, job.Slug, err)
+				return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "writing concerns", err)
 			}
 			if note, err = deps.Vault.ReadNote(job.NotePath); err != nil {
-				return fmt.Errorf("runner: re-reading note after unit %s concerns write for %s: %w", unitID, job.Slug, err)
+				return blockUnitTaskOnErr(deps, job, repoCfg, branchName, unitID, codingEngineName, "re-reading note after concerns write", err)
 			}
 			unitState, _ = findUnitState(note.Frontmatter.Units, unitID)
 

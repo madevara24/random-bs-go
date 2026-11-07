@@ -106,7 +106,7 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 
 	for {
 		if err := writeNoteCopy(note, copyPath); err != nil {
-			return fmt.Errorf("runner: writing planner note-copy for %s: %w", job.Slug, err)
+			return blockPlannerTask(deps, job, fmt.Sprintf("writing planner note-copy: %v", err))
 		}
 
 		prompt := buildPlannerPrompt(note, copyName, round)
@@ -164,11 +164,11 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 				return nil
 			})
 			if werr != nil {
-				return fmt.Errorf("runner: writing plan_round for %s: %w", job.Slug, werr)
+				return blockPlannerTask(deps, job, fmt.Sprintf("writing plan_round: %v", werr))
 			}
 			note, err = deps.Vault.ReadNote(job.NotePath)
 			if err != nil {
-				return fmt.Errorf("runner: re-reading note after plan_round write for %s: %w", job.NotePath, err)
+				return blockPlannerTask(deps, job, fmt.Sprintf("re-reading note after plan_round write: %v", err))
 			}
 			continue
 		}
@@ -181,11 +181,11 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 			return nil
 		})
 		if mergeErr != nil {
-			return fmt.Errorf("runner: merging plan for %s: %w", job.Slug, mergeErr)
+			return blockPlannerTask(deps, job, fmt.Sprintf("merging plan: %v", mergeErr))
 		}
 		note, err = deps.Vault.ReadNote(job.NotePath)
 		if err != nil {
-			return fmt.Errorf("runner: re-reading note after plan write for %s: %w", job.NotePath, err)
+			return blockPlannerTask(deps, job, fmt.Sprintf("re-reading note after plan write: %v", err))
 		}
 
 		return runPlanGate(deps, reporter, job, note, repoCfg, units, questions, branchName, codingEng, reviewEng)
@@ -300,7 +300,7 @@ func seedUnits(deps Deps, job worker.Job, units []notetask.PlanUnit, logLine str
 		return nil
 	})
 	if werr != nil {
-		return fmt.Errorf("runner: seeding units for %s: %w", job.Slug, werr)
+		return blockPlannerTask(deps, job, fmt.Sprintf("seeding units: %v", werr))
 	}
 	return nil
 }
@@ -341,7 +341,7 @@ func stopForPlanReview(deps Deps, job worker.Job, note *notetask.Note, repoCfg c
 		return nil
 	})
 	if werr != nil {
-		return fmt.Errorf("runner: writing plan_review for %s: %w", job.Slug, werr)
+		return blockPlannerTask(deps, job, fmt.Sprintf("writing plan_review: %v", werr))
 	}
 	return nil
 }
@@ -390,11 +390,11 @@ func resolvePlanReview(deps Deps, reporter ActivityReporter, job worker.Job, not
 		return nil
 	})
 	if werr != nil {
-		return fmt.Errorf("runner: writing plan_round for %s: %w", job.Slug, werr)
+		return blockPlannerTask(deps, job, fmt.Sprintf("writing plan_round: %v", werr))
 	}
 	refreshed, err := deps.Vault.ReadNote(job.NotePath)
 	if err != nil {
-		return fmt.Errorf("runner: re-reading note after plan_round write for %s: %w", job.NotePath, err)
+		return blockPlannerTask(deps, job, fmt.Sprintf("re-reading note after plan_round write: %v", err))
 	}
 	return runPlanner(deps, reporter, job, refreshed, repoCfg, branchName, codingEng, reviewEng)
 }

@@ -115,6 +115,35 @@ func (f *fakePlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) {
 
 func (f *fakePlannerEngine) StartupTimeout() time.Duration { return 0 }
 
+// fakeFailingPlannerEngine simulates a planner session whose invocation
+// itself exits non-zero -- it never touches the note-copy, so
+// runPlanner's own round-retry loop (an unusable plan, same as a parse
+// failure) is what eventually blocks the task, exactly as it does today;
+// RBG-49's requirement is only that it still must, never leaving the note
+// at in_progress.
+type fakeFailingPlannerEngine struct {
+	calls atomic.Int32
+}
+
+func (f *fakeFailingPlannerEngine) Name() string { return "fake-planner-crash" }
+
+func (f *fakeFailingPlannerEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.Cmd, string) {
+	f.calls.Add(1)
+	return exec.Command("false"), ""
+}
+
+func (f *fakeFailingPlannerEngine) ParseLine(line string, state *engine.RunState) {}
+
+func (f *fakeFailingPlannerEngine) ClassifyExit(waitErr error, stderrTail string, state engine.RunState) error {
+	return waitErr
+}
+
+func (f *fakeFailingPlannerEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("true") }
+
+func (f *fakeFailingPlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+
+func (f *fakeFailingPlannerEngine) StartupTimeout() time.Duration { return 0 }
+
 // newJevServer starts an httptest server that always answers Jev requests
 // with responseJSON, regardless of which questions were actually asked --
 // a single generous canned answer set (every id either test needs) covers

@@ -221,13 +221,14 @@ func lastUnitSessionID(units []notetask.UnitState) string {
 func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, repoCfg config.RepoConfig, branchName string, codingEng, reviewEng engine.Engine) error {
 	note, err := deps.Vault.ReadNote(job.NotePath)
 	if err != nil {
-		return fmt.Errorf("runner: reading note to finish multi-unit %s: %w", job.Slug, err)
+		return blockFinishFailure(deps, job, repoCfg, branchName, "reading note to finish",
+			fmt.Errorf("reading note to finish multi-unit %s: %w", job.Slug, err))
 	}
 
 	reporter.SetStage("finish: opening PR")
 	prURL, err := openTaskPR(repoCfg, branchName, taskTitle(job.NotePath), multiUnitPRBody(note))
 	if err != nil {
-		return blockOpenPRFailure(deps, job, repoCfg, branchName, err)
+		return blockFinishFailure(deps, job, repoCfg, branchName, "opening pull request", err)
 	}
 
 	discordThreadID := threadIDOf(note)
@@ -238,7 +239,11 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 		return nil
 	})
 	if werr != nil {
-		return fmt.Errorf("runner: writing done+pr_url for %s: %w", job.Slug, werr)
+		// The PR is already open at prURL -- name it in the alert so it
+		// isn't orphaned: a human resolving this block needs to find it
+		// without digging through gh themselves.
+		return blockFinishFailure(deps, job, repoCfg, branchName, "writing done+pr_url",
+			fmt.Errorf("writing done+pr_url for %s (PR already opened at %s): %w", job.Slug, prURL, werr))
 	}
 
 	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
@@ -254,21 +259,24 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 	return nil
 }
 
-// blockOpenPRFailure is finishMultiUnitTask's one failure path: opening
-// the task's PR didn't work, so the task blocks with its branch preserved
+// blockFinishFailure is finishMultiUnitTask's one failure path, covering
+// every way finishing can go wrong once every unit is already done:
+// re-reading the note, opening the task's PR, or writing back done/pr_url
+// once the PR is open. Blocks with the branch preserved
 // (preserveBlockedWork) and the usual Discord alert -- same "always write
 // blocked, always alert" contract every other blocked family in this
-// package follows.
-func blockOpenPRFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchName string, openErr error) error {
+// package follows. label names the stage for the alert and Runner Log
+// line; failErr is the underlying error.
+func blockFinishFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchName, label string, failErr error) error {
 	var discordThreadID string
-	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (open PR)", job.Slug), func(n *notetask.Note) error {
+	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (%s)", job.Slug, label), func(n *notetask.Note) error {
 		discordThreadID = threadIDOf(n)
 		n.Frontmatter.Status = "blocked"
-		notetask.AppendRunnerLog(n, "blocked: opening PR failed: "+oneLine(openErr.Error(), oneLineMaxRunes), time.Now())
+		notetask.AppendRunnerLog(n, fmt.Sprintf("blocked: %s failed: %s", label, oneLine(failErr.Error(), oneLineMaxRunes)), time.Now())
 		return nil
 	})
 	if writeErr != nil {
-		fmt.Printf("[runner] task %s: failed to write blocked status after PR-open failure: %v\n", job.Slug, writeErr)
+		fmt.Printf("[runner] task %s: failed to write blocked status after %s failure: %v\n", job.Slug, label, writeErr)
 	}
 
 	var preserveErrText string
@@ -281,11 +289,11 @@ func blockOpenPRFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, br
 		Slug:            job.Slug,
 		Repo:            job.Repo,
 		Scenario:        ScenarioOpenPRFailure,
-		Stage:           "opening pull request",
+		Stage:           label,
 		DiscordThreadID: discordThreadID,
 		ExitCode:        -1,
-		ExitErrText:     openErr.Error(),
-		PRState:         "unknown (opening the PR is what failed)",
+		ExitErrText:     failErr.Error(),
+		PRState:         "unknown (" + label + " is what failed)",
 		LogPointer:      "(per-task transcript logging not yet built -- see Design - Runner.md's Open section)",
 		PreserveErr:     preserveErrText,
 		RepoPath:        repoCfg.Path,
@@ -294,6 +302,6 @@ func blockOpenPRFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, br
 		deps.OnBlocked(job, payload)
 	}
 
-	fmt.Printf("[runner] task %s: blocked (opening PR failed): %v\n", job.Slug, openErr)
-	return fmt.Errorf("runner: task %s blocked (opening PR failed): %w", job.Slug, openErr)
+	fmt.Printf("[runner] task %s: blocked (%s failed): %v\n", job.Slug, label, failErr)
+	return fmt.Errorf("runner: task %s blocked (%s failed): %w", job.Slug, label, failErr)
 }
