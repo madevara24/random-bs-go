@@ -33,6 +33,21 @@ type noopReporter struct{}
 func (noopReporter) SetStage(string) {}
 func (noopReporter) TouchActivity()  {}
 
+// recordingReporter is a fake ActivityReporter that records every SetStage
+// value in call order, so tests can assert on the exact stages a run
+// reports (e.g. the multi-unit planner/unit-loop/finish sequence).
+type recordingReporter struct {
+	stages []string
+}
+
+func (r *recordingReporter) SetStage(stage string) { r.stages = append(r.stages, stage) }
+func (r *recordingReporter) TouchActivity()        {}
+
+// stagesSeen returns a copy of the stages recorded so far, in call order.
+func (r *recordingReporter) stagesSeen() []string {
+	return append([]string(nil), r.stages...)
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
