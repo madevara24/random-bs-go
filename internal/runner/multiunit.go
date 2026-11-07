@@ -224,6 +224,7 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 		return fmt.Errorf("runner: reading note to finish multi-unit %s: %w", job.Slug, err)
 	}
 
+	reporter.SetStage("finish: opening PR")
 	prURL, err := openTaskPR(repoCfg, branchName, taskTitle(job.NotePath), multiUnitPRBody(note))
 	if err != nil {
 		return blockOpenPRFailure(deps, job, repoCfg, branchName, err)

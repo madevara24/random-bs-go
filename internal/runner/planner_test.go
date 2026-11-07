@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -101,8 +102,33 @@ func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), fakePRURL)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
+	reporter := &recordingReporter{}
+	if err := ProcessTask(deps, reporter, job); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
+	}
+
+	wantStages := []string{
+		"plan: planner round 1",
+		"plan: gate",
+		"unit U1 (1/2): building",
+		"unit U1 (1/2): verify",
+		"unit U1 (1/2): review round 1",
+		"unit U2 (2/2): building",
+		"unit U2 (2/2): verify",
+		"unit U2 (2/2): review round 1",
+		"finish: opening PR",
+	}
+	stages := reporter.stagesSeen()
+	// ProcessTask reports its generic setup/invocation stages before it
+	// reaches the multi-unit branch; the single-session path still relies
+	// on those, so assert they're unchanged, then the multi-unit stages
+	// themselves start right after them.
+	wantPrefix := []string{"setup", "invocation"}
+	if len(stages) < len(wantPrefix) || !reflect.DeepEqual(stages[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("reported stages = %v, want prefix %v", stages, wantPrefix)
+	}
+	if got := stages[len(wantPrefix):]; !reflect.DeepEqual(got, wantStages) {
+		t.Errorf("reported stages = %v, want %v", got, wantStages)
 	}
 
 	noteAfter, err := v.ReadNote(relPath)
