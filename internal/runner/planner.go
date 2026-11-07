@@ -110,6 +110,7 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 		}
 
 		prompt := buildPlannerPrompt(note, copyName, round)
+		reporter.SetStage(fmt.Sprintf("plan: planner round %d", round))
 		_, stderrTail, exitErr := invokeEngine(planEng, repoCfg.Path, prompt, "", deps.idleTimeout(), reporter)
 
 		var usageLimitErr *engine.UsageLimitError
@@ -268,6 +269,7 @@ func runPlanGate(deps Deps, reporter ActivityReporter, job worker.Job, note *not
 		"auto_merge": autoMerge,
 	}
 
+	reporter.SetStage("plan: gate")
 	answers, askErr := askJev(deps.Jev, state, plangate.GateQuestions(plannerQuestions), gateTimeout)
 	result := plangate.DecideGate(hard, answers, plannerQuestionIDs, askErr)
 	logLine := oneLine(gateLogLine(askErr, answers, plannerQuestionIDs, result.Stop), oneLineMaxRunes)
