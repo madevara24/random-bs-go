@@ -339,7 +339,11 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		})
 	}
 
-	resume := note.Frontmatter.SessionID != nil && *note.Frontmatter.SessionID != ""
+	// A multi-unit task never sets this top-level session_id (only each
+	// unit's own, in UnitState), so SessionID alone can't tell a resume
+	// apart from a fresh claim the way it does for a single-session task --
+	// multiUnitContinuing covers that other half (see its own doc comment).
+	resume := (note.Frontmatter.SessionID != nil && *note.Frontmatter.SessionID != "") || multiUnitContinuing(deps, note)
 
 	// Triage runs (if at all) before the in_progress write, so its result
 	// and Runner Log line land in that same commit -- triagePath itself is

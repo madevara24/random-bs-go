@@ -47,7 +47,7 @@ type Enqueuer interface {
 }
 
 func claimableStatus(s string) bool {
-	return s == "ready" || s == "blocker_resolved"
+	return s == "ready" || s == "blocker_resolved" || s == taskmeta.StatusPlanApproved || s == taskmeta.StatusPlanRejected
 }
 
 type scannedNote struct {

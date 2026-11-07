@@ -314,6 +314,55 @@ func TestRunDispatchPassResolvesEngine(t *testing.T) {
 	}
 }
 
+// TestDispatchClaimsPlanStatuses confirms plan_approved and plan_rejected
+// are claimed (status flips to queued, enqueued) exactly like ready/
+// blocker_resolved, while plan_review -- still waiting on a human
+// reaction -- is left untouched.
+func TestDispatchClaimsPlanStatuses(t *testing.T) {
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	path := func(name string) string { return fmt.Sprintf("Tasks/planstatus-%s-%s.md", run, name) }
+
+	testvault.Seed(t, path("approved"), notetask.Frontmatter{
+		Status: "plan_approved", Repo: "repo-a", Created: "2026-11-01",
+	}, "Approved plan.")
+	testvault.Seed(t, path("rejected"), notetask.Frontmatter{
+		Status: "plan_rejected", Repo: "repo-b", Created: "2026-11-01",
+	}, "Rejected plan.")
+	testvault.Seed(t, path("review"), notetask.Frontmatter{
+		Status: "plan_review", Repo: "repo-c", Created: "2026-11-01",
+	}, "Still waiting on a reaction.")
+
+	enq := &recordingEnqueuer{}
+	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	if n := readNote(t, v.Path, path("approved")); n.Frontmatter.Status != "queued" {
+		t.Errorf("approved note status = %q, want queued", n.Frontmatter.Status)
+	}
+	if n := readNote(t, v.Path, path("rejected")); n.Frontmatter.Status != "queued" {
+		t.Errorf("rejected note status = %q, want queued", n.Frontmatter.Status)
+	}
+	if n := readNote(t, v.Path, path("review")); n.Frontmatter.Status != "plan_review" {
+		t.Errorf("plan_review note status = %q, want it untouched", n.Frontmatter.Status)
+	}
+
+	var gotRepos []string
+	for _, c := range enq.calls {
+		gotRepos = append(gotRepos, c.repoKey)
+	}
+	if len(gotRepos) != 2 {
+		t.Fatalf("enqueued %d jobs, want 2 (approved+rejected, not plan_review): %+v", len(gotRepos), gotRepos)
+	}
+}
+
 func enqOrder(e *recordingEnqueuer) []string {
 	var out []string
 	for _, c := range e.calls {

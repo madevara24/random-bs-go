@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/pause"
+	"github.com/madevara24/random-bs-go/internal/planpoll"
 	"github.com/madevara24/random-bs-go/internal/runner"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
@@ -146,6 +148,23 @@ func runRunner(cfg *config.Config) {
 	go r.RunDispatchLoop(func(err error) {
 		fmt.Printf("[runner] dispatch pass error: %v\n", err)
 	})
+
+	// The human half of the plan gate (RBG-47): polls plan_review notes for
+	// a reaction, writes plan_approved/plan_rejected, and wakes dispatch to
+	// claim it immediately. Only runs with a forum webhook configured --
+	// with MULTI_UNIT_ENABLED off (today's default), no note ever reaches
+	// plan_review, so this finds nothing and makes no Discord calls either
+	// way.
+	if cfg.DiscordTaskForumWebhookURL != "" {
+		wake := func() {
+			select {
+			case r.DispatchWake <- struct{}{}:
+			default:
+			}
+		}
+		go planpoll.Run(context.Background(), vault, cfg.DiscordTaskForumWebhookURL, wake, time.Minute)
+		fmt.Printf("[runner] plan-review poller started (interval=1m)\n")
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	server = httpapi.New(r.DispatchWake, workers, vault, pauseState)

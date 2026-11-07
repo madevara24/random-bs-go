@@ -417,3 +417,179 @@ func TestPlannerUsageLimitBlocksForAutoResume(t *testing.T) {
 		t.Errorf("BlockedNotes = %v, want it to contain %q (registered for auto-resume)", snap.BlockedNotes, relPath)
 	}
 }
+
+// promptCapturingPlannerEngine wraps fakePlannerEngine, recording every
+// prompt BuildCommand was invoked with, in call order --
+// TestRejectedReplansWithFeedback's own way of inspecting what
+// resolvePlanReview's replan path actually handed the planner engine.
+// Reused as the unit loop's coding/review engine too once the replanned
+// plan clears the gate (same single-fake-engine pattern multiunit_test.go
+// itself uses), so prompts[0] specifically -- not whatever ran last -- is
+// the planner round's own prompt.
+type promptCapturingPlannerEngine struct {
+	*fakePlannerEngine
+	prompts []string
+}
+
+func (f *promptCapturingPlannerEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.Cmd, string) {
+	f.prompts = append(f.prompts, prompt)
+	return f.fakePlannerEngine.BuildCommand(dir, prompt, resumeSessionID)
+}
+
+// TestRejectedPastCapBlocks confirms a plan rejected at its third round --
+// maxPlanRounds's own cap, shared with runPlanner's unusable-plan retries --
+// blocks the task rather than spending a 4th round, and fires the usual
+// alert. Calls processMultiUnit directly (bypassing dispatch's generic
+// claim write and ProcessTask's own setup, same as multiunit_test.go's
+// other direct-call tests) since resolvePlanReview's decision comes from
+// the round's own review text, not frontmatter.Status.
+func TestRejectedPastCapBlocks(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "rejectedcap-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "plan_rejected", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue, PlanRound: 3,
+	}, "Trivial multi-unit task.")
+
+	if err := v.WriteNote(relPath, "test: seed plan+review "+slug, func(n *notetask.Note) error {
+		n.HasPlan = true
+		n.Plan = cleanPlanBody(3)
+		n.HasPlanReview = true
+		n.PlanReview = "### Round 3\n\nUse a different approach for U1."
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding plan+review: %v", err)
+	}
+
+	var blockedPayload *AlertPayload
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		MultiUnitEnabled: true,
+		OnBlocked: func(job worker.Job, payload AlertPayload) {
+			blockedPayload = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note: %v", err)
+	}
+
+	if err := processMultiUnit(deps, noopReporter{}, job, note, testRepoDeps()["phase6-test-repo"], "task/"+slug, nil, nil); err == nil {
+		t.Fatal("processMultiUnit returned nil error, want an error for a blocked task")
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+	if noteAfter.Frontmatter.PlanRound != 3 {
+		t.Errorf("plan_round = %d, want unchanged 3 (no 4th round ever attempted)", noteAfter.Frontmatter.PlanRound)
+	}
+	if blockedPayload == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+}
+
+// TestRejectedReplansWithFeedback confirms a plan rejected at round 1 --
+// under the cap -- increments plan_round and re-runs the planner with that
+// round's own review text folded into the prompt (buildPlannerPrompt's own
+// round>1 branch), then runs the gate again on whatever the planner wrote
+// this time.
+func TestRejectedReplansWithFeedback(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "rejectedreplan-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "plan_rejected", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue, PlanRound: 1,
+	}, "Trivial multi-unit task.")
+
+	// The rejected round's own plan text is deliberately different from
+	// what the fake planner engine writes on replan (cleanPlanBody) --
+	// otherwise runPlanner's "plan_written" merge write would have nothing
+	// to commit (identical content), which fails outright rather than
+	// exercising the replan path this test is actually about.
+	if err := v.WriteNote(relPath, "test: seed plan+review "+slug, func(n *notetask.Note) error {
+		n.HasPlan = true
+		n.Plan = "Stale rejected plan.\n\n```yaml\n- id: U0\n  title: stale\n  verify: \"true\"\n```\n"
+		n.HasPlanReview = true
+		n.PlanReview = "### Round 1\n\nuse X instead of Y"
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding plan+review: %v", err)
+	}
+
+	jevSrv, _ := newJevServer(t, `{"answers":{"risky":{"noul":0.1},"ambiguous":{"noul":0.1}}}`)
+	planner := &promptCapturingPlannerEngine{fakePlannerEngine: &fakePlannerEngine{copyName: copyFileName(slug), planBody: cleanPlanBody}}
+
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		EngineRegistry:   map[string]engine.Engine{"claude": planner},
+		MultiUnitEnabled: true,
+		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName, _ := setupUnitLoopBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	// The replanned plan clears the gate (low risky/ambiguous) and seeds
+	// units straight into the unit loop, which reaches this task's finish
+	// step -- a fake `gh` stands in for the real GitHub-hosted remote
+	// testTargetRepoPath doesn't have.
+	binDir := t.TempDir()
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), "https://github.com/fake-owner/fake-repo/pull/1")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note: %v", err)
+	}
+
+	if err := processMultiUnit(deps, noopReporter{}, job, note, testRepoDeps()["phase6-test-repo"], branchName, planner, planner); err != nil {
+		t.Fatalf("processMultiUnit: %v", err)
+	}
+
+	if len(planner.prompts) == 0 {
+		t.Fatal("planner was never invoked")
+	}
+	if !strings.Contains(planner.prompts[0], "use X instead of Y") {
+		t.Errorf("planner's own (first) prompt missing round 1's review text: %q", planner.prompts[0])
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.PlanRound != 2 {
+		t.Errorf("plan_round = %d, want 2", noteAfter.Frontmatter.PlanRound)
+	}
+}
