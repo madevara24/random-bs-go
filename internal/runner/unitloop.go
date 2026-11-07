@@ -63,6 +63,18 @@ func findPlanUnit(units []notetask.PlanUnit, id string) (notetask.PlanUnit, bool
 	return notetask.PlanUnit{}, false
 }
 
+// planUnitPosition returns id's 1-based position in plan order (the order
+// seedUnits writes the frontmatter units in), or 0 if id isn't in units.
+// Only used to label the reported stage ("unit U2 (2/5): ...").
+func planUnitPosition(units []notetask.PlanUnit, id string) int {
+	for i, u := range units {
+		if u.ID == id {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 // findUnitState returns the frontmatter unit state with the given id, if
 // present.
 func findUnitState(units []notetask.UnitState, id string) (notetask.UnitState, bool) {
@@ -361,6 +373,8 @@ unitLoop:
 		if !ok {
 			return fmt.Errorf("runner: current_unit %q has no matching plan unit for %s", unitID, job.Slug)
 		}
+		unitPos := planUnitPosition(planUnits, unitID)
+		totalUnits := len(planUnits)
 		unitState, ok := findUnitState(note.Frontmatter.Units, unitID)
 		if !ok {
 			return fmt.Errorf("runner: current_unit %q has no matching units: entry for %s", unitID, job.Slug)
@@ -395,6 +409,7 @@ unitLoop:
 				return fmt.Errorf("runner: writing unit %s note-copy for %s: %w", unitID, job.Slug, err)
 			}
 			prompt := buildUnitPrompt(unit, note.Handoff, copyName)
+			reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): building", unitID, unitPos, totalUnits))
 			note, err = runCodingRound(deps, reporter, job, repoCfg, branchName, copyPath, codingEngineName, codingEng, unitID, prompt, unitState.SessionID)
 			if err != nil {
 				return err
@@ -412,6 +427,7 @@ unitLoop:
 			}
 
 			if unitState.Status != notetask.UnitStatusReview {
+				reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): verify", unitID, unitPos, totalUnits))
 				output, verifyErr := runUnitVerify(repoCfg.Path, unit.Verify, deps.idleTimeout())
 				if verifyErr == nil {
 					if err := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: unit %s review %s", unitID, job.Slug), func(n *notetask.Note) error {
@@ -441,6 +457,7 @@ unitLoop:
 				}
 				unitState, _ = findUnitState(note.Frontmatter.Units, unitID)
 
+				reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): building", unitID, unitPos, totalUnits))
 				note, err = runCodingRound(deps, reporter, job, repoCfg, branchName, copyPath, codingEngineName, codingEng, unitID, output, unitState.SessionID)
 				if err != nil {
 					return err
@@ -450,6 +467,7 @@ unitLoop:
 
 			// status == review: an independent review of just this unit's
 			// own diff.
+			reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): review round %d", unitID, unitPos, totalUnits, unitState.ReviewRounds+1))
 			verdict, feedback, reviewErr := reviewUnit(reviewEng, repoCfg.Path, unit, unitState.BaseSHA, unitState.HeadSHA, unitReviewTimeout)
 			if reviewErr != nil {
 				var usageLimitErr *engine.UsageLimitError
@@ -496,6 +514,7 @@ unitLoop:
 			}
 			unitState, _ = findUnitState(note.Frontmatter.Units, unitID)
 
+			reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): building", unitID, unitPos, totalUnits))
 			note, err = runCodingRound(deps, reporter, job, repoCfg, branchName, copyPath, codingEngineName, codingEng, unitID, feedback, unitState.SessionID)
 			if err != nil {
 				return err

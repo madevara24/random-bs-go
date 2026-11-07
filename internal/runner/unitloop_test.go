@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -285,8 +286,21 @@ func TestUnitLoopConcernsResumesSameSession(t *testing.T) {
 	deps := Deps{Vault: v, Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()}}
 	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
 
-	if err := runUnitLoop(deps, noopReporter{}, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng); err != nil {
+	reporter := &recordingReporter{}
+	if err := runUnitLoop(deps, reporter, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng); err != nil {
 		t.Fatalf("runUnitLoop: %v", err)
+	}
+
+	wantStages := []string{
+		"unit U1 (1/1): building",
+		"unit U1 (1/1): verify",
+		"unit U1 (1/1): review round 1",
+		"unit U1 (1/1): building",
+		"unit U1 (1/1): verify",
+		"unit U1 (1/1): review round 2",
+	}
+	if got := reporter.stagesSeen(); !reflect.DeepEqual(got, wantStages) {
+		t.Errorf("reported stages = %v, want %v", got, wantStages)
 	}
 
 	resumes := codingEng.resumeSessionsSeen()
