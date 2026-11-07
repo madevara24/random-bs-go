@@ -42,14 +42,23 @@ const plannerCompletionContract = "Read this repository to understand it, then w
 
 // buildPlannerPrompt constructs what gets passed to the planner engine for
 // round (1-indexed) -- copyName is the note-copy's filename, same role as
-// buildPrompt's own copyName for a coding run.
+// buildPrompt's own copyName for a coding run. For round > 1, it looks up
+// the PRECEDING round's own review text (notetask.CurrentRoundReview) --
+// non-empty means a human rejected that round with written feedback
+// (resolvePlanReview's replan path), which takes priority over the
+// generic "missing/invalid unit fields" wording used when runPlanner's own
+// retry loop bumped the round instead.
 func buildPlannerPrompt(note *notetask.Note, copyName string, round int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "This is a planner session (round %d) for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it).\n\n", round, copyName)
 	fmt.Fprintf(&b, plannerCompletionContract, copyName)
 	b.WriteString("\n\n")
 	if round > 1 {
-		b.WriteString("A previous round's plan was rejected as unusable (missing/invalid unit fields) -- re-read the task below and produce a better plan this time.\n\n")
+		if feedback := strings.TrimSpace(notetask.CurrentRoundReview(note.PlanReview, round-1)); feedback != "" {
+			fmt.Fprintf(&b, "A previous round's plan was rejected by a human reviewer. Their feedback:\n\n%s\n\nRe-read the task below and produce a better plan that addresses it.\n\n", feedback)
+		} else {
+			b.WriteString("A previous round's plan was rejected as unusable (missing/invalid unit fields) -- re-read the task below and produce a better plan this time.\n\n")
+		}
 	}
 	fmt.Fprintf(&b, "Task:\n%s\n", note.Prompt)
 	return b.String()
@@ -333,6 +342,59 @@ func stopForPlanReview(deps Deps, job worker.Job, note *notetask.Note, repoCfg c
 		return fmt.Errorf("runner: writing plan_review for %s: %w", job.Slug, werr)
 	}
 	return nil
+}
+
+// resolvePlanReview is processMultiUnit's branch for a task that cleared
+// the planner (HasPlan) but has no units seeded yet -- the plan gate
+// stopped it for human review (stopForPlanReview above), and this is the
+// resulting plan_approved/plan_rejected reclaim: dispatch claims that note
+// like any ready task (RBG-47), and by the time this runs,
+// frontmatter.Status has already gone through dispatch's claim write --
+// the same generic "queued" every claimable status gets, same as
+// ready/blocker_resolved. So the actual decision comes from this round's
+// own review text instead (notetask.CurrentRoundReview), the identical
+// rule internal/planpoll.Decide applies on the reaction side: empty text
+// is an approval (seed units, run the loop) -- a human setting
+// plan_approved by hand with nothing written behaves the same way. A human
+// setting plan_rejected by hand must write their feedback under this
+// round's own heading first, exactly like reacting ❌ does -- without it
+// there's nothing to feed the next planner round, so it's treated as an
+// approval instead.
+func resolvePlanReview(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, branchName string, codingEng, reviewEng engine.Engine) error {
+	round := note.Frontmatter.PlanRound
+	if round == 0 {
+		round = 1
+	}
+
+	if strings.TrimSpace(notetask.CurrentRoundReview(note.PlanReview, round)) == "" {
+		units, err := notetask.ParsePlanUnits(note.Plan)
+		if err != nil {
+			return blockPlannerTask(deps, job, fmt.Sprintf("approved plan no longer parses as units: %v", err))
+		}
+		if err := seedUnits(deps, job, units, fmt.Sprintf("plan_review_approved round %d", round)); err != nil {
+			return err
+		}
+		return runUnitLoopAndFinish(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)
+	}
+
+	if round >= maxPlanRounds {
+		return blockPlannerTask(deps, job, fmt.Sprintf("plan rejected after %d rounds", round))
+	}
+
+	nextRound := round + 1
+	werr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: plan_round %d %s", nextRound, job.Slug), func(n *notetask.Note) error {
+		n.Frontmatter.PlanRound = nextRound
+		notetask.AppendRunnerLog(n, fmt.Sprintf("plan_review_rejected round %d", round), time.Now())
+		return nil
+	})
+	if werr != nil {
+		return fmt.Errorf("runner: writing plan_round for %s: %w", job.Slug, werr)
+	}
+	refreshed, err := deps.Vault.ReadNote(job.NotePath)
+	if err != nil {
+		return fmt.Errorf("runner: re-reading note after plan_round write for %s: %w", job.NotePath, err)
+	}
+	return runPlanner(deps, reporter, job, refreshed, repoCfg, branchName, codingEng, reviewEng)
 }
 
 // blockPlannerTask marks job's task blocked after the planner can't

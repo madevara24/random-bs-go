@@ -93,21 +93,37 @@ func askJev(client *jev.Client, state any, questions map[string]jev.Question, ti
 	return client.Ask(ctx, state, questions)
 }
 
+// multiUnitContinuing reports whether note is a multi-unit task already
+// past its first ProcessTask call -- the planner already wrote a Plan, so
+// any later claim (a plan_approved/plan_rejected reclaim, RBG-47, or a
+// blocker_resolved resume mid-unit-loop) is picking up a branch that
+// already exists in the clone, never a fresh claim that needs
+// pullAndBranch's from-scratch checkout. Gated on deps.MultiUnitEnabled so
+// this can never flip runner.go's own resume to true for a flag-off run
+// (where processMultiUnit itself never runs) and fall through into the
+// single-session path's own SessionID dereference.
+func multiUnitContinuing(deps Deps, note *notetask.Note) bool {
+	return deps.MultiUnitEnabled && note.Frontmatter.MultiUnit != nil && *note.Frontmatter.MultiUnit && note.HasPlan
+}
+
 // processMultiUnit is ProcessTask's branch for a task triaged multi-unit:
 // "no ## Plan yet" runs the planner through the plan gate (which itself
 // hands a clean pass straight into runUnitLoop, see planner.go's
-// runPlanGate), and "units already seeded, not all done" re-enters
-// runUnitLoop directly -- the normal resume path, and also how a task
-// whose status flipped blocked -> blocker_resolved (main.go's auto-resume,
-// e.g. after a usage limit cleared mid-unit) picks back up at
-// current_unit: ProcessTask's own resume branch reaches here exactly the
-// same way regardless of which status string got it there.
+// runPlanGate), "a plan is waiting on human review" resolves that
+// decision (resolvePlanReview, planner.go -- a plan_approved/plan_rejected
+// reclaim, or blocker_resolved before the gate ever seeded units), and
+// "units already seeded, not all done" re-enters runUnitLoop directly --
+// the normal resume path, and also how a task whose status flipped
+// blocked -> blocker_resolved (main.go's auto-resume, e.g. after a usage
+// limit cleared mid-unit) picks back up at current_unit: ProcessTask's own
+// resume branch reaches here exactly the same way regardless of which
+// status string got it there.
 func processMultiUnit(deps Deps, reporter ActivityReporter, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, branchName string, codingEng, reviewEng engine.Engine) error {
 	if !note.HasPlan || strings.TrimSpace(note.Plan) == "" {
 		return runPlanner(deps, reporter, job, note, repoCfg, branchName, codingEng, reviewEng)
 	}
 	if len(note.Frontmatter.Units) == 0 {
-		return nil
+		return resolvePlanReview(deps, reporter, job, note, repoCfg, branchName, codingEng, reviewEng)
 	}
 	if !allUnitsDone(note.Frontmatter.Units) {
 		return runUnitLoopAndFinish(deps, reporter, job, repoCfg, branchName, codingEng, reviewEng)

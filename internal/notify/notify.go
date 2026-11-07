@@ -328,6 +328,51 @@ func postForumClaimOnce(forumWebhookURL, threadName, content string) (string, er
 	return decoded.ChannelID, nil
 }
 
+// FetchReactions reads messageID's reaction counts via the forum webhook's
+// own GET /messages/<id> endpoint -- emoji name to count. Discord omits the
+// "reactions" field entirely (not an empty list) on a message with none;
+// that comes back as an empty, non-nil map and no error, same as any other
+// emoji simply not being present.
+func FetchReactions(webhookURL, threadID, messageID string) (map[string]int, error) {
+	url := fmt.Sprintf("%s/messages/%s?thread_id=%s", webhookURL, messageID, threadID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building reactions request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching reactions: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading reactions response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("discord returned status %d: %s", resp.StatusCode, data)
+	}
+
+	var decoded struct {
+		Reactions []struct {
+			Emoji struct {
+				Name string `json:"name"`
+			} `json:"emoji"`
+			Count int `json:"count"`
+		} `json:"reactions"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("decoding reactions response: %w", err)
+	}
+
+	out := make(map[string]int, len(decoded.Reactions))
+	for _, r := range decoded.Reactions {
+		out[r.Emoji.Name] = r.Count
+	}
+	return out, nil
+}
+
 // ReadWebhookURLFromEnvFile is a small convenience for tests/tools that
 // need the real webhook URL without going through the full config
 // package -- reads a bare KEY=VALUE .env line, same format config.Load
