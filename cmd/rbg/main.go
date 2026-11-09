@@ -1,6 +1,6 @@
-// Command pmrunner is the PM task-runner pipeline's single binary: it can
+// Command rbg is the PM task-runner pipeline's single binary: it can
 // run as the long-lived "runner" daemon (dispatch/worker/task-processing)
-// or as "watcher" (pmwatch), the separate monitoring poller. Same config,
+// or as "watcher", the separate monitoring poller. Same config,
 // same binary, mode picked by the first CLI argument.
 package main
 
@@ -13,11 +13,11 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: pmrunner <runner|watcher> [--config-dir=<dir>]")
+	fmt.Fprintln(os.Stderr, "usage: rbg <runner|watcher> [--config-dir=<dir>]")
 }
 
 // resolveConfigDir picks the directory holding .env + repos.json: an
-// explicit --config-dir flag, else $PMRUNNER_CONFIG_DIR, else the current
+// explicit --config-dir flag, else $RBG_CONFIG_DIR, else the current
 // working directory.
 func resolveConfigDir(args []string) string {
 	for _, a := range args {
@@ -26,7 +26,7 @@ func resolveConfigDir(args []string) string {
 			return a[len(prefix):]
 		}
 	}
-	if v := os.Getenv("PMRUNNER_CONFIG_DIR"); v != "" {
+	if v := os.Getenv("RBG_CONFIG_DIR"); v != "" {
 		return v
 	}
 	wd, err := os.Getwd()
@@ -50,7 +50,7 @@ func main() {
 		usage()
 		os.Exit(0)
 	default:
-		fmt.Fprintf(os.Stderr, "pmrunner: unknown mode %q\n", mode)
+		fmt.Fprintf(os.Stderr, "rbg: unknown mode %q\n", mode)
 		usage()
 		os.Exit(2)
 	}
@@ -61,7 +61,7 @@ func main() {
 
 	cfg, err := config.Load(envPath, reposPath, registeredEngineNames())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pmrunner: fatal: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rbg: fatal: %v\n", err)
 		os.Exit(1)
 	}
 

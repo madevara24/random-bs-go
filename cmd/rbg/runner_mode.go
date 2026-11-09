@@ -25,12 +25,12 @@ import (
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
-// runRunner is the entrypoint for `pmrunner runner`: builds the vault
+// runRunner is the entrypoint for `rbg runner`: builds the vault
 // handle and one RepoWorker per configured repo, boots (sync + reconcile),
 // starts the dispatch-pass loop and the HTTP surface, and blocks forever
 // serving HTTP.
 func runRunner(cfg *config.Config) {
-	fmt.Printf("pmrunner: mode=runner vault=%s repos=%d global_slots=%d idle_timeout=%dm http_port=%d\n",
+	fmt.Printf("rbg: mode=runner vault=%s repos=%d global_slots=%d idle_timeout=%dm http_port=%d\n",
 		cfg.VaultPath, len(cfg.Repos), cfg.GlobalSlots, cfg.IdleTimeoutMinutes, cfg.HTTPPort)
 
 	// This process's raw environment doesn't change after boot, so checking
@@ -80,7 +80,7 @@ func runRunner(cfg *config.Config) {
 	// just to list registered engine names (registeredEngineNames below)
 	// and must stay I/O-free.
 	if err := os.MkdirAll(cfg.PiSessionDir, 0o755); err != nil {
-		fmt.Printf("pmrunner: fatal: creating pi session dir %s: %v\n", cfg.PiSessionDir, err)
+		fmt.Printf("rbg: fatal: creating pi session dir %s: %v\n", cfg.PiSessionDir, err)
 		return
 	}
 
@@ -141,7 +141,7 @@ func runRunner(cfg *config.Config) {
 	}
 	r := daemon.NewRunner(vault, workers, pauseState, resolveEngine)
 	if err := r.Boot(); err != nil {
-		fmt.Printf("pmrunner: fatal: boot failed: %v\n", err)
+		fmt.Printf("rbg: fatal: boot failed: %v\n", err)
 		return
 	}
 
@@ -172,7 +172,7 @@ func runRunner(cfg *config.Config) {
 	server.CancelResumeTimer = func(engine string) { resumeMgr.cancel(engine) }
 	fmt.Printf("[runner] listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
-		fmt.Printf("pmrunner: fatal: http server: %v\n", err)
+		fmt.Printf("rbg: fatal: http server: %v\n", err)
 	}
 }
 
