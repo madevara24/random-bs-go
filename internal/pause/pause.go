@@ -12,7 +12,7 @@
 // internal/worker all need to read or write this state, but none of them
 // may import each other (runner can't read a field on daemon.Runner, and
 // daemon doesn't import runner), so this package exists as the shared
-// seam, constructed once in cmd/pmrunner/runner_mode.go and threaded into
+// seam, constructed once in cmd/rbg/runner_mode.go and threaded into
 // runner.Deps, daemon.NewRunner, and httpapi.New. It holds no policy of its
 // own (no timers, no Discord, no notion of which engines exist) -- that
 // stays in main.go, per the task's own framing: "pause stays a dumb flag

@@ -1,4 +1,4 @@
-# Build/deploy helpers for pmrunner. See README.md for the underlying
+# Build/deploy helpers for rbg. See README.md for the underlying
 # `go build` command and the runner/watcher config directory layout.
 #
 # DEPLOY_DIR is the live config directory on the VPS -- it holds .env,
@@ -7,8 +7,8 @@
 #
 #   make deploy DEPLOY_DIR=/path/to/other/dir
 #
-# Both runner and watcher run under systemd (the pmrunner-runner and
-# pmrunner-watcher units) since 2026-09-25. `deploy` only installs the new
+# Both runner and watcher run under systemd (the rbg-runner and
+# rbg-watcher units) since 2026-09-25. `deploy` only installs the new
 # binary and restarts those units through the scoped sudoers rule -- it no
 # longer manages processes itself.
 #

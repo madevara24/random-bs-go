@@ -51,7 +51,7 @@ type Server struct {
 	Pause *pause.State
 
 	// EngineNames lists every registered engine (see
-	// cmd/pmrunner/runner_mode.go's registeredEngineNames), so GET
+	// cmd/rbg/runner_mode.go's registeredEngineNames), so GET
 	// /status/tasks's engines map always reports a known engine's unpaused
 	// zero state even before it's ever tripped -- without this, a fresh
 	// daemon with no usage-limit history yet would report an empty

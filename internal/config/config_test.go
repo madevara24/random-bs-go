@@ -100,7 +100,7 @@ func TestLoadDefaultsPiKeysWhenUnset(t *testing.T) {
 // default, and PI_REVIEW_MODEL set explicitly diverges from PI_MODEL
 // rather than echoing it.
 func TestLoadHonorsPiKeysWhenSet(t *testing.T) {
-	env := baseEnv + "PI_BIN=/opt/pi/bin/pi\nPI_MODEL=deepseek/deepseek-flash\nPI_REVIEW_MODEL=deepseek/deepseek-v4-pro\nPI_SESSION_DIR=/var/lib/pmrunner/pi-sessions\nPI_STARTUP_TIMEOUT_SECONDS=45\n"
+	env := baseEnv + "PI_BIN=/opt/pi/bin/pi\nPI_MODEL=deepseek/deepseek-flash\nPI_REVIEW_MODEL=deepseek/deepseek-v4-pro\nPI_SESSION_DIR=/var/lib/rbg/pi-sessions\nPI_STARTUP_TIMEOUT_SECONDS=45\n"
 	envPath, reposPath := writeConfigFiles(t, env, baseRepos)
 	cfg, err := Load(envPath, reposPath, []string{"claude", "pi"})
 	if err != nil {
@@ -115,7 +115,7 @@ func TestLoadHonorsPiKeysWhenSet(t *testing.T) {
 	if cfg.PiReviewModel != "deepseek/deepseek-v4-pro" {
 		t.Errorf("PiReviewModel = %q, want %q (explicit, not echoing PiModel)", cfg.PiReviewModel, "deepseek/deepseek-v4-pro")
 	}
-	if cfg.PiSessionDir != "/var/lib/pmrunner/pi-sessions" {
+	if cfg.PiSessionDir != "/var/lib/rbg/pi-sessions" {
 		t.Errorf("PiSessionDir = %q, want the configured path", cfg.PiSessionDir)
 	}
 	if cfg.PiStartupTimeoutSeconds != 45 {

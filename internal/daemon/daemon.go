@@ -2,7 +2,7 @@
 // runner's actual boot sequence: sync the vault, reconcile any notes
 // already at "queued" from a prior run into the in-memory queues, and only
 // then be ready to accept dispatch triggers. Thin glue so
-// cmd/pmrunner/main.go doesn't have to hold this orchestration itself and
+// cmd/rbg/main.go doesn't have to hold this orchestration itself and
 // so it stays independently testable.
 package daemon
 

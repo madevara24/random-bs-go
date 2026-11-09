@@ -33,7 +33,7 @@ type Job struct {
 // EngineResolver decides which engine codes repoKey's task, given the
 // note's own `engine:` pin (noteEngine, "" if unset). Injected so this
 // package never needs to import config (for RepoConfig) or runner (for
-// the engine registry) -- the caller (cmd/pmrunner) closes over whatever
+// the engine registry) -- the caller (cmd/rbg) closes over whatever
 // it needs to apply the real repo/default precedence (see
 // internal/engineresolve.Coding).
 type EngineResolver func(repoKey, noteEngine string) string
