@@ -1,9 +1,9 @@
-# pmrunner
+# rbg
 
-`pmrunner` turns task notes in a PM vault (a git repo of Markdown files) into coding-agent sessions and pull requests against onboarded repos. It is one Go binary with two modes:
+`rbg` turns task notes in a PM vault (a git repo of Markdown files) into coding-agent sessions and pull requests against onboarded repos. It is one Go binary with two modes:
 
 - **runner**: the long-lived daemon. It claims notes at `ready`, `blocker_resolved`, `plan_approved`, or `plan_rejected`, checks out `task/<slug>` in the target repo, runs the task's coding engine (`claude` or `pi`) under an idle watchdog, and writes the result back to the note. For `auto_merge: true` tasks it then runs a review and CI merge gate and merges the PR.
-- **watcher** (`pmwatch`): a separate polling process. It checks the runner's health, flags wedged tasks, and catches any finished note that never got its Discord notice.
+- **watcher**: a separate polling process. It checks the runner's health, flags wedged tasks, and catches any finished note that never got its Discord notice.
 
 A task too large for one session can run as a **multi-unit task**: a planner splits it into units, each unit gets a fresh coding session and its own review, and the runner opens one PR at the end. See [Multi-unit tasks](#multi-unit-tasks).
 
@@ -13,16 +13,16 @@ A task too large for one session can run as a **multi-unit task**: a planner spl
 make build
 ```
 
-This runs `go build -o pmrunner ./cmd/pmrunner`.
+This runs `go build -o rbg ./cmd/rbg`.
 
 ## Run
 
 ```
-./pmrunner runner  [--config-dir=<dir>]
-./pmrunner watcher [--config-dir=<dir>]
+./rbg runner  [--config-dir=<dir>]
+./rbg watcher [--config-dir=<dir>]
 ```
 
-The config directory is `--config-dir`, else `$PMRUNNER_CONFIG_DIR`, else the current directory. Both modes read the same `.env` and `repos.json` from it.
+The config directory is `--config-dir`, else `$RBG_CONFIG_DIR`, else the current directory. Both modes read the same `.env` and `repos.json` from it.
 
 ## Config
 
@@ -106,12 +106,12 @@ The coding engine is resolved when the run starts and written into the note's `e
 
 ### The `pi` engine (DeepSeek)
 
-`pi` drives the `pi` coding-agent CLI against a DeepSeek model. `pmrunner` holds no DeepSeek credentials or model choice of its own:
+`pi` drives the `pi` coding-agent CLI against a DeepSeek model. `rbg` holds no DeepSeek credentials or model choice of its own:
 
 - **Credentials** live in `pi`'s own store, for the OS user the runner runs as. If `pi auth check --provider deepseek` fails for that user, every `pi` task hangs until the startup timeout fires.
 - **The model** comes from `pi`'s settings (`~/.pi/agent/settings.json`, `defaultProvider` and `defaultModel`) unless `PI_MODEL` or `PI_REVIEW_MODEL` is set.
 - **Sessions:** every fresh run gets a new id, `rbg-` plus 16 random hex characters, never derived from the task slug. A note filed again under the same slug therefore never resumes an old session. A resume reuses the `session_id` the note recorded.
-- **The exit code is not trusted.** `pi --mode json` exits `0` even on a failed model response. `pmrunner` reads the JSONL events instead: an assistant turn whose `stopReason` is `error` or `aborted`, or an `auto_retry_end` with `success: false`, fails the task. A DeepSeek quota failure is an ordinary task error, never a usage-limit pause.
+- **The exit code is not trusted.** `pi --mode json` exits `0` even on a failed model response. `rbg` reads the JSONL events instead: an assistant turn whose `stopReason` is `error` or `aborted`, or an `auto_retry_end` with `success: false`, fails the task. A DeepSeek quota failure is an ordinary task error, never a usage-limit pause.
 - **Startup timeout:** a bad DeepSeek credential makes `pi` hang with no output and no exit. If a `pi` coding run prints nothing within `PI_STARTUP_TIMEOUT_SECONDS`, the runner kills it and blocks the task with an alert that suggests `pi auth check`. The idle watchdog still covers a hang after the first line of output.
 
 ## Multi-unit tasks
@@ -151,6 +151,6 @@ make test-fixture
 go test ./... -v
 ```
 
-Most integration tests in `internal/runner`, `internal/watcher`, and `internal/vaultgit` need two throwaway git fixtures on disk. `make test-fixture` builds them at `PMRUNNER_TEST_VAULT_PATH` and `PMRUNNER_TEST_TARGET_REPO_PATH`. When a fixture is missing, those tests **skip** instead of failing, so a green run on a fresh checkout can mean almost nothing ran. Check the `--- SKIP` lines before trusting the result.
+Most integration tests in `internal/runner`, `internal/watcher`, and `internal/vaultgit` need two throwaway git fixtures on disk. `make test-fixture` builds them at `RBG_TEST_VAULT_PATH` and `RBG_TEST_TARGET_REPO_PATH`. When a fixture is missing, those tests **skip** instead of failing, so a green run on a fresh checkout can mean almost nothing ran. Check the `--- SKIP` lines before trusting the result.
 
-`internal/notify`'s real-webhook test also skips unless `PMRUNNER_SEND_REAL_DISCORD_TEST=1` is set, because it sends a real Discord message.
+`internal/notify`'s real-webhook test also skips unless `RBG_SEND_REAL_DISCORD_TEST=1` is set, because it sends a real Discord message.
