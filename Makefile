@@ -22,7 +22,7 @@
 # PMRUNNER_TEST_TARGET_REPO_PATH=/some/other/path -- the tests read the
 # same two variables.
 
-BINARY := pmrunner
+BINARY := rbg
 DEPLOY_DIR ?= /home/obsidian/pm-runner-go
 DRY_RUN ?= 0
 PMRUNNER_TEST_VAULT_PATH ?= /home/obsidian/pmrunner-go-test-vault
@@ -31,7 +31,7 @@ PMRUNNER_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
 .PHONY: build deploy test-fixture
 
 build:
-	go build -o $(BINARY) ./cmd/pmrunner
+	go build -o $(BINARY) ./cmd/rbg
 
 deploy: build
 	@deploy_dir=$$(readlink -f "$(DEPLOY_DIR)"); \
