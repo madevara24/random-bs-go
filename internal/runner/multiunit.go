@@ -106,6 +106,16 @@ func multiUnitContinuing(deps Deps, note *notetask.Note) bool {
 	return deps.MultiUnitEnabled && note.Frontmatter.MultiUnit != nil && *note.Frontmatter.MultiUnit && note.HasPlan
 }
 
+// isMultiUnit is multiUnitContinuing's own condition minus the HasPlan
+// check -- true for a multi-unit task regardless of whether the planner
+// has written a Plan yet, used by ProcessTask's branch setup to decide
+// whether a pre-existing task/<slug> branch (left behind by a planner round
+// that blocked before writing one) should be resumed rather than
+// recreated.
+func isMultiUnit(deps Deps, note *notetask.Note) bool {
+	return deps.MultiUnitEnabled && note.Frontmatter.MultiUnit != nil && *note.Frontmatter.MultiUnit
+}
+
 // processMultiUnit is ProcessTask's branch for a task triaged multi-unit:
 // "no ## Plan yet" runs the planner through the plan gate (which itself
 // hands a clean pass straight into runUnitLoop, see planner.go's

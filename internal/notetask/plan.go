@@ -19,6 +19,76 @@ type PlanUnit struct {
 	Verify    string   `yaml:"verify"`
 }
 
+// rawPlanUnit mirrors PlanUnit but keeps accept/verify as yaml.Node so
+// UnmarshalYAML can accept either a plain string or a list of strings for
+// those two fields -- the planner keeps writing accept/verify as YAML lists
+// despite the prompt asking for a single string, and failing the whole plan
+// over that is pointless when both shapes carry the same information.
+type rawPlanUnit struct {
+	ID        string    `yaml:"id"`
+	Title     string    `yaml:"title"`
+	Paths     []string  `yaml:"paths"`
+	DependsOn []string  `yaml:"depends_on"`
+	Accept    yaml.Node `yaml:"accept"`
+	Verify    yaml.Node `yaml:"verify"`
+}
+
+// UnmarshalYAML lets accept/verify be written as either a plain string or a
+// YAML list of strings. A list of accept items is joined with "\n"; a list
+// of verify commands is joined with " && ". Any other YAML type (a map, a
+// number, a bool) is still an error.
+func (u *PlanUnit) UnmarshalYAML(value *yaml.Node) error {
+	var raw rawPlanUnit
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	accept, err := decodeStringOrStringList(&raw.Accept, "\n")
+	if err != nil {
+		return fmt.Errorf("accept: %w", err)
+	}
+	verify, err := decodeStringOrStringList(&raw.Verify, " && ")
+	if err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
+
+	u.ID = raw.ID
+	u.Title = raw.Title
+	u.Paths = raw.Paths
+	u.DependsOn = raw.DependsOn
+	u.Accept = accept
+	u.Verify = verify
+	return nil
+}
+
+// decodeStringOrStringList decodes node as a single string, or (if it's a
+// YAML sequence) as a list of strings joined with sep. node.Kind == 0 means
+// the key was absent, which decodes to "". Any other node shape (map,
+// number, bool, null) is an error.
+func decodeStringOrStringList(node *yaml.Node, sep string) (string, error) {
+	switch node.Kind {
+	case 0:
+		return "", nil
+	case yaml.ScalarNode:
+		if node.Tag != "!!str" {
+			return "", fmt.Errorf("expected a string, got %s", node.Tag)
+		}
+		var s string
+		if err := node.Decode(&s); err != nil {
+			return "", err
+		}
+		return s, nil
+	case yaml.SequenceNode:
+		var items []string
+		if err := node.Decode(&items); err != nil {
+			return "", err
+		}
+		return strings.Join(items, sep), nil
+	default:
+		return "", fmt.Errorf("expected a string or a list of strings, got %s", node.Tag)
+	}
+}
+
 const planYAMLFenceOpen = "```yaml"
 const planFenceClose = "```"
 
