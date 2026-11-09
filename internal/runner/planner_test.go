@@ -331,6 +331,67 @@ func TestPlannerBadYAMLBlocksAfter3(t *testing.T) {
 	}
 }
 
+// TestPlannerEngineErrorBlocks confirms a planner engine whose invocation
+// itself exits non-zero still ends the task at blocked, never in_progress
+// -- it may count as a plan round first, exactly as an unusable-plan
+// parse failure does today (fakeFailingPlannerEngine never touches the
+// note-copy, so runPlanner's own round-retry loop is what notices), but it
+// must never return with the note still at in_progress.
+func TestPlannerEngineErrorBlocks(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "plannerengineerr-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue,
+	}, "Trivial multi-unit task.")
+
+	planner := &fakeFailingPlannerEngine{}
+
+	var blockedPayload *AlertPayload
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		EngineRegistry:   map[string]engine.Engine{"claude": planner},
+		MultiUnitEnabled: true,
+		Jev:              &jev.Client{APIKey: ""},
+		OnBlocked: func(job worker.Job, payload AlertPayload) {
+			blockedPayload = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	cleanupTaskBranch(t, slug)
+
+	if err := ProcessTask(deps, noopReporter{}, job); err == nil {
+		t.Fatal("ProcessTask returned nil error, want an error after the planner engine's invocation failed")
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status == "in_progress" {
+		t.Errorf("status = %q, want never in_progress after a planner engine failure", noteAfter.Frontmatter.Status)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+
+	if blockedPayload == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+}
+
 // fakeUsageLimitPlannerEngine always reports a usage limit, regardless of
 // how its underlying process actually exits -- a minimal fake for driving
 // runPlanner straight into the usage-limit branch without needing a real

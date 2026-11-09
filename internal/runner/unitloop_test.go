@@ -149,6 +149,55 @@ func (f *fakeUnitReviewEngine) ParseReviewAnswer(stdout []byte) (string, error) 
 
 func (f *fakeUnitReviewEngine) StartupTimeout() time.Duration { return 0 }
 
+// fakeUnitFailingCodingEngine simulates a coding invocation that exits
+// non-zero without ever writing the note-copy -- the live RBG-48 bug
+// (TestUnitCodingErrorBlocks) this package's unit loop must now block on
+// instead of stranding the task at in_progress.
+type fakeUnitFailingCodingEngine struct{}
+
+func (f *fakeUnitFailingCodingEngine) Name() string { return "fake-unit-coding-crash" }
+
+func (f *fakeUnitFailingCodingEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.Cmd, string) {
+	return exec.Command("false"), ""
+}
+
+func (f *fakeUnitFailingCodingEngine) ParseLine(line string, state *engine.RunState) {}
+
+func (f *fakeUnitFailingCodingEngine) ClassifyExit(waitErr error, stderrTail string, state engine.RunState) error {
+	return waitErr
+}
+
+func (f *fakeUnitFailingCodingEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("true") }
+
+func (f *fakeUnitFailingCodingEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+
+func (f *fakeUnitFailingCodingEngine) StartupTimeout() time.Duration { return 0 }
+
+// fakeUnitFailingReviewEngine simulates a review invocation that exits
+// non-zero (the review CLI itself crashed, exactly as the Claude review of
+// RBG-48's unit U2 did live on 2026-11-07) -- distinct from
+// fakeUnitReviewEngine's scripted APPROVE/CONCERNS verdicts, which always
+// run `true` and parse a canned answer.
+type fakeUnitFailingReviewEngine struct{}
+
+func (f *fakeUnitFailingReviewEngine) Name() string { return "fake-unit-review-crash" }
+
+func (f *fakeUnitFailingReviewEngine) BuildCommand(dir, prompt, resumeSessionID string) (*exec.Cmd, string) {
+	return exec.Command("true"), ""
+}
+
+func (f *fakeUnitFailingReviewEngine) ParseLine(line string, state *engine.RunState) {}
+
+func (f *fakeUnitFailingReviewEngine) ClassifyExit(waitErr error, stderrTail string, state engine.RunState) error {
+	return waitErr
+}
+
+func (f *fakeUnitFailingReviewEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("false") }
+
+func (f *fakeUnitFailingReviewEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+
+func (f *fakeUnitFailingReviewEngine) StartupTimeout() time.Duration { return 0 }
+
 const unitLoopTestRepoKey = "phase6-test-repo"
 
 func unitLoopRepoCfg() config.RepoConfig {
@@ -497,6 +546,204 @@ func TestUnitLoopTaskBudgetBlocks(t *testing.T) {
 	}
 	if !strings.Contains(gotAlert.ExitErrText, "budget") {
 		t.Errorf("alert ExitErrText = %q, want it to name the task-wide budget", gotAlert.ExitErrText)
+	}
+}
+
+// TestUnitCodingErrorBlocks is RBG-49's fix for the live RBG-48 incident:
+// a coding engine whose invocation itself fails (exits non-zero, never
+// writes the note-copy) must block the task -- not bubble a bare error out
+// of processMultiUnit and strand the note at in_progress with no alert.
+// The unit's own status stays building, per RBG-49's resume rule: a later
+// blocker_resolved re-enters the building branch and tries a fresh coding
+// round, rather than skipping straight to a review that never happened.
+func TestUnitCodingErrorBlocks(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "unitloop-codingerr-" + run
+
+	units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusPending}}
+	v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "U1")
+	branchName, _ := setupUnitLoopBranch(t, slug)
+
+	codingEng := &fakeUnitFailingCodingEngine{}
+	reviewEng := &fakeUnitReviewEngine{verdicts: []string{"VERDICT: APPROVE\n\nunused."}}
+
+	var alertCalls int
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault: v,
+		Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			alertCalls++
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+	err := runUnitLoop(deps, noopReporter{}, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng)
+	if err == nil {
+		t.Fatal("runUnitLoop returned nil error, want an error after the coding invocation failed")
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+	u, ok := findUnitState(noteAfter.Frontmatter.Units, "U1")
+	if !ok {
+		t.Fatal("unit U1 missing from units after the loop")
+	}
+	if u.Status != notetask.UnitStatusBuilding {
+		t.Errorf("unit U1 status = %q, want %q", u.Status, notetask.UnitStatusBuilding)
+	}
+
+	if alertCalls != 1 {
+		t.Errorf("OnBlocked called %d times, want 1", alertCalls)
+	}
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.PreserveErr != "" {
+		t.Errorf("PreserveErr = %q, want the branch's work to have been preserved cleanly", gotAlert.PreserveErr)
+	}
+}
+
+// TestUnitReviewErrorBlocks is RBG-49's fix for the exact failure seen live
+// in RBG-48 on 2026-11-07: the Claude review of unit U2 exited with status
+// 1, runUnitLoop returned that as a plain error, and the note was left
+// in_progress with no alert and the unit's commits pushed nowhere. A review
+// invocation that fails outright must block the task instead, leaving the
+// unit's own status at review -- per RBG-49's resume rule, a later
+// blocker_resolved re-enters this same case and runs a fresh review, never
+// a coding round.
+func TestUnitReviewErrorBlocks(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "unitloop-reviewerr-" + run
+
+	units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusPending}}
+	v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "U1")
+	branchName, _ := setupUnitLoopBranch(t, slug)
+
+	codingEng := &fakeUnitCodingEngine{copyName: copyFileName(slug)}
+	reviewEng := &fakeUnitFailingReviewEngine{}
+
+	var alertCalls int
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault: v,
+		Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			alertCalls++
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+	err := runUnitLoop(deps, noopReporter{}, job, unitLoopRepoCfg(), branchName, codingEng, reviewEng)
+	if err == nil {
+		t.Fatal("runUnitLoop returned nil error, want an error after the review invocation failed")
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+	}
+	u, ok := findUnitState(noteAfter.Frontmatter.Units, "U1")
+	if !ok {
+		t.Fatal("unit U1 missing from units after the loop")
+	}
+	if u.Status != notetask.UnitStatusReview {
+		t.Errorf("unit U1 status = %q, want %q", u.Status, notetask.UnitStatusReview)
+	}
+
+	if alertCalls != 1 {
+		t.Errorf("OnBlocked called %d times, want 1", alertCalls)
+	}
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if !strings.Contains(gotAlert.ExitErrText, "U1") {
+		t.Errorf("alert ExitErrText = %q, want it to name unit U1", gotAlert.ExitErrText)
+	}
+	if gotAlert.PreserveErr != "" {
+		t.Errorf("PreserveErr = %q, want the branch's work to have been preserved cleanly", gotAlert.PreserveErr)
+	}
+}
+
+// TestUnitLoopErrorReturnsNeverLeaveInProgress is a table test over every
+// kind of plain-error return RBG-49 converted into a block: a generic
+// infrastructure failure (a vault write/read, a git command, a note-copy
+// write) now routes through blockUnitTaskOnErr, forcing the unit's own
+// status to blocked since there's no specific resumable state worth
+// preserving there, and a verify command that can't even start routes
+// through the same path rather than being retried as an ordinary verify
+// failure. Every case must leave the note blocked, never in_progress.
+func TestUnitLoopErrorReturnsNeverLeaveInProgress(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	cases := []struct {
+		name  string
+		label string
+		err   error
+	}{
+		{"resolving base_sha", "resolving base_sha", fmt.Errorf("git rev-parse: exit status 128")},
+		{"writing building status", "writing building status", fmt.Errorf("vault write: disk full")},
+		{"writing note-copy", "writing note-copy", fmt.Errorf("open: permission denied")},
+		{"writing coding round", "writing coding round", fmt.Errorf("vault write: disk full")},
+		{"verify command failed to start", "verify", errVerifyStartFailed},
+		{"writing done status", "writing done status", fmt.Errorf("vault write: disk full")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := fmt.Sprintf("%d", time.Now().UnixNano())
+			slug := "unitloop-errreturn-" + run
+
+			units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusBuilding}}
+			v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "U1")
+			branchName, _ := setupUnitLoopBranch(t, slug)
+
+			var gotAlert *AlertPayload
+			deps := Deps{
+				Vault: v,
+				Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+				OnBlocked: func(j worker.Job, payload AlertPayload) {
+					gotAlert = &payload
+				},
+			}
+			job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+			err := blockUnitTaskOnErr(deps, job, unitLoopRepoCfg(), branchName, "U1", "fake-unit-coding", tc.label, tc.err)
+			if err == nil {
+				t.Fatal("blockUnitTaskOnErr returned nil error, want a non-nil error")
+			}
+
+			noteAfter, err := v.ReadNote(relPath)
+			if err != nil {
+				t.Fatalf("reading note back: %v", err)
+			}
+			if noteAfter.Frontmatter.Status == "in_progress" {
+				t.Errorf("status = %q, want never in_progress after a %s error", noteAfter.Frontmatter.Status, tc.name)
+			}
+			if noteAfter.Frontmatter.Status != "blocked" {
+				t.Errorf("status = %q, want %q", noteAfter.Frontmatter.Status, "blocked")
+			}
+			if gotAlert == nil {
+				t.Fatal("OnBlocked was never called")
+			}
+		})
 	}
 }
 
