@@ -287,15 +287,31 @@ func buildIntegrationPrompt(prBody, diffStat, handoff string) string {
 	return b.String()
 }
 
+// parseReviewVerdict finds the first line starting with "VERDICT:"
+// (case/whitespace insensitive) anywhere in text -- a reviewer that leads
+// with other commentary before its verdict line must still be read
+// correctly (RBG-52: three straight APPROVE verdicts were lost to this
+// because the verdict wasn't the first line). If no such line exists, it
+// falls back to judging the first line, same as before this function
+// looked past it.
 func parseReviewVerdict(text string) (ReviewVerdict, string) {
 	trimmed := strings.TrimSpace(text)
-	lines := strings.SplitN(trimmed, "\n", 2)
-	first := strings.ToUpper(strings.TrimSpace(lines[0]))
-	feedback := trimmed
-	if len(lines) > 1 {
-		feedback = strings.TrimSpace(lines[1])
+	lines := strings.Split(trimmed, "\n")
+
+	verdictIdx := 0
+	for i, line := range lines {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "VERDICT:") {
+			verdictIdx = i
+			break
+		}
 	}
-	if strings.Contains(first, "APPROVE") {
+
+	verdictLine := strings.ToUpper(strings.TrimSpace(lines[verdictIdx]))
+	feedback := trimmed
+	if verdictIdx+1 < len(lines) {
+		feedback = strings.TrimSpace(strings.Join(lines[verdictIdx+1:], "\n"))
+	}
+	if strings.Contains(verdictLine, "APPROVE") {
 		return VerdictApprove, feedback
 	}
 	// Anything else (including a malformed/missing VERDICT line) is
