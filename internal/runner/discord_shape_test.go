@@ -20,14 +20,14 @@ import (
 //
 // Gated behind an env var, not run as part of a normal `go test ./...`,
 // since it fires a real message into the real #task-alert channel -- opt in
-// explicitly: PMRUNNER_SEND_REAL_DISCORD_TEST=1 go test ./internal/runner/
+// explicitly: RBG_SEND_REAL_DISCORD_TEST=1 go test ./internal/runner/
 // -run TestAlertPayloadReachesDiscordInVerifiedShape
 func TestAlertPayloadReachesDiscordInVerifiedShape(t *testing.T) {
-	if os.Getenv("PMRUNNER_SEND_REAL_DISCORD_TEST") == "" {
-		t.Skip("set PMRUNNER_SEND_REAL_DISCORD_TEST=1 to actually fire this against the real Discord webhook")
+	if os.Getenv("RBG_SEND_REAL_DISCORD_TEST") == "" {
+		t.Skip("set RBG_SEND_REAL_DISCORD_TEST=1 to actually fire this against the real Discord webhook")
 	}
 
-	webhookURL := readDiscordWebhookURLFromEnvFile(t, "/home/obsidian/pm-runner-go/.env")
+	webhookURL := readDiscordWebhookURLFromEnvFile(t, "/home/obsidian/rbg/.env")
 
 	payload := AlertPayload{
 		Slug:       "phase9-discord-shape-check",

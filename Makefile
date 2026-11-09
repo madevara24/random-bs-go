@@ -1,4 +1,4 @@
-# Build/deploy helpers for pmrunner. See README.md for the underlying
+# Build/deploy helpers for rbg. See README.md for the underlying
 # `go build` command and the runner/watcher config directory layout.
 #
 # DEPLOY_DIR is the live config directory on the VPS -- it holds .env,
@@ -7,8 +7,8 @@
 #
 #   make deploy DEPLOY_DIR=/path/to/other/dir
 #
-# Both runner and watcher run under systemd (the pmrunner-runner and
-# pmrunner-watcher units) since 2026-09-25. `deploy` only installs the new
+# Both runner and watcher run under systemd (the rbg-runner and
+# rbg-watcher units) since 2026-09-25. `deploy` only installs the new
 # binary and restarts those units through the scoped sudoers rule -- it no
 # longer manages processes itself.
 #
@@ -18,20 +18,20 @@
 # shaped like a PM vault, one standing in for a downstream project repo --
 # internal/runner, internal/watcher, and internal/vaultgit's integration
 # tests exercise real git operations against them (see internal/testvault).
-# Override their locations with PMRUNNER_TEST_VAULT_PATH=/some/path and
-# PMRUNNER_TEST_TARGET_REPO_PATH=/some/other/path -- the tests read the
+# Override their locations with RBG_TEST_VAULT_PATH=/some/path and
+# RBG_TEST_TARGET_REPO_PATH=/some/other/path -- the tests read the
 # same two variables.
 
-BINARY := pmrunner
-DEPLOY_DIR ?= /home/obsidian/pm-runner-go
+BINARY := rbg
+DEPLOY_DIR ?= /home/obsidian/rbg
 DRY_RUN ?= 0
-PMRUNNER_TEST_VAULT_PATH ?= /home/obsidian/pmrunner-go-test-vault
-PMRUNNER_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
+RBG_TEST_VAULT_PATH ?= /home/obsidian/rbg-test-vault
+RBG_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
 
 .PHONY: build deploy test-fixture
 
 build:
-	go build -o $(BINARY) ./cmd/pmrunner
+	go build -o $(BINARY) ./cmd/rbg
 
 deploy: build
 	@deploy_dir=$$(readlink -f "$(DEPLOY_DIR)"); \
@@ -45,7 +45,7 @@ deploy: build
 		echo "[dry-run] cp -a $$deploy_dir/$(BINARY) $$deploy_dir/$(BINARY).prev"; \
 		echo "[dry-run] chmod 755 $$deploy_dir/.$(BINARY).new"; \
 		echo "[dry-run] mv $$deploy_dir/.$(BINARY).new $$deploy_dir/$(BINARY)"; \
-		echo "[dry-run] sudo -n systemctl restart pmrunner-runner pmrunner-watcher"; \
+		echo "[dry-run] sudo -n systemctl restart rbg-runner rbg-watcher"; \
 	else \
 		cp "$(BINARY)" "$$deploy_dir/.$(BINARY).new" && \
 		if [ -f "$$deploy_dir/$(BINARY)" ]; then \
@@ -53,11 +53,11 @@ deploy: build
 		fi && \
 		chmod 755 "$$deploy_dir/.$(BINARY).new" && \
 		mv "$$deploy_dir/.$(BINARY).new" "$$deploy_dir/$(BINARY)" && \
-		sudo -n systemctl restart pmrunner-runner pmrunner-watcher; \
+		sudo -n systemctl restart rbg-runner rbg-watcher; \
 	fi
 
 test-fixture:
-	@work="$(PMRUNNER_TEST_VAULT_PATH)"; \
+	@work="$(RBG_TEST_VAULT_PATH)"; \
 	bare="$$work.git"; \
 	if [ -d "$$work/.git" ]; then \
 		echo "test-fixture: $$work already exists, skipping"; \
@@ -73,7 +73,7 @@ test-fixture:
 	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" add -A && \
 	git -C "$$work" -c user.email="test-fixture@example.com" -c user.name="test-fixture" commit -q -m "test-fixture: initial commit" && \
 	git -C "$$work" push -q origin HEAD:master
-	@work="$(PMRUNNER_TEST_TARGET_REPO_PATH)"; \
+	@work="$(RBG_TEST_TARGET_REPO_PATH)"; \
 	bare="$$work.git"; \
 	if [ -d "$$work/.git" ]; then \
 		echo "test-fixture: $$work already exists, skipping"; \

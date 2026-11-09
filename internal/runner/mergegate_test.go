@@ -238,7 +238,7 @@ func TestMergeGateLoopDetectsOutsideMergeBeforeMerge(t *testing.T) {
 // TestMergeGateLoopPRStateErrorIsOrdinaryLoopError confirms a PRState
 // error surfaces as a plain loop error, not one matching
 // ErrMergedOutsideGate -- the two must stay distinguishable so the alert
-// wiring (cmd/pmrunner/runner_mode.go) doesn't send the outside-merge
+// wiring (cmd/rbg/runner_mode.go) doesn't send the outside-merge
 // message for a plain gh/network failure.
 func TestMergeGateLoopPRStateErrorIsOrdinaryLoopError(t *testing.T) {
 	ops := &fakeMergeGateOps{

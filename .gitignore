@@ -7,7 +7,7 @@
 *.dll
 *.so
 *.dylib
-/pmrunner
+/rbg
 
 # Test binary, built with `go test -c`
 *.test

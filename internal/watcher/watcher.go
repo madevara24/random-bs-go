@@ -1,4 +1,4 @@
-// Package watcher implements the pmwatch mode's real checks: a two-tier
+// Package watcher implements the watcher mode's real checks: a two-tier
 // HTTP poll plus an independent direct vault scan, covering three gaps a
 // dead runner daemon can hide -- a dead pipeline, a wedged session, and a
 // lost success notice.
@@ -83,7 +83,7 @@ type UnnotifiedNote struct {
 	DiscordThreadID string
 }
 
-// Watcher holds everything the pmwatch checks need.
+// Watcher holds everything the watcher checks need.
 type Watcher struct {
 	BaseURL string // e.g. "http://127.0.0.1:8420"
 	Vault   *vaultgit.Vault

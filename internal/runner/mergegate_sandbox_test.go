@@ -17,14 +17,14 @@ import (
 // package, these are allowed to create/merge/close real branches and PRs.
 // Gated behind an env var since they're slow (real claude + real CI polls)
 // and mutate real GitHub state: run with
-// PMRUNNER_RUN_SANDBOX_TEST=1 go test ./internal/runner/ -run TestSandbox -v
+// RBG_RUN_SANDBOX_TEST=1 go test ./internal/runner/ -run TestSandbox -v
 const sandboxRepoPath = "/home/obsidian/repos/sandbox"
 const sandboxDefaultBranch = "main"
 
 func skipUnlessSandboxEnabled(t *testing.T) {
 	t.Helper()
-	if os.Getenv("PMRUNNER_RUN_SANDBOX_TEST") == "" {
-		t.Skip("set PMRUNNER_RUN_SANDBOX_TEST=1 to run real scenarios against madevara24/sandbox")
+	if os.Getenv("RBG_RUN_SANDBOX_TEST") == "" {
+		t.Skip("set RBG_RUN_SANDBOX_TEST=1 to run real scenarios against madevara24/sandbox")
 	}
 	if _, err := os.Stat(sandboxRepoPath); err != nil {
 		t.Skipf("sandbox repo not present at %s: %v", sandboxRepoPath, err)

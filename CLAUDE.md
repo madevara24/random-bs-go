@@ -27,7 +27,7 @@ go test ./... -v 2>&1 | grep -- '--- SKIP'
 ```
 
 `internal/notify` has a test that fires a real Discord webhook message.
-It's gated behind `PMRUNNER_SEND_REAL_DISCORD_TEST=1` and skips by default
+It's gated behind `RBG_SEND_REAL_DISCORD_TEST=1` and skips by default
 — do not set that env var unless you specifically intend to send a real
 message.
 

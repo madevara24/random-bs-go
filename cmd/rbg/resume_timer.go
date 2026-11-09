@@ -19,7 +19,7 @@ type engineResumeState struct {
 // pause, one timer per engine -- pause.State itself stays a dumb flag, no
 // timers, no Discord, no notion of engine names -- so this is where
 // main.go holds that policy, per the task's own framing ("Own the timer
-// goroutine in cmd/pmrunner/runner_mode.go, so pause stays a dumb flag and
+// goroutine in cmd/rbg/runner_mode.go, so pause stays a dumb flag and
 // main holds the policy"). One instance per runRunner call, shared
 // between the OnBlocked/OnTerminal callbacks that detect a usage-limit
 // trip (both call handleTrip) and doResume -- httpapi.Server.Resume,

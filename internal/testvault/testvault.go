@@ -22,9 +22,9 @@ import (
 // pathEnvVar overrides the throwaway test vault's location, e.g. on a CI
 // runner with no access to the VPS filesystem that provisions its own
 // scratch fixture (see `make test-fixture`).
-const pathEnvVar = "PMRUNNER_TEST_VAULT_PATH"
+const pathEnvVar = "RBG_TEST_VAULT_PATH"
 
-const defaultPath = "/home/obsidian/pmrunner-go-test-vault"
+const defaultPath = "/home/obsidian/rbg-test-vault"
 
 // Path is the throwaway test vault's working clone -- set up outside the
 // repo, on-disk, per checkout, at defaultPath unless pathEnvVar overrides
@@ -34,7 +34,7 @@ var Path = resolveEnv(pathEnvVar, defaultPath)
 
 // targetRepoPathEnvVar overrides TargetRepoPath's location, same rationale
 // as pathEnvVar.
-const targetRepoPathEnvVar = "PMRUNNER_TEST_TARGET_REPO_PATH"
+const targetRepoPathEnvVar = "RBG_TEST_TARGET_REPO_PATH"
 
 const defaultTargetRepoPath = "/home/obsidian/repos/phase6-test-repo"
 

@@ -124,13 +124,13 @@ func TestSendSucceedsFirstTryNotified(t *testing.T) {
 // the real webhook, confirm "notified" lands. Gated behind an env var
 // since it fires a real (clearly-marked test) message into #task-alert.
 func TestSendAgainstRealWebhook(t *testing.T) {
-	if os.Getenv("PMRUNNER_SEND_REAL_DISCORD_TEST") == "" {
-		t.Skip("set PMRUNNER_SEND_REAL_DISCORD_TEST=1 to actually fire this against the real Discord webhook")
+	if os.Getenv("RBG_SEND_REAL_DISCORD_TEST") == "" {
+		t.Skip("set RBG_SEND_REAL_DISCORD_TEST=1 to actually fire this against the real Discord webhook")
 	}
 	testvault.SkipIfAbsent(t)
 	t.Cleanup(testvault.Lock(t))
 
-	webhookURL, err := ReadWebhookURLFromEnvFile("/home/obsidian/pm-runner-go/.env")
+	webhookURL, err := ReadWebhookURLFromEnvFile("/home/obsidian/rbg/.env")
 	if err != nil {
 		t.Fatalf("reading real webhook URL: %v", err)
 	}

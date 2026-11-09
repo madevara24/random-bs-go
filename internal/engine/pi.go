@@ -53,7 +53,7 @@ type PiEngine struct {
 // pi fall back to its own configured default); sessionDir is the
 // directory pi's --session-dir points at. NewPi does no I/O -- it never
 // creates sessionDir itself, since it's also called with empty arguments
-// just to list registered engine names (see cmd/pmrunner/runner_mode.go's
+// just to list registered engine names (see cmd/rbg/runner_mode.go's
 // registeredEngineNames); the caller creates sessionDir once at startup.
 func NewPi(bin, model, reviewModel, sessionDir string, startupTimeout time.Duration) *PiEngine {
 	return &PiEngine{bin: bin, model: model, reviewModel: reviewModel, sessionDir: sessionDir, startupTimeout: startupTimeout}

@@ -105,7 +105,7 @@ type Config struct {
 	// PiSessionDir is the directory pi's --session-dir points at.
 	// Optional, defaults to "pi-sessions" under the config directory
 	// (alongside .env/repos.json) -- created once at startup, never by the
-	// engine constructor itself (see cmd/pmrunner/runner_mode.go).
+	// engine constructor itself (see cmd/rbg/runner_mode.go).
 	PiSessionDir string
 
 	// PiStartupTimeoutSeconds is how long invokeEngine waits for pi's
@@ -270,7 +270,7 @@ func loadRepos(path string) (map[string]RepoConfig, error) {
 // Load reads and validates both files. envPath and reposPath must be
 // explicit -- callers (main.go) resolve them from flags/env/defaults, config
 // itself has no opinion on discovery. knownEngines names every engine
-// registered in the running binary (see cmd/pmrunner/runner_mode.go's
+// registered in the running binary (see cmd/rbg/runner_mode.go's
 // registeredEngineNames) -- DEFAULT_ENGINE, REVIEW_ENGINE, PLAN_ENGINE,
 // and every repo's "engine"/"review_engine"/"plan_engine" must each name
 // one of these, or Load fails with a clear error rather than letting an
