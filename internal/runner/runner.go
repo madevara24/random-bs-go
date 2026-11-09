@@ -72,7 +72,7 @@ type UsageLimitInfo struct {
 // appends, or "" if the reset time is unknown -- nil-safe, so it can be
 // called directly on a possibly-nil *UsageLimitInfo. Shared by
 // crashfallback.go's AlertPayload.DiscordMessage and
-// cmd/pmrunner/runner_mode.go's newTerminalHandler, the two places that
+// cmd/rbg/runner_mode.go's newTerminalHandler, the two places that
 // render this same clause.
 func (u *UsageLimitInfo) ResetsAtSuffix() string {
 	if u == nil || u.ResetsAt == nil {
@@ -105,7 +105,7 @@ type Deps struct {
 	Engine engine.Engine
 
 	// EngineRegistry maps engine name -> engine.Engine, built once at boot
-	// (see cmd/pmrunner/runner_mode.go's buildEngineRegistry) -- empty
+	// (see cmd/rbg/runner_mode.go's buildEngineRegistry) -- empty
 	// falls back to a single {"claude": engine()} registry (see
 	// engineRegistry()), so every existing caller that only ever set
 	// Engine keeps working unchanged.
@@ -145,7 +145,7 @@ type Deps struct {
 	// any caller that doesn't wire one in, which is every existing test
 	// unless it specifically means to exercise this. Production always
 	// sets it: a single *pause.State constructed once in
-	// cmd/pmrunner/runner_mode.go and shared with dispatch.RunDispatchPass
+	// cmd/rbg/runner_mode.go and shared with dispatch.RunDispatchPass
 	// (via daemon.NewRunner) and every RepoWorker (via worker.New), so a
 	// trip here for this task's codingEngineName is visible everywhere
 	// else in the pipeline that needs to stop claiming/popping that same
@@ -295,7 +295,7 @@ func (d Deps) idleTimeout() time.Duration {
 // deliberately distinctive so it's obvious in a directory listing and
 // unlikely to collide with anything real.
 func copyFileName(slug string) string {
-	return fmt.Sprintf(".pmrunner-task-%s.md", slug)
+	return fmt.Sprintf(".rbg-task-%s.md", slug)
 }
 
 // ProcessTask is the real per-task handler. Signature matches

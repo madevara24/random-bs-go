@@ -25,7 +25,7 @@ import (
 // Phase 6 itself is actually responsible for: branch creation, the
 // note-copy mechanism, and claude invocation + session_id capture, none of
 // which need GitHub at all). Configurable via testvault.TargetRepoPath
-// (PMRUNNER_TEST_TARGET_REPO_PATH) so CI can point it at a scratch fixture.
+// (RBG_TEST_TARGET_REPO_PATH) so CI can point it at a scratch fixture.
 var testTargetRepoPath = testvault.TargetRepoPath
 
 type noopReporter struct{}
@@ -91,7 +91,7 @@ func TestProcessTaskSetupAndInvocation(t *testing.T) {
 
 	testvault.Seed(t, relPath, notetask.Frontmatter{
 		Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
-	}, "Add the exact HTML comment `<!-- pmrunner-phase6-test -->` as a new line at the very top of README.md, then commit that change with git (message: \"phase6 test\"). Do not create a pull request, do not push, do not run any other git or gh commands. Then update your task-copy file's status to `done` per the instructions above.")
+	}, "Add the exact HTML comment `<!-- rbg-phase6-test -->` as a new line at the very top of README.md, then commit that change with git (message: \"phase6 test\"). Do not create a pull request, do not push, do not run any other git or gh commands. Then update your task-copy file's status to `done` per the instructions above.")
 
 	deps := Deps{
 		Vault: v,
@@ -204,7 +204,7 @@ func TestProcessTaskMergeBack(t *testing.T) {
 	testvault.Seed(t, relPath, notetask.Frontmatter{
 		Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
 	}, fmt.Sprintf(
-		"Add the exact HTML comment `<!-- pmrunner-phase7-test -->` as a new line at the very top of README.md. "+
+		"Add the exact HTML comment `<!-- rbg-phase7-test -->` as a new line at the very top of README.md. "+
 			"Commit that change (message: \"phase7 test\"), then push your current branch to origin with `git push origin HEAD` -- "+
 			"this repo's remote is a local bare repo, not GitHub, so this push is real and expected, but there is no `gh` PR "+
 			"mechanism available here. Do not run any `gh` command. Instead, simulate having opened a PR: in your task-copy "+

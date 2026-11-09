@@ -264,7 +264,7 @@ func TestCheckStatusTasksFlagsStaleBeforeRunnerWatchdog(t *testing.T) {
 		runGitPlain(testTargetRepoPath, "checkout", "main")
 		runGitPlain(testTargetRepoPath, "branch", "-D", branchName)
 		runGitPlain(testTargetRepoPath, "push", "origin", "--delete", branchName)
-		os.Remove(filepath.Join(testTargetRepoPath, ".pmrunner-task-"+slug+".md"))
+		os.Remove(filepath.Join(testTargetRepoPath, ".rbg-task-"+slug+".md"))
 	})
 
 	globalSlots := worker.NewGlobalSlots(1)
