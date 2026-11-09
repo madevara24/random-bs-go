@@ -23,7 +23,7 @@
 # same two variables.
 
 BINARY := rbg
-DEPLOY_DIR ?= /home/obsidian/pm-runner-go
+DEPLOY_DIR ?= /home/obsidian/rbg
 DRY_RUN ?= 0
 PMRUNNER_TEST_VAULT_PATH ?= /home/obsidian/pmrunner-go-test-vault
 PMRUNNER_TEST_TARGET_REPO_PATH ?= /home/obsidian/repos/phase6-test-repo
@@ -45,7 +45,7 @@ deploy: build
 		echo "[dry-run] cp -a $$deploy_dir/$(BINARY) $$deploy_dir/$(BINARY).prev"; \
 		echo "[dry-run] chmod 755 $$deploy_dir/.$(BINARY).new"; \
 		echo "[dry-run] mv $$deploy_dir/.$(BINARY).new $$deploy_dir/$(BINARY)"; \
-		echo "[dry-run] sudo -n systemctl restart pmrunner-runner pmrunner-watcher"; \
+		echo "[dry-run] sudo -n systemctl restart rbg-runner rbg-watcher"; \
 	else \
 		cp "$(BINARY)" "$$deploy_dir/.$(BINARY).new" && \
 		if [ -f "$$deploy_dir/$(BINARY)" ]; then \
@@ -53,7 +53,7 @@ deploy: build
 		fi && \
 		chmod 755 "$$deploy_dir/.$(BINARY).new" && \
 		mv "$$deploy_dir/.$(BINARY).new" "$$deploy_dir/$(BINARY)" && \
-		sudo -n systemctl restart pmrunner-runner pmrunner-watcher; \
+		sudo -n systemctl restart rbg-runner rbg-watcher; \
 	fi
 
 test-fixture:

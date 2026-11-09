@@ -55,7 +55,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build binary
-        run: GOOS=linux GOARCH=amd64 go build -o pmrunner ./cmd/pmrunner
+        run: GOOS=linux GOARCH=amd64 go build -o rbg ./cmd/rbg
 
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -70,17 +70,17 @@ jobs:
           echo "${{ secrets.VPS_KNOWN_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Copy binary to VPS
-        run: scp pmrunner ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/home/obsidian/pm-runner-go/.pmrunner.new
+        run: scp rbg ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/home/obsidian/rbg/.rbg.new
 
       - name: Install binary and restart services
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} '
             set -e
-            cd /home/obsidian/pm-runner-go
-            cp -a pmrunner pmrunner.prev
-            chmod 755 .pmrunner.new
-            mv .pmrunner.new pmrunner
-            sudo -n systemctl restart pmrunner-runner pmrunner-watcher
+            cd /home/obsidian/rbg
+            cp -a rbg rbg.prev
+            chmod 755 .rbg.new
+            mv .rbg.new rbg
+            sudo -n systemctl restart rbg-runner rbg-watcher
           '
 
       - name: Poll health endpoint
