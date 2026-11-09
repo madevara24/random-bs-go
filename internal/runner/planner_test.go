@@ -157,6 +157,86 @@ func TestPlannerCleanPlanSeedsUnits(t *testing.T) {
 	}
 }
 
+// TestPlannerBlockResumes confirms a multi-unit note blocked in the
+// planner before any ## Plan was ever written -- so resume (SessionID /
+// multiUnitContinuing) is false exactly like a fresh claim -- doesn't fail
+// setup when task/<slug> is already sitting in the clone from that earlier,
+// now-blocked run. Before RBG-51's fix, ProcessTask always ran
+// pullAndBranch here, whose `checkout -b` fails outright on an existing
+// branch (confirmed live 2026-11-09); a human had to delete the branch by
+// hand before a blocker_resolved retry could proceed. The fix makes
+// ProcessTask take the same checkoutTaskBranch resume path a real resume
+// uses whenever that branch already exists, so setup succeeds and the
+// planner runs again.
+func TestPlannerBlockResumes(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "plannerblockresume-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+	branchName := "task/" + slug
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocker_resolved", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue,
+	}, "Trivial multi-unit task.")
+
+	cleanupTaskBranch(t, slug)
+	// Simulates the state a blocked planner round left behind: task/<slug>
+	// already exists in the clone (pullAndBranch's own checkout -b, run by
+	// that earlier ProcessTask call), but nothing was ever committed to it
+	// -- planner sessions aren't allowed to commit -- and no ## Plan was
+	// ever written to the note.
+	if err := pullAndBranch(testRepoDeps()["phase6-test-repo"], branchName); err != nil {
+		t.Fatalf("pullAndBranch (simulating the earlier blocked run): %v", err)
+	}
+
+	jevSrv, _ := newJevServer(t, `{"answers":{"risky":{"noul":0.1},"ambiguous":{"noul":0.1}}}`)
+	planner := &fakePlannerEngine{copyName: copyFileName(slug), planBody: cleanPlanBody}
+
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		EngineRegistry:   map[string]engine.Engine{"claude": planner},
+		MultiUnitEnabled: true,
+		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), "https://github.com/fake-owner/fake-repo/pull/1")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
+		t.Fatalf("ProcessTask: %v (setup must not fail just because %s already exists)", err, branchName)
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	// fakePlannerEngine doubles as the unit loop's coding/review engine
+	// too (see its own doc comment), so planner.calls counts U1/U2's
+	// builds as well -- plan_round is the reliable signal that the
+	// planner itself only needed its first round.
+	if noteAfter.Frontmatter.PlanRound > 1 {
+		t.Errorf("plan_round = %d, want 1 (the planner's first round should have parsed and cleared the gate)", noteAfter.Frontmatter.PlanRound)
+	}
+	if noteAfter.Frontmatter.Status != "done" {
+		t.Errorf("status = %q, want %q (planner ran, gate passed, unit loop finished)", noteAfter.Frontmatter.Status, "done")
+	}
+}
+
 // TestPlannerRiskyPlanStops confirms a clear "risky" answer stops the
 // gate: status flips to plan_review, plan_message_id is recorded from the
 // (fake) webhook's response, Plan Review ends with "### Round 1", and the
@@ -328,6 +408,75 @@ func TestPlannerBadYAMLBlocksAfter3(t *testing.T) {
 	}
 	if !strings.Contains(blockedPayload.ExitErrText, "unusable plan") {
 		t.Errorf("alert ExitErrText = %q, want it to name the parse error", blockedPayload.ExitErrText)
+	}
+}
+
+// TestPlannerRetryPromptHasParseError confirms a round whose plan fails to
+// parse (here, a list of maps for `accept` -- still invalid under RBG-51's
+// lenient list-of-strings parsing) has that parse error folded into the
+// very next round's prompt (buildPlannerPrompt's lastParseErr branch). The
+// planner used to get no information about why its plan was rejected on
+// retry, which is why it kept repeating the same mistake every round.
+func TestPlannerRetryPromptHasParseError(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "plannerretryerr-" + run
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	multiUnitTrue := true
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-11-06",
+		MultiUnit: &multiUnitTrue,
+	}, "Trivial multi-unit task.")
+
+	jevSrv, _ := newJevServer(t, `{"answers":{"risky":{"noul":0.1},"ambiguous":{"noul":0.1}}}`)
+	planner := &promptCapturingPlannerEngine{fakePlannerEngine: &fakePlannerEngine{
+		copyName: copyFileName(slug),
+		planBody: func(round int) string {
+			if round == 1 {
+				return "Bad round.\n\n```yaml\n" +
+					"- id: U1\n  title: Do part one\n  verify: \"true\"\n" +
+					"  accept:\n    - step: a\n    - step: b\n" +
+					"```\n"
+			}
+			return cleanPlanBody(round)
+		},
+	}}
+
+	deps := Deps{
+		Vault:            v,
+		Repos:            testRepoDeps(),
+		EngineRegistry:   map[string]engine.Engine{"claude": planner},
+		MultiUnitEnabled: true,
+		Jev:              &jev.Client{BaseURL: jevSrv.URL, APIKey: "test-key"},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	branchName := "task/" + slug
+	cleanupTaskBranch(t, slug)
+	t.Cleanup(func() {
+		exec.Command("git", "-C", testTargetRepoPath, "push", "origin", "--delete", branchName).Run()
+	})
+
+	binDir := t.TempDir()
+	writeFakeGhPRCreate(t, filepath.Join(binDir, "gh"), filepath.Join(binDir, "gh-calls.log"), "https://github.com/fake-owner/fake-repo/pull/1")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
+		t.Fatalf("ProcessTask: %v", err)
+	}
+
+	if len(planner.prompts) < 2 {
+		t.Fatalf("planner ran %d times, want at least 2 (round 1's bad plan, round 2's retry)", len(planner.prompts))
+	}
+	if !strings.Contains(planner.prompts[1], "cannot unmarshal") || !strings.Contains(planner.prompts[1], "accept") {
+		t.Errorf("round 2 prompt missing round 1's parse error text: %q", planner.prompts[1])
 	}
 }
 

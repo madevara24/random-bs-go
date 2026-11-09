@@ -38,17 +38,19 @@ const gateTimeout = 30 * time.Second
 // plannerCompletionContract is the deliverable every planner session is
 // held to -- restated in every round's prompt, same discipline as
 // runner.go's prCompletionContract for coding sessions.
-const plannerCompletionContract = "Read this repository to understand it, then write nothing into `%[1]s` but the `## Plan` section: a short summary, then one ```yaml fenced block containing a YAML list of units, each with `id`, `title`, `paths`, `depends_on`, `accept`, and `verify` (a single runnable command that verifies that unit's own work is correct). Every unit must be small enough for one coding session to finish start-to-finish. If you're genuinely unsure about how to split or scope the work, optionally add a second ```yaml fenced block right after the first, `questions:`, mapping a question id to `{instructions, options: {name: description}}`. Set `status` to `done` in `%[1]s` once you're finished. Do not change any other file, do not commit, do not push, and do not open a pull request -- this is a planning session only, not a coding session."
+const plannerCompletionContract = "Read this repository to understand it, then write nothing into `%[1]s` but the `## Plan` section: a short summary, then one ```yaml fenced block containing a YAML list of units, each with `id`, `title`, `paths`, `depends_on`, `accept`, and `verify` (a single runnable command that verifies that unit's own work is correct). Every unit must be small enough for one coding session to finish start-to-finish. Each field's type: `id`, `title` are a string; `paths`, `depends_on` are a list of strings; `accept`, `verify` are each one string -- use a block string (`|`) if either needs several lines, not a YAML list. If you're genuinely unsure about how to split or scope the work, optionally add a second ```yaml fenced block right after the first, `questions:`, mapping a question id to `{instructions, options: {name: description}}`. Set `status` to `done` in `%[1]s` once you're finished. Do not change any other file, do not commit, do not push, and do not open a pull request -- this is a planning session only, not a coding session."
 
 // buildPlannerPrompt constructs what gets passed to the planner engine for
 // round (1-indexed) -- copyName is the note-copy's filename, same role as
 // buildPrompt's own copyName for a coding run. For round > 1, it looks up
 // the PRECEDING round's own review text (notetask.CurrentRoundReview) --
 // non-empty means a human rejected that round with written feedback
-// (resolvePlanReview's replan path), which takes priority over the
-// generic "missing/invalid unit fields" wording used when runPlanner's own
-// retry loop bumped the round instead.
-func buildPlannerPrompt(note *notetask.Note, copyName string, round int) string {
+// (resolvePlanReview's replan path), which takes priority over
+// lastParseErr, the error runPlanner's own retry loop recorded from the
+// preceding round's failed ParsePlanUnits/validatePlanUnits call (empty if
+// that round's plan parsed fine, i.e. this is the first round, or we got
+// here via a human rejection instead).
+func buildPlannerPrompt(note *notetask.Note, copyName string, round int, lastParseErr string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "This is a planner session (round %d) for a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it).\n\n", round, copyName)
 	fmt.Fprintf(&b, plannerCompletionContract, copyName)
@@ -56,6 +58,8 @@ func buildPlannerPrompt(note *notetask.Note, copyName string, round int) string 
 	if round > 1 {
 		if feedback := strings.TrimSpace(notetask.CurrentRoundReview(note.PlanReview, round-1)); feedback != "" {
 			fmt.Fprintf(&b, "A previous round's plan was rejected by a human reviewer. Their feedback:\n\n%s\n\nRe-read the task below and produce a better plan that addresses it.\n\n", feedback)
+		} else if lastParseErr != "" {
+			fmt.Fprintf(&b, "A previous round's plan was rejected as unusable: %s -- re-read the task below and produce a better plan this time.\n\n", oneLine(lastParseErr, oneLineMaxRunes))
 		} else {
 			b.WriteString("A previous round's plan was rejected as unusable (missing/invalid unit fields) -- re-read the task below and produce a better plan this time.\n\n")
 		}
@@ -103,13 +107,14 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 	if round == 0 {
 		round = 1
 	}
+	var lastParseErr string
 
 	for {
 		if err := writeNoteCopy(note, copyPath); err != nil {
 			return blockPlannerTask(deps, job, fmt.Sprintf("writing planner note-copy: %v", err))
 		}
 
-		prompt := buildPlannerPrompt(note, copyName, round)
+		prompt := buildPlannerPrompt(note, copyName, round, lastParseErr)
 		reporter.SetStage(fmt.Sprintf("plan: planner round %d", round))
 		_, stderrTail, exitErr := invokeEngine(planEng, repoCfg.Path, prompt, "", deps.idleTimeout(), reporter)
 
@@ -155,6 +160,7 @@ func runPlanner(deps Deps, reporter ActivityReporter, job worker.Job, note *note
 		}
 
 		if planErr != nil {
+			lastParseErr = planErr.Error()
 			round++
 			if round > maxPlanRounds {
 				return blockPlannerTask(deps, job, fmt.Sprintf("planner produced an unusable plan after %d rounds: %v", maxPlanRounds, planErr))

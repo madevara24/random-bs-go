@@ -404,6 +404,18 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// branch rather than guessing at whatever suffix a prior run computed.
 	branchName := fmt.Sprintf("task/%s", job.Slug)
 	var localOnlyResume bool
+	// branchIsPreexisting tracks, for restoreRepo's cleanup purposes, whether
+	// branchName already existed before this call rather than being freshly
+	// created by pullAndBranch below -- true for an ordinary resume, and
+	// also for a multi-unit task claimed at blocker_resolved before any
+	// ## Plan was ever written (so `resume` above is false: HasPlan is
+	// false, multiUnitContinuing can't tell this apart from a brand new
+	// task) whose planner round nonetheless left task/<slug> sitting in
+	// this clone. Without this, pullAndBranch's `checkout -b` fails outright
+	// because that branch is already here (confirmed live 2026-11-09, the
+	// rename task's own first run -- a human had to delete the branch by
+	// hand before the retry could proceed).
+	branchIsPreexisting := resume
 	if resume {
 		var err error
 		localOnlyResume, err = checkoutTaskBranch(repoCfg, branchName)
@@ -414,6 +426,20 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 				repoCfg:         repoCfg,
 				branchName:      branchName,
 				resume:          resume,
+				discordThreadID: discordThreadID,
+			})
+		}
+	} else if isMultiUnit(deps, note) && taskBranchExists(repoCfg.Path, branchName) {
+		branchIsPreexisting = true
+		var err error
+		localOnlyResume, err = checkoutTaskBranch(repoCfg, branchName)
+		if err != nil {
+			return handleSetupFailure(deps, job, setupFailureInfo{
+				stage:           setupStageCheckoutTaskBranch,
+				err:             fmt.Errorf("checking out pre-existing task branch for %s: %w", job.Slug, err),
+				repoCfg:         repoCfg,
+				branchName:      branchName,
+				resume:          true,
 				discordThreadID: discordThreadID,
 			})
 		}
@@ -438,7 +464,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			repoCfg:         repoCfg,
 			branchName:      branchName,
 			copyPath:        copyPath,
-			resume:          resume,
+			resume:          branchIsPreexisting,
 			discordThreadID: discordThreadID,
 		})
 	}
@@ -449,7 +475,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 			repoCfg:         repoCfg,
 			branchName:      branchName,
 			copyPath:        copyPath,
-			resume:          resume,
+			resume:          branchIsPreexisting,
 			discordThreadID: discordThreadID,
 		})
 	}
@@ -852,6 +878,23 @@ func checkoutTaskBranch(repoCfg config.RepoConfig, branchName string) (bool, err
 
 func localBranchExists(repoPath, branchName string) bool {
 	return exec.Command("git", "-C", repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName).Run() == nil
+}
+
+// remoteBranchExists reports whether branchName exists on origin, via a
+// read-only ls-remote -- unlike checkoutTaskBranch's own fetch, this
+// touches no local ref, so it's safe to call purely to decide which branch
+// setup path to take.
+func remoteBranchExists(repoPath, branchName string) bool {
+	return exec.Command("git", "-C", repoPath, "ls-remote", "--exit-code", "--heads", "origin", branchName).Run() == nil
+}
+
+// taskBranchExists reports whether branchName already exists in this
+// clone, locally or on origin -- the check ProcessTask uses to tell a
+// genuinely fresh multi-unit claim (pullAndBranch's checkout -b is safe)
+// apart from one whose task branch was already created by an earlier,
+// now-blocked run (checkout -b would fail outright).
+func taskBranchExists(repoPath, branchName string) bool {
+	return localBranchExists(repoPath, branchName) || remoteBranchExists(repoPath, branchName)
 }
 
 // writeNoteCopy writes the note's content into the target repo, minus the

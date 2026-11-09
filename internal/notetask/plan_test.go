@@ -99,6 +99,54 @@ func TestParsePlanUnits(t *testing.T) {
 	})
 }
 
+func TestParsePlanUnitsListFields(t *testing.T) {
+	t.Run("accept and verify as lists", func(t *testing.T) {
+		section := "```yaml\n" +
+			"- id: U1\n" +
+			"  title: Add the schema\n" +
+			"  depends_on: []\n" +
+			"  accept:\n    - a\n    - b\n" +
+			"  verify:\n    - x\n    - y\n" +
+			"```\n"
+		units, err := ParsePlanUnits(section)
+		if err != nil {
+			t.Fatalf("ParsePlanUnits: %v", err)
+		}
+		if units[0].Accept != "a\nb" {
+			t.Errorf("Accept = %q, want %q", units[0].Accept, "a\nb")
+		}
+		if units[0].Verify != "x && y" {
+			t.Errorf("Verify = %q, want %q", units[0].Verify, "x && y")
+		}
+	})
+
+	t.Run("plain strings unchanged", func(t *testing.T) {
+		units, err := ParsePlanUnits(validPlanSection)
+		if err != nil {
+			t.Fatalf("ParsePlanUnits: %v", err)
+		}
+		if units[0].Accept != "Fields parse and round-trip." {
+			t.Errorf("Accept = %q", units[0].Accept)
+		}
+		if units[0].Verify != "go test ./internal/notetask/..." {
+			t.Errorf("Verify = %q", units[0].Verify)
+		}
+	})
+
+	t.Run("accept as a map is still an error", func(t *testing.T) {
+		section := "```yaml\n" +
+			"- id: U1\n" +
+			"  title: Add the schema\n" +
+			"  depends_on: []\n" +
+			"  accept:\n    k: v\n" +
+			"  verify: go test ./...\n" +
+			"```\n"
+		if _, err := ParsePlanUnits(section); err == nil {
+			t.Fatal("expected an error for accept written as a map")
+		}
+	})
+}
+
 func TestCurrentRoundReview(t *testing.T) {
 	const planReview = "### Round 1\nno\n### Round 2\n"
 
