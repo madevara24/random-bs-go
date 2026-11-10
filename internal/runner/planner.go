@@ -312,20 +312,25 @@ func seedUnits(deps Deps, job worker.Job, units []notetask.PlanUnit, logLine str
 }
 
 // stopForPlanReview writes the gate's stop outcome: posts the full Plan
-// into the task's Discord thread for human review (best-effort -- a post
-// failure is logged, not fatal, same as postTaskClaim's own rule), then
-// records plan_message_id (if the post succeeded), a fresh Plan Review
-// round heading, status: plan_review, and the plan_gate Runner Log line,
-// all in one commit.
+// into the task's Discord thread for human review, grouped by each reason's
+// category and mentioning the configured user when there is one (best-effort
+// -- a post failure is logged, not fatal, same as postTaskClaim's own rule),
+// then records plan_message_id (if the post succeeded), a fresh Plan Review
+// round heading, status: plan_review, the grouped plan_gate_reasons (so the
+// planpoll retry path can re-render the same message), and the plan_gate
+// Runner Log line, all in one commit.
 func stopForPlanReview(deps Deps, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig, result plangate.Result, logLine string) error {
 	round := note.Frontmatter.PlanRound
 	if round == 0 {
 		round = 1
 	}
 
+	mention := ""
+	if deps.DiscordUserID != "" {
+		mention = fmt.Sprintf("<@%s>", deps.DiscordUserID)
+	}
 	attachmentName := fmt.Sprintf("plan-round-%d.md", round)
-	message := fmt.Sprintf("Task `%s` (%s)'s plan needs review: %s. React ✅ to approve, or ❌ and write your feedback under `### Round %d` in `## Plan Review`.",
-		job.Slug, job.Repo, strings.Join(result.Reasons, "; "), round)
+	message := plangate.RenderPlanReviewMessage(mention, job.Slug, job.Repo, round, result.Categorized)
 
 	var messageID string
 	if deps.ForumWebhookURL != "" {
@@ -342,6 +347,7 @@ func stopForPlanReview(deps Deps, job worker.Job, note *notetask.Note, repoCfg c
 			n.Frontmatter.PlanMessageID = &messageID
 		}
 		n.Frontmatter.Status = "plan_review"
+		n.Frontmatter.PlanGateReasons = groupPlanGateReasons(result.Categorized)
 		notetask.AppendPlanReviewRound(n, round)
 		notetask.AppendRunnerLog(n, logLine, time.Now())
 		return nil
@@ -350,6 +356,22 @@ func stopForPlanReview(deps Deps, job worker.Job, note *notetask.Note, repoCfg c
 		return blockPlannerTask(deps, job, fmt.Sprintf("writing plan_review: %v", werr))
 	}
 	return nil
+}
+
+// groupPlanGateReasons turns the gate's ordered reasons into the
+// category -> reason-texts map persisted as plan_gate_reasons. Reasons keep
+// their order within each category; the whole map replaces any previous
+// round's value on every stop.
+func groupPlanGateReasons(reasons []plangate.Reason) map[string][]string {
+	if len(reasons) == 0 {
+		return nil
+	}
+	grouped := make(map[string][]string)
+	for _, r := range reasons {
+		category := string(r.Category)
+		grouped[category] = append(grouped[category], r.Text)
+	}
+	return grouped
 }
 
 // resolvePlanReview is processMultiUnit's branch for a task that cleared

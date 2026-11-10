@@ -100,6 +100,7 @@ func runRunner(cfg *config.Config) {
 		Jev:                 &jev.Client{APIKey: cfg.TypesafeAPIKey, Model: cfg.JevModel},
 		MultiUnitEnabled:    cfg.MultiUnitEnabled,
 		ForumWebhookURL:     cfg.DiscordTaskForumWebhookURL,
+		DiscordUserID:       cfg.DiscordUserID,
 		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.Send(
 				job.NotePath, payload.DiscordThreadID,

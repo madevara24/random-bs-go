@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/madevara24/random-bs-go/internal/jev"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/pause"
+	"github.com/madevara24/random-bs-go/internal/plangate"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
@@ -49,6 +51,32 @@ func discordThreadServer(t *testing.T, messageID string) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// planReviewMessageServer stands in for PostToThread's target and records
+// each posted message's content on the returned buffered channel.
+func planReviewMessageServer(t *testing.T) (*httptest.Server, <-chan string) {
+	t.Helper()
+	messages := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var payload struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("payload_json")), &payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		messages <- payload.Content
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"42"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, messages
 }
 
 // TestPlannerCleanPlanSeedsUnits confirms a plan that clears the gate
@@ -234,6 +262,105 @@ func TestPlannerBlockResumes(t *testing.T) {
 	}
 	if noteAfter.Frontmatter.Status != "done" {
 		t.Errorf("status = %q, want %q (planner ran, gate passed, unit loop finished)", noteAfter.Frontmatter.Status, "done")
+	}
+}
+
+// TestPlanReviewStopMessageAndGroupedReasons pins the stop branch's exact
+// Discord body (mention, category headings in display order, bullets within
+// each category) and confirms the same grouping is written to the note's
+// plan_gate_reasons field, replacing any previous round's value.
+func TestPlanReviewStopMessageAndGroupedReasons(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "planreviewstop-" + run
+	repo := "phase6-test-repo"
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: repo, Created: "2026-11-06", PlanRound: 2,
+		PlanGateReasons: map[string][]string{
+			"Errors":       {"stale first-round reason"},
+			"Old category": {"stale"},
+		},
+	}, "Do the thing.")
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading seeded note: %v", err)
+	}
+	note.HasPlan = true
+	note.Plan = "# Plan\n\nDo the thing in two units."
+
+	discordSrv, messages := planReviewMessageServer(t)
+	deps := Deps{
+		Vault:           v,
+		ForumWebhookURL: discordSrv.URL,
+		DiscordUserID:   "12345",
+	}
+	job := worker.Job{NotePath: relPath, Repo: repo, Slug: slug}
+	reasons := []plangate.Reason{
+		{Category: plangate.CategoryHardRules, Text: `unit "U1" touches "db/migrations/0003.sql", which matches hard-stop pattern "migrations/"`},
+		{Category: plangate.CategoryHardRules, Text: "plan has 9 units, over the 8-unit hard limit"},
+		{Category: plangate.CategoryJevClassifier, Text: "risky=0.90 is a clear yes"},
+		{Category: plangate.CategoryPlannerQuestions, Text: "approach=none"},
+		{Category: plangate.CategoryErrors, Text: `missing answer for "ambiguous"`},
+	}
+	result := plangate.Result{Stop: true, Categorized: reasons}
+	for _, r := range reasons {
+		result.Reasons = append(result.Reasons, r.Text)
+	}
+
+	if err := stopForPlanReview(deps, job, note, testRepoDeps()[repo], result, "plan_gate risky=0.90 ambiguous=missing approach=none(0.90) stop=true"); err != nil {
+		t.Fatalf("stopForPlanReview: %v", err)
+	}
+
+	var message string
+	select {
+	case message = <-messages:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no plan-review message was posted")
+	}
+	wantMessage := "<@12345> Task `" + slug + "` (" + repo + ")'s plan needs review.\n" +
+		"\n" +
+		"**Hard rules**\n" +
+		"- unit \"U1\" touches \"db/migrations/0003.sql\", which matches hard-stop pattern \"migrations/\"\n" +
+		"- plan has 9 units, over the 8-unit hard limit\n" +
+		"**Jev classifier**\n" +
+		"- risky=0.90 is a clear yes\n" +
+		"**Planner questions**\n" +
+		"- approach=none\n" +
+		"**Errors**\n" +
+		"- missing answer for \"ambiguous\"\n" +
+		"\n" +
+		"React ✅ to approve, or ❌ and write your feedback under `### Round 2` in `## Plan Review`."
+	if message != wantMessage {
+		t.Errorf("message =\n%s\n\nwant:\n%s", message, wantMessage)
+	}
+
+	noteAfter, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if noteAfter.Frontmatter.Status != "plan_review" {
+		t.Errorf("status = %q, want plan_review", noteAfter.Frontmatter.Status)
+	}
+	wantReasons := map[string][]string{
+		"Hard rules": {
+			`unit "U1" touches "db/migrations/0003.sql", which matches hard-stop pattern "migrations/"`,
+			"plan has 9 units, over the 8-unit hard limit",
+		},
+		"Jev classifier":    {"risky=0.90 is a clear yes"},
+		"Planner questions": {"approach=none"},
+		"Errors":            {`missing answer for "ambiguous"`},
+	}
+	if !reflect.DeepEqual(noteAfter.Frontmatter.PlanGateReasons, wantReasons) {
+		t.Errorf("plan_gate_reasons = %#v, want %#v", noteAfter.Frontmatter.PlanGateReasons, wantReasons)
 	}
 }
 
@@ -562,9 +689,13 @@ func (f *fakeUsageLimitPlannerEngine) ClassifyExit(waitErr error, stderrTail str
 	return &engine.UsageLimitError{}
 }
 
-func (f *fakeUsageLimitPlannerEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd { return exec.Command("true") }
+func (f *fakeUsageLimitPlannerEngine) BuildReviewCommand(dir, prompt string) *exec.Cmd {
+	return exec.Command("true")
+}
 
-func (f *fakeUsageLimitPlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) { return "", nil }
+func (f *fakeUsageLimitPlannerEngine) ParseReviewAnswer(stdout []byte) (string, error) {
+	return "", nil
+}
 
 func (f *fakeUsageLimitPlannerEngine) StartupTimeout() time.Duration { return 0 }
 

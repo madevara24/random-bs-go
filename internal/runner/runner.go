@@ -256,6 +256,11 @@ type Deps struct {
 	// post into), and the task still flips to status: plan_review with no
 	// plan_message_id.
 	ForumWebhookURL string
+
+	// DiscordUserID, if set, is the human mentioned in the plan-review
+	// stop message so the person who must approve or reject the plan is
+	// notified directly. "" omits the mention entirely.
+	DiscordUserID string
 }
 
 func (d Deps) engine() engine.Engine {
