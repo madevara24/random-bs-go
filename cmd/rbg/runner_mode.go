@@ -162,7 +162,7 @@ func runRunner(cfg *config.Config) {
 			default:
 			}
 		}
-		go planpoll.Run(context.Background(), vault, cfg.DiscordTaskForumWebhookURL, wake, time.Minute)
+		go planpoll.Run(context.Background(), vault, cfg.DiscordTaskForumWebhookURL, cfg.DiscordUserID, wake, time.Minute)
 		fmt.Printf("[runner] plan-review poller started (interval=1m)\n")
 	}
 

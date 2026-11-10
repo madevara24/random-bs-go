@@ -67,8 +67,9 @@ func newMissingMessageTracker() *missingMessageTracker {
 // calling wake so dispatch claims it immediately rather than waiting for
 // its own next trigger. webhookURL is the forum webhook FetchReactions/
 // PostToThread call against -- the same one the plan gate itself posts
-// through. Blocks until ctx is done.
-func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(), interval time.Duration) {
+// through. userID is the human's Discord user ID, threaded down so replies
+// posted from this poll can mention them. Blocks until ctx is done.
+func Run(ctx context.Context, v *vaultgit.Vault, webhookURL, userID string, wake func(), interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -78,7 +79,7 @@ func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(),
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tick(v, webhookURL, wake, tracker)
+			tick(v, webhookURL, userID, wake, tracker)
 		}
 	}
 }
@@ -87,7 +88,7 @@ func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(),
 // act on each. Exposed as its own step (rather than inlined into Run) so a
 // test can drive it directly, once per call, without racing a real
 // ticker.
-func tick(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMessageTracker) {
+func tick(v *vaultgit.Vault, webhookURL, userID string, wake func(), tracker *missingMessageTracker) {
 	if err := v.Sync(); err != nil {
 		fmt.Printf("[planpoll] sync: %v\n", err)
 		return
@@ -119,16 +120,16 @@ func tick(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMes
 			continue
 		}
 
-		processNote(v, webhookURL, wake, tracker, relPath, note)
+		processNote(v, webhookURL, userID, wake, tracker, relPath, note)
 	}
 }
 
-func processNote(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMessageTracker, relPath string, note *notetask.Note) {
+func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), tracker *missingMessageTracker, relPath string, note *notetask.Note) {
 	threadID := derefStr(note.Frontmatter.DiscordThreadID)
 	messageID := derefStr(note.Frontmatter.PlanMessageID)
 
 	if messageID == "" {
-		retryMissingPlanMessage(v, webhookURL, relPath, note, threadID, tracker)
+		retryMissingPlanMessage(v, webhookURL, userID, relPath, note, threadID, tracker)
 		return
 	}
 
@@ -174,7 +175,7 @@ func processNote(v *vaultgit.Vault, webhookURL string, wake func(), tracker *mis
 // the Plan as plan-round-<n>.md), and past missingMessageAlertAfter
 // consecutive failures, sends one alert into the task's own thread naming
 // it.
-func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, relPath string, note *notetask.Note, threadID string, tracker *missingMessageTracker) {
+func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, userID, relPath string, note *notetask.Note, threadID string, tracker *missingMessageTracker) {
 	round := note.Frontmatter.PlanRound
 	if round == 0 {
 		round = 1

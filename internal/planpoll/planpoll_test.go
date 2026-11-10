@@ -102,7 +102,7 @@ func TestRunApprovesAndWakes(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, v, discordSrv.URL, wake, 20*time.Millisecond)
+		Run(ctx, v, discordSrv.URL, "user-approve", wake, 20*time.Millisecond)
 		close(done)
 	}()
 
@@ -174,7 +174,7 @@ func TestRunRepostsMissingPlanMessage(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, v, discordSrv.URL, wake, 20*time.Millisecond)
+		Run(ctx, v, discordSrv.URL, "user-repost", wake, 20*time.Millisecond)
 		close(done)
 	}()
 
