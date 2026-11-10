@@ -239,3 +239,45 @@ func TestLoadRejectsUnknownRepoReviewEngine(t *testing.T) {
 		t.Fatal("Load: want an error for an unregistered repo \"review_engine\", got nil")
 	}
 }
+
+// TestLoadDefaultsUnitReviewTimeoutWhenUnset covers RBG-55: the unit review
+// timeout is optional and falls back to 15 minutes when unset.
+func TestLoadDefaultsUnitReviewTimeoutWhenUnset(t *testing.T) {
+	envPath, reposPath := writeConfigFiles(t, baseEnv, baseRepos)
+	cfg, err := Load(envPath, reposPath, []string{"claude"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UnitReviewTimeoutMinutes != 15 {
+		t.Errorf("UnitReviewTimeoutMinutes = %d, want 15", cfg.UnitReviewTimeoutMinutes)
+	}
+}
+
+// TestLoadHonorsUnitReviewTimeoutWhenSet confirms UNIT_REVIEW_TIMEOUT_MINUTES
+// overrides the default.
+func TestLoadHonorsUnitReviewTimeoutWhenSet(t *testing.T) {
+	env := baseEnv + "UNIT_REVIEW_TIMEOUT_MINUTES=25\n"
+	envPath, reposPath := writeConfigFiles(t, env, baseRepos)
+	cfg, err := Load(envPath, reposPath, []string{"claude"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UnitReviewTimeoutMinutes != 25 {
+		t.Errorf("UnitReviewTimeoutMinutes = %d, want 25", cfg.UnitReviewTimeoutMinutes)
+	}
+}
+
+// TestLoadRejectsInvalidUnitReviewTimeout confirms UNIT_REVIEW_TIMEOUT_MINUTES
+// rejects zero, negative, and unparseable values the same way
+// IDLE_TIMEOUT_MINUTES does, rather than silently accepting them.
+func TestLoadRejectsInvalidUnitReviewTimeout(t *testing.T) {
+	for _, raw := range []string{"0", "-1", "abc"} {
+		t.Run(raw, func(t *testing.T) {
+			env := baseEnv + "UNIT_REVIEW_TIMEOUT_MINUTES=" + raw + "\n"
+			envPath, reposPath := writeConfigFiles(t, env, baseRepos)
+			if _, err := Load(envPath, reposPath, []string{"claude"}); err == nil {
+				t.Fatalf("Load: want an error for UNIT_REVIEW_TIMEOUT_MINUTES=%q, got nil", raw)
+			}
+		})
+	}
+}

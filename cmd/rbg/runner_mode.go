@@ -95,6 +95,7 @@ func runRunner(cfg *config.Config) {
 		ReviewEngineDefault: cfg.ReviewEngine,
 		PlanEngineDefault:   cfg.PlanEngine,
 		IdleTimeout:         time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
+		UnitReviewTimeout:   time.Duration(cfg.UnitReviewTimeoutMinutes) * time.Minute,
 		PostClaim:           postClaim,
 		Pause:               pauseState,
 		Jev:                 &jev.Client{APIKey: cfg.TypesafeAPIKey, Model: cfg.JevModel},

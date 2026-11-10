@@ -26,12 +26,6 @@ import (
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
 
-// unitReviewTimeout bounds one reviewUnit invocation -- a review session
-// isn't covered by the coding session's own idle watchdog, same rationale
-// as GhMergeGateOps.ReviewTimeout, just a package-level constant here since
-// nothing needs to override it per-call.
-const unitReviewTimeout = 5 * time.Minute
-
 // unitPerUnitRoundCap is how many review_rounds (verify failures and
 // review CONCERNS both count) a single unit may spend before the task
 // blocks on it.
@@ -522,7 +516,7 @@ unitLoop:
 			// status == review: an independent review of just this unit's
 			// own diff.
 			reporter.SetStage(fmt.Sprintf("unit %s (%d/%d): review round %d", unitID, unitPos, totalUnits, unitState.ReviewRounds+1))
-			verdict, feedback, reviewErr := reviewUnit(reviewEng, repoCfg.Path, unit, unitState.BaseSHA, unitState.HeadSHA, unitReviewTimeout)
+			verdict, feedback, reviewErr := reviewUnit(reviewEng, repoCfg.Path, unit, unitState.BaseSHA, unitState.HeadSHA, deps.unitReviewTimeout())
 			if reviewErr != nil {
 				var usageLimitErr *engine.UsageLimitError
 				if errors.As(reviewErr, &usageLimitErr) {

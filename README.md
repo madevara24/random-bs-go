@@ -47,6 +47,7 @@ Optional:
 | Key | Default | Meaning |
 |---|---|---|
 | `HTTP_PORT` | `8420` | Port for the local HTTP API |
+| `UNIT_REVIEW_TIMEOUT_MINUTES` | `15` | Positive integer: minutes one multi-unit review may run before it is killed and the task blocks |
 | `DISCORD_TASK_FORUM_WEBHOOK_URL` | unset | Forum webhook for per-task threads. Unset: every message goes to the top-level webhook, and the plan-review poller does not start. |
 | `USAGE_LIMIT_RESUME_GRACE_SECONDS` | `60` | Wait after a usage limit's reset time before tasks resume |
 | `DEFAULT_ENGINE` | `claude` | Coding engine |

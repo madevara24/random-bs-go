@@ -140,6 +140,10 @@ type Deps struct {
 	// (IDLE_TIMEOUT_MINUTES), read by both run modes.
 	IdleTimeout time.Duration
 
+	// UnitReviewTimeout bounds one unit review invocation. Zero or negative
+	// falls back to 15 minutes (see unitReviewTimeout).
+	UnitReviewTimeout time.Duration
+
 	// Pause is the shared pipeline-pause flag, keyed by engine name -- nil
 	// is valid (every usage-limit-detection branch below is nil-safe) for
 	// any caller that doesn't wire one in, which is every existing test
@@ -289,6 +293,13 @@ func (d Deps) idleTimeout() time.Duration {
 		return 15 * time.Minute // sane fallback; main.go normally sets this from config
 	}
 	return d.IdleTimeout
+}
+
+func (d Deps) unitReviewTimeout() time.Duration {
+	if d.UnitReviewTimeout <= 0 {
+		return 15 * time.Minute // sane fallback; main.go normally sets this from config
+	}
+	return d.UnitReviewTimeout
 }
 
 // copyFileName is the note-copy's filename inside the target repo clone --

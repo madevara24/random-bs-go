@@ -47,9 +47,12 @@ type Config struct {
 	DiscordAraDevUserID string
 	GlobalSlots         int
 	IdleTimeoutMinutes  int
-	VaultPath           string
-	VaultDefaultBranch  string
-	HTTPPort            int
+	// UnitReviewTimeoutMinutes bounds one unit review invocation. Optional,
+	// defaults to 15 minutes.
+	UnitReviewTimeoutMinutes int
+	VaultPath                string
+	VaultDefaultBranch       string
+	HTTPPort                 int
 
 	// DiscordTaskForumWebhookURL is optional -- a forum-channel webhook
 	// used to give each task its own Discord thread. Empty means the
@@ -175,6 +178,11 @@ var requiredKeys = []requiredEnvKey{
 // require, unlike the keys above.
 const defaultHTTPPort = 8420
 
+// defaultUnitReviewTimeoutMinutes is UNIT_REVIEW_TIMEOUT_MINUTES's default
+// when unset -- large enough for a reviewer to read a unit's diff without
+// being killed by a budget meant only to bound a hung review session.
+const defaultUnitReviewTimeoutMinutes = 15
+
 // defaultUsageLimitResumeGraceSeconds is USAGE_LIMIT_RESUME_GRACE_SECONDS's
 // default when unset.
 const defaultUsageLimitResumeGraceSeconds = 60
@@ -284,6 +292,7 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 
 	cfg := &Config{
 		HTTPPort:                     defaultHTTPPort,
+		UnitReviewTimeoutMinutes:     defaultUnitReviewTimeoutMinutes,
 		UsageLimitResumeGraceSeconds: defaultUsageLimitResumeGraceSeconds,
 		DefaultEngine:                defaultEngineName,
 		ClaudeBin:                    defaultClaudeBin,
@@ -313,6 +322,14 @@ func Load(envPath, reposPath string, knownEngines []string) (*Config, error) {
 			return nil, fmt.Errorf("config: HTTP_PORT must be a valid port number, got %q (in %s)", v, envPath)
 		}
 		cfg.HTTPPort = n
+	}
+
+	if v, ok := raw["UNIT_REVIEW_TIMEOUT_MINUTES"]; ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: UNIT_REVIEW_TIMEOUT_MINUTES must be a positive integer, got %q (in %s)", v, envPath)
+		}
+		cfg.UnitReviewTimeoutMinutes = n
 	}
 
 	if v, ok := raw["DISCORD_TASK_FORUM_WEBHOOK_URL"]; ok && v != "" {
