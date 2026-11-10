@@ -16,6 +16,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
+	"github.com/madevara24/random-bs-go/internal/plangate"
 	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
@@ -170,11 +171,12 @@ func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), trac
 // retryMissingPlanMessage handles a plan_review note whose plan_message_id
 // is empty -- stopForPlanReview sets plan_review even when its own Discord
 // post failed, so this note would otherwise wait forever with nothing to
-// react to. Reposts once per tick (same message shape stopForPlanReview
-// itself used: the latest plan_gate Runner Log line as the stop reason,
-// the Plan as plan-round-<n>.md), and past missingMessageAlertAfter
-// consecutive failures, sends one alert into the task's own thread naming
-// it.
+// react to. Reposts once per tick through the same plangate renderer
+// stopForPlanReview uses, from the persisted plan_gate_reasons when present
+// (or, for a note that stopped before that field existed, the latest
+// plan_gate Runner Log line as a single Errors bullet), and past
+// missingMessageAlertAfter consecutive failures, sends one alert into the
+// task's own thread naming it.
 func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, userID, relPath string, note *notetask.Note, threadID string, tracker *missingMessageTracker) {
 	round := note.Frontmatter.PlanRound
 	if round == 0 {
@@ -182,8 +184,11 @@ func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, userID, relPath stri
 	}
 	slug := taskmeta.SlugFromPath(relPath)
 
-	message := fmt.Sprintf("Task `%s` (%s)'s plan needs review: %s. React ✅ to approve, or ❌ and write your feedback under `### Round %d` in `## Plan Review`.",
-		slug, note.Frontmatter.Repo, latestPlanGateLine(note.RunnerLog), round)
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s>", userID)
+	}
+	message := plangate.RenderPlanReviewMessage(mention, slug, note.Frontmatter.Repo, round, planGateReasons(note))
 	attachmentName := fmt.Sprintf("plan-round-%d.md", round)
 
 	messageID, err := notify.PostToThread(webhookURL, threadID, message, attachmentName, note.Plan)
@@ -219,6 +224,29 @@ func alertMissingPlanMessage(webhookURL, threadID, slug string) {
 	if err != nil {
 		fmt.Printf("[planpoll] alerting about missing plan message for %s also failed: %v\n", slug, err)
 	}
+}
+
+// planGateReasons rebuilds the renderer's ordered reasons from the note.
+// stopForPlanReview persists the grouped plan_gate_reasons, so a normal
+// retry renders the exact same text. A note that reached plan_review before
+// that field existed has none, and falls back to the latest plan_gate
+// Runner Log line -- the only record those notes ever had -- as one Errors
+// bullet, matching the retry's pre-grouping message content.
+func planGateReasons(note *notetask.Note) []plangate.Reason {
+	if len(note.Frontmatter.PlanGateReasons) == 0 {
+		return []plangate.Reason{{
+			Category: plangate.CategoryErrors,
+			Text:     latestPlanGateLine(note.RunnerLog),
+		}}
+	}
+
+	var reasons []plangate.Reason
+	for category, texts := range note.Frontmatter.PlanGateReasons {
+		for _, text := range texts {
+			reasons = append(reasons, plangate.Reason{Category: plangate.Category(category), Text: text})
+		}
+	}
+	return reasons
 }
 
 // latestPlanGateLine returns the most recent Runner Log entry whose event
