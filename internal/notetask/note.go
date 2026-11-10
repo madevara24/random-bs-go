@@ -33,12 +33,20 @@ type Frontmatter struct {
 	ReadyAt         *string `yaml:"ready_at"`
 	DiscordThreadID *string `yaml:"discord_thread_id"`
 
-	PlanEngine    *string     `yaml:"plan_engine,omitempty"`
-	MultiUnit     *bool       `yaml:"multi_unit,omitempty"`
-	PlanRound     int         `yaml:"plan_round,omitempty"`
-	PlanMessageID *string     `yaml:"plan_message_id,omitempty"`
-	CurrentUnit   *string     `yaml:"current_unit,omitempty"`
-	Units         []UnitState `yaml:"units,omitempty"`
+	PlanEngine    *string `yaml:"plan_engine,omitempty"`
+	MultiUnit     *bool   `yaml:"multi_unit,omitempty"`
+	PlanRound     int     `yaml:"plan_round,omitempty"`
+	PlanMessageID *string `yaml:"plan_message_id,omitempty"`
+
+	// PlanGateReasons holds the plan gate's stop reasons grouped by their
+	// display category (map key), written alongside plan_review so the
+	// planpoll retry path can re-render the same grouped message without
+	// rebuilding categories from the Runner Log. Absent on notes that never
+	// stopped at the plan gate, and omitempty keeps it out of their bytes.
+	PlanGateReasons map[string][]string `yaml:"plan_gate_reasons,omitempty"`
+
+	CurrentUnit *string     `yaml:"current_unit,omitempty"`
+	Units       []UnitState `yaml:"units,omitempty"`
 }
 
 // UnitState is one entry in a multi-unit task's units: frontmatter list --
