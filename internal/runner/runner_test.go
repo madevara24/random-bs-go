@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/madevara24/random-bs-go/internal/claudeusage"
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/testvault"
@@ -293,5 +296,195 @@ func TestProcessTaskMergeBack(t *testing.T) {
 	lsTree := runGit(t, testTargetRepoPath, "ls-tree", "-r", "--name-only", "origin/"+branchName)
 	if strings.Contains(lsTree, copyFileName(slug)) {
 		t.Errorf("note-copy %s was committed to the pushed branch:\n%s", copyFileName(slug), lsTree)
+	}
+}
+
+// sampleClaudeUsage is the deterministic usage every claim-message test
+// stubs in -- noon UTC formats as 20:04 WIB, so the expected reset text is
+// fixed regardless of the host's zone.
+func sampleClaudeUsage() claudeusage.Usage {
+	return claudeusage.Usage{
+		FiveHour: &claudeusage.Window{
+			Utilization: 42,
+			ResetsAt:    time.Date(2026, 11, 10, 13, 4, 0, 0, time.UTC),
+		},
+		SevenDay: &claudeusage.Window{
+			Utilization: 7.5,
+			ResetsAt:    time.Date(2026, 11, 15, 2, 0, 0, 0, time.UTC),
+		},
+	}
+}
+
+const sampleUsageBullet = "- Claude usage: 5h 42% (resets 2026-11-10 20:04 WIB), weekly 7.5% (resets 2026-11-15 09:00 WIB)"
+
+func stubClaimUsage(t *testing.T) func(context.Context) (claudeusage.Usage, error) {
+	t.Helper()
+	return func(context.Context) (claudeusage.Usage, error) {
+		return sampleClaudeUsage(), nil
+	}
+}
+
+// wantClaimContent is the exact body a fresh single-unit task coded and
+// reviewed with Claude produces.
+func wantClaimContent(title string) string {
+	return strings.Join([]string{
+		fmt.Sprintf("Task `%s` is claimed", title),
+		fmt.Sprintf("- Task: %s", title),
+		"- Plan engine: " + singleUnitPlanEngine,
+		"- Code engine: claude",
+		"- Review engine: claude",
+		sampleUsageBullet,
+	}, "\n")
+}
+
+// TestClaimMessageEnginesAndClaudeUsage is the claim-body table: every
+// engine role set to claude vs. a non-claude engine, crossed with
+// single-unit vs. multi-unit. It asserts the three engine lines, the
+// "— (single-unit)" plan line, and that the usage bullet appears only when
+// an engine that actually runs resolved to claude (so a single-unit note
+// pinned to plan_engine: claude must omit it, and must not even fetch).
+func TestClaimMessageEnginesAndClaudeUsage(t *testing.T) {
+	const title = "(phase6-test-repo) Claim Message Table"
+	tests := []struct {
+		name         string
+		multiUnit    bool
+		codeEngine   string
+		reviewEngine string
+		planEngine   string
+	}{
+		{name: "single/code-claude", codeEngine: "claude", reviewEngine: "pi", planEngine: "pi"},
+		{name: "single/code-pi", codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+		{name: "single/review-claude", codeEngine: "pi", reviewEngine: "claude", planEngine: "pi"},
+		{name: "single/review-pi", codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+		{name: "single/plan-claude-does-not-run", codeEngine: "pi", reviewEngine: "pi", planEngine: "claude"},
+		{name: "single/plan-pi", codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+		{name: "multi/code-claude", multiUnit: true, codeEngine: "claude", reviewEngine: "pi", planEngine: "pi"},
+		{name: "multi/code-pi", multiUnit: true, codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+		{name: "multi/review-claude", multiUnit: true, codeEngine: "pi", reviewEngine: "claude", planEngine: "pi"},
+		{name: "multi/review-pi", multiUnit: true, codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+		{name: "multi/plan-claude", multiUnit: true, codeEngine: "pi", reviewEngine: "pi", planEngine: "claude"},
+		{name: "multi/plan-pi", multiUnit: true, codeEngine: "pi", reviewEngine: "pi", planEngine: "pi"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			multiUnit := tc.multiUnit
+			reviewEngine, planEngine := tc.reviewEngine, tc.planEngine
+			note := &notetask.Note{Frontmatter: notetask.Frontmatter{
+				Repo:         "phase6-test-repo",
+				ReviewEngine: &reviewEngine,
+				PlanEngine:   &planEngine,
+				MultiUnit:    &multiUnit,
+			}}
+			job := worker.Job{
+				NotePath: "Tasks/" + title + ".md",
+				Repo:     "phase6-test-repo",
+				Engine:   tc.codeEngine,
+			}
+
+			fetches := 0
+			deps := Deps{
+				MultiUnitEnabled: true,
+				FetchClaudeUsage: func(context.Context) (claudeusage.Usage, error) {
+					fetches++
+					return sampleClaudeUsage(), nil
+				},
+			}
+
+			body := buildClaimMessage(deps, job, note, config.RepoConfig{})
+			lines := strings.Split(body, "\n")
+			if lines[0] != fmt.Sprintf("Task `%s` is claimed", title) {
+				t.Errorf("first line = %q, want the claim headline", lines[0])
+			}
+			if want := "- Task: " + title; !strings.Contains(body, want) {
+				t.Errorf("body missing %q:\n%s", want, body)
+			}
+
+			wantPlan := tc.planEngine
+			if !tc.multiUnit {
+				wantPlan = singleUnitPlanEngine
+			}
+			for _, want := range []string{
+				"- Plan engine: " + wantPlan,
+				"- Code engine: " + tc.codeEngine,
+				"- Review engine: " + tc.reviewEngine,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("body missing %q:\n%s", want, body)
+				}
+			}
+
+			wantUsage := tc.codeEngine == "claude" || tc.reviewEngine == "claude" || (tc.multiUnit && tc.planEngine == "claude")
+			if wantUsage {
+				if !strings.Contains(body, sampleUsageBullet) {
+					t.Errorf("body missing usage bullet %q:\n%s", sampleUsageBullet, body)
+				}
+				if fetches != 1 {
+					t.Errorf("usage fetched %d times, want 1", fetches)
+				}
+			} else {
+				if strings.Contains(body, "- Claude usage:") {
+					t.Errorf("body has a usage bullet with no Claude engine running:\n%s", body)
+				}
+				if fetches != 0 {
+					t.Errorf("usage fetched %d times with no Claude engine running, want 0", fetches)
+				}
+			}
+		})
+	}
+}
+
+// TestClaimMessageClaudeUsageUnavailable confirms a usage fetch failure
+// renders the unavailable bullet with the short reason and still yields the
+// complete claim body -- the fetch never fails the claim.
+func TestClaimMessageClaudeUsageUnavailable(t *testing.T) {
+	claude := "claude"
+	note := &notetask.Note{Frontmatter: notetask.Frontmatter{ReviewEngine: &claude}}
+	job := worker.Job{NotePath: "Tasks/(phase6-test-repo) Claim Usage Unavailable.md", Repo: "phase6-test-repo", Engine: "claude"}
+	deps := Deps{
+		FetchClaudeUsage: func(context.Context) (claudeusage.Usage, error) {
+			return claudeusage.Usage{}, errors.New("claude usage: unexpected HTTP status 401 Unauthorized")
+		},
+	}
+
+	body := buildClaimMessage(deps, job, note, config.RepoConfig{})
+	want := "- Claude usage: unavailable (claude usage: unexpected HTTP status 401 Unauthorized)"
+	if !strings.Contains(body, want) {
+		t.Errorf("body missing %q:\n%s", want, body)
+	}
+	for _, want := range []string{
+		"- Code engine: claude",
+		"- Review engine: claude",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q after a usage failure:\n%s", want, body)
+		}
+	}
+}
+
+// TestClaimMessageClaudeUsageWindowMissing covers the tolerated-response
+// case where the endpoint omitted one window: it renders as unavailable
+// rather than a half-filled bullet.
+func TestClaimMessageClaudeUsageWindowMissing(t *testing.T) {
+	claude := "claude"
+	note := &notetask.Note{Frontmatter: notetask.Frontmatter{ReviewEngine: &claude}}
+	job := worker.Job{NotePath: "Tasks/(phase6-test-repo) Claim Usage Window Missing.md", Repo: "phase6-test-repo", Engine: "claude"}
+	deps := Deps{
+		FetchClaudeUsage: func(context.Context) (claudeusage.Usage, error) {
+			return claudeusage.Usage{FiveHour: &claudeusage.Window{Utilization: 5}}, nil
+		},
+	}
+
+	body := buildClaimMessage(deps, job, note, config.RepoConfig{})
+	if want := "- Claude usage: unavailable (usage window missing)"; !strings.Contains(body, want) {
+		t.Errorf("body missing %q:\n%s", want, body)
+	}
+}
+
+// TestClaimMessageResetTimesUseJakarta confirms the reset times are rendered
+// in Asia/Jakarta even when the source instants are UTC.
+func TestClaimMessageResetTimesUseJakarta(t *testing.T) {
+	if got, want := formatUsageReset(time.Date(2026, 11, 10, 13, 4, 0, 0, time.UTC)), "2026-11-10 20:04 WIB"; got != want {
+		t.Errorf("formatUsageReset = %q, want %q", got, want)
 	}
 }
