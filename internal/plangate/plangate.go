@@ -97,12 +97,39 @@ func HardRules(units []notetask.PlanUnit) []string {
 	return reasons
 }
 
+// Category is the section a stop reason is displayed under in the
+// plan-review message. The values are the headings' text verbatim.
+type Category string
+
+const (
+	// CategoryHardRules is everything HardRules returns: hard-stop path
+	// matches and the over-limit unit count.
+	CategoryHardRules Category = "Hard rules"
+	// CategoryJevClassifier is a risky/ambiguous noul that is a clear yes
+	// or unresolved.
+	CategoryJevClassifier Category = "Jev classifier"
+	// CategoryPlannerQuestions is a planner choice question that is
+	// =none, low confidence, or has a small top-two probability gap.
+	CategoryPlannerQuestions Category = "Planner questions"
+	// CategoryErrors is Jev being unavailable and every missing answer.
+	CategoryErrors Category = "Errors"
+)
+
+// Reason is one stop reason together with the category it belongs to.
+type Reason struct {
+	Category Category
+	Text     string
+}
+
 // Result is DecideGate's verdict: Stop is true if a human must approve the
 // plan before it runs, and Reasons names every condition that triggered
-// that, one entry per condition.
+// that, one entry per condition. Categorized carries the same reasons, in
+// the same order, each tagged with its display category; Reasons stays the
+// flat text existing callers and the Runner Log expect.
 type Result struct {
-	Stop    bool
-	Reasons []string
+	Stop        bool
+	Reasons     []string
+	Categorized []Reason
 }
 
 // noulResolvedLow and noulResolvedHigh bound the "unresolved" band for a
@@ -131,47 +158,61 @@ const choiceMinProbabilityGap = 0.15
 // answers to check, and the gate stops on that alone.
 func DecideGate(hard []string, answers map[string]jev.Answer, plannerQuestionIDs []string, askErr error) Result {
 	if askErr != nil {
-		return Result{Stop: true, Reasons: []string{fmt.Sprintf("jev unavailable: %v", askErr)}}
+		text := fmt.Sprintf("jev unavailable: %v", askErr)
+		return Result{
+			Stop:        true,
+			Reasons:     []string{text},
+			Categorized: []Reason{{Category: CategoryErrors, Text: text}},
+		}
 	}
 
-	var reasons []string
-	reasons = append(reasons, hard...)
+	var reasons []Reason
+	for _, text := range hard {
+		reasons = append(reasons, Reason{Category: CategoryHardRules, Text: text})
+	}
 
 	for _, id := range []string{"risky", "ambiguous"} {
 		a, ok := answers[id]
 		if !ok || a.Noul == nil {
-			reasons = append(reasons, fmt.Sprintf("missing answer for %q", id))
+			reasons = append(reasons, Reason{Category: CategoryErrors, Text: fmt.Sprintf("missing answer for %q", id)})
 			continue
 		}
 		p := *a.Noul
 		switch {
 		case p >= noulStopThreshold:
-			reasons = append(reasons, fmt.Sprintf("%s=%.2f is a clear yes", id, p))
+			reasons = append(reasons, Reason{Category: CategoryJevClassifier, Text: fmt.Sprintf("%s=%.2f is a clear yes", id, p)})
 		case p >= noulResolvedLow && p <= noulResolvedHigh:
-			reasons = append(reasons, fmt.Sprintf("%s=%.2f is unresolved", id, p))
+			reasons = append(reasons, Reason{Category: CategoryJevClassifier, Text: fmt.Sprintf("%s=%.2f is unresolved", id, p)})
 		}
 	}
 
 	for _, id := range plannerQuestionIDs {
 		a, ok := answers[id]
 		if !ok {
-			reasons = append(reasons, fmt.Sprintf("missing answer for %q", id))
+			reasons = append(reasons, Reason{Category: CategoryErrors, Text: fmt.Sprintf("missing answer for %q", id)})
 			continue
 		}
 		if a.Choice == "none" {
-			reasons = append(reasons, fmt.Sprintf("%s=none", id))
+			reasons = append(reasons, Reason{Category: CategoryPlannerQuestions, Text: fmt.Sprintf("%s=none", id)})
 			continue
 		}
 		if a.Confidence < choiceMinConfidence {
-			reasons = append(reasons, fmt.Sprintf("%s confidence=%.2f is below %.2f", id, a.Confidence, choiceMinConfidence))
+			reasons = append(reasons, Reason{Category: CategoryPlannerQuestions, Text: fmt.Sprintf("%s confidence=%.2f is below %.2f", id, a.Confidence, choiceMinConfidence)})
 			continue
 		}
 		if gap, ok := topTwoGap(a.Probabilities); ok && gap < choiceMinProbabilityGap {
-			reasons = append(reasons, fmt.Sprintf("%s top two probabilities differ by only %.2f", id, gap))
+			reasons = append(reasons, Reason{Category: CategoryPlannerQuestions, Text: fmt.Sprintf("%s top two probabilities differ by only %.2f", id, gap)})
 		}
 	}
 
-	return Result{Stop: len(reasons) > 0, Reasons: reasons}
+	result := Result{Stop: len(reasons) > 0, Categorized: reasons}
+	if len(reasons) > 0 {
+		result.Reasons = make([]string, len(reasons))
+		for i, r := range reasons {
+			result.Reasons[i] = r.Text
+		}
+	}
+	return result
 }
 
 // topTwoGap returns the gap between the two highest values in probs, and

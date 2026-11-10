@@ -139,3 +139,150 @@ func TestDecideGate(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideGateCategories(t *testing.T) {
+	units := []notetask.PlanUnit{{ID: "u1", Paths: []string{"db/migrations/0003.sql"}}}
+	var tooMany []notetask.PlanUnit
+	for i := 0; i < 9; i++ {
+		tooMany = append(tooMany, notetask.PlanUnit{ID: "u", Paths: []string{"internal/foo.go"}})
+	}
+
+	cases := []struct {
+		name       string
+		hard       []string
+		answers    map[string]jev.Answer
+		plannerIDs []string
+		askErr     error
+		want       []Reason
+	}{
+		{
+			name:    "hard-stop path is Hard rules",
+			hard:    HardRules(units),
+			answers: map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2)},
+			want: []Reason{{
+				Category: CategoryHardRules,
+				Text:     `unit "u1" touches "db/migrations/0003.sql", which matches hard-stop pattern "migrations/"`,
+			}},
+		},
+		{
+			name:    "over-unit-limit reason is Hard rules",
+			hard:    HardRules(tooMany),
+			answers: map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2)},
+			want: []Reason{{
+				Category: CategoryHardRules,
+				Text:     "plan has 9 units, over the 8-unit hard limit",
+			}},
+		},
+		{
+			name:    "risky clear yes is Jev classifier",
+			answers: map[string]jev.Answer{"risky": noul(0.7), "ambiguous": noul(0.2)},
+			want: []Reason{{
+				Category: CategoryJevClassifier,
+				Text:     "risky=0.70 is a clear yes",
+			}},
+		},
+		{
+			name:    "ambiguous unresolved is Jev classifier",
+			answers: map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.5)},
+			want: []Reason{{
+				Category: CategoryJevClassifier,
+				Text:     "ambiguous=0.50 is unresolved",
+			}},
+		},
+		{
+			name:       "planner none is Planner questions",
+			answers:    map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2), "approach": {Type: "choice", Choice: "none", Confidence: 0.9}},
+			plannerIDs: []string{"approach"},
+			want: []Reason{{
+				Category: CategoryPlannerQuestions,
+				Text:     "approach=none",
+			}},
+		},
+		{
+			name:       "planner low confidence is Planner questions",
+			answers:    map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2), "approach": {Type: "choice", Choice: "a", Confidence: 0.55, Probabilities: map[string]float64{"a": 0.55, "b": 0.45}}},
+			plannerIDs: []string{"approach"},
+			want: []Reason{{
+				Category: CategoryPlannerQuestions,
+				Text:     "approach confidence=0.55 is below 0.60",
+			}},
+		},
+		{
+			name:       "planner small top-two gap is Planner questions",
+			answers:    map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2), "approach": {Type: "choice", Choice: "a", Confidence: 0.8, Probabilities: map[string]float64{"a": 0.45, "b": 0.40, "c": 0.15}}},
+			plannerIDs: []string{"approach"},
+			want: []Reason{{
+				Category: CategoryPlannerQuestions,
+				Text:     "approach top two probabilities differ by only 0.05",
+			}},
+		},
+		{
+			name:    "missing noul answer is Errors",
+			answers: map[string]jev.Answer{"risky": noul(0.1)},
+			want: []Reason{{
+				Category: CategoryErrors,
+				Text:     `missing answer for "ambiguous"`,
+			}},
+		},
+		{
+			name:       "missing planner answer is Errors",
+			answers:    map[string]jev.Answer{"risky": noul(0.1), "ambiguous": noul(0.2)},
+			plannerIDs: []string{"approach"},
+			want: []Reason{{
+				Category: CategoryErrors,
+				Text:     `missing answer for "approach"`,
+			}},
+		},
+		{
+			name:   "jev unavailable is Errors",
+			askErr: errors.New("rate limited"),
+			want: []Reason{{
+				Category: CategoryErrors,
+				Text:     "jev unavailable: rate limited",
+			}},
+		},
+		{
+			name: "mixed case keeps each reason with its category in order",
+			hard: HardRules(units),
+			answers: map[string]jev.Answer{
+				"risky":     noul(0.7),
+				"ambiguous": noul(0.2),
+				"approach":  {Type: "choice", Choice: "none", Confidence: 0.9},
+			},
+			plannerIDs: []string{"approach", "missing"},
+			want: []Reason{
+				{Category: CategoryHardRules, Text: `unit "u1" touches "db/migrations/0003.sql", which matches hard-stop pattern "migrations/"`},
+				{Category: CategoryJevClassifier, Text: "risky=0.70 is a clear yes"},
+				{Category: CategoryPlannerQuestions, Text: "approach=none"},
+				{Category: CategoryErrors, Text: `missing answer for "missing"`},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := DecideGate(tc.hard, tc.answers, tc.plannerIDs, tc.askErr)
+			if !result.Stop {
+				t.Fatal("Stop = false, want true")
+			}
+			if len(result.Reasons) != len(result.Categorized) {
+				t.Fatalf("Reasons has %d entries, Categorized has %d", len(result.Reasons), len(result.Categorized))
+			}
+			for i, want := range tc.want {
+				if i >= len(result.Categorized) {
+					t.Fatalf("Categorized has %d entries, want at least %d", len(result.Categorized), len(tc.want))
+				}
+				got := result.Categorized[i]
+				if got != want {
+					t.Errorf("Categorized[%d] = %+v, want %+v", i, got, want)
+				}
+				if result.Reasons[i] != want.Text {
+					t.Errorf("Reasons[%d] = %q, want %q", i, result.Reasons[i], want.Text)
+				}
+			}
+			if len(result.Categorized) != len(tc.want) {
+				t.Errorf("Categorized = %+v, want %+v", result.Categorized, tc.want)
+			}
+		})
+	}
+}
