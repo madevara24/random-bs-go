@@ -32,7 +32,7 @@ func localGitDiff(repoPath, baseSHA, headSHA string) (string, error) {
 // always a fresh, single-shot judgment).
 func buildUnitReviewPrompt(unit notetask.PlanUnit, diff string) string {
 	var b strings.Builder
-	b.WriteString("You are reviewing one unit of a larger multi-unit task as an independent reviewer. You have zero shared context with the session that wrote this code -- judge it purely on the acceptance criteria and diff below. Do not run any git/gh commands yourself; you are given everything you need.\n\n")
+	b.WriteString("You are reviewing one unit of a larger multi-unit task as an independent reviewer. You have zero shared context with the session that wrote this code -- judge it purely on the acceptance criteria and diff below. The diff below is the complete change and everything needed to judge it: do not read repository files, do not run any command (including git/gh), and do not run tests -- the unit's verify command has already passed on this commit before the review started.\n\n")
 	b.WriteString("Respond with your verdict as the exact first line `VERDICT: APPROVE` or `VERDICT: CONCERNS`, followed by a blank line, then your reasoning (and, if CONCERNS, exactly what needs to change).\n\n")
 	fmt.Fprintf(&b, "## Unit: %s\n\n%s\n\n", unit.Title, unit.Accept)
 	b.WriteString("## Diff\n\n```diff\n")
