@@ -215,6 +215,54 @@ func DecideGate(hard []string, answers map[string]jev.Answer, plannerQuestionIDs
 	return result
 }
 
+// categoryOrder is the fixed display order of the plan-review message's
+// reason sections. A category with no reasons is omitted entirely.
+var categoryOrder = []Category{
+	CategoryHardRules,
+	CategoryJevClassifier,
+	CategoryPlannerQuestions,
+	CategoryErrors,
+}
+
+// RenderPlanReviewMessage builds the Discord body for a plan-review stop:
+// an optional mention line, one heading with a bullet per reason for each
+// non-empty category in categoryOrder, then the React footer. mention is
+// the already-formatted mention (for example "<@123>"); when it is empty
+// the mention and its trailing space are omitted. Reasons keep their order
+// within a category; categories always render in categoryOrder regardless
+// of the input order. round is the plan round shown in the footer's
+// `### Round <N>` instruction.
+func RenderPlanReviewMessage(mention, slug, repo string, round int, reasons []Reason) string {
+	var b strings.Builder
+	if mention != "" {
+		b.WriteString(mention)
+		b.WriteByte(' ')
+	}
+	fmt.Fprintf(&b, "Task `%s` (%s)'s plan needs review.\n", slug, repo)
+
+	firstCategory := true
+	for _, category := range categoryOrder {
+		headingWritten := false
+		for _, r := range reasons {
+			if r.Category != category {
+				continue
+			}
+			if !headingWritten {
+				if firstCategory {
+					b.WriteByte('\n')
+					firstCategory = false
+				}
+				fmt.Fprintf(&b, "**%s**\n", category)
+				headingWritten = true
+			}
+			fmt.Fprintf(&b, "- %s\n", r.Text)
+		}
+	}
+
+	fmt.Fprintf(&b, "\nReact ✅ to approve, or ❌ and write your feedback under `### Round %d` in `## Plan Review`.", round)
+	return b.String()
+}
+
 // topTwoGap returns the gap between the two highest values in probs, and
 // false if probs has fewer than two entries.
 func topTwoGap(probs map[string]float64) (float64, bool) {

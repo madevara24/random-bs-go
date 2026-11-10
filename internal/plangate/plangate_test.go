@@ -286,3 +286,67 @@ func TestDecideGateCategories(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderPlanReviewMessage(t *testing.T) {
+	t.Run("all four categories render in fixed order", func(t *testing.T) {
+		reasons := []Reason{
+			{Category: CategoryErrors, Text: `missing answer for "missing"`},
+			{Category: CategoryPlannerQuestions, Text: "approach=none"},
+			{Category: CategoryHardRules, Text: `unit "u1" touches "db/migrations/0003.sql", which matches hard-stop pattern "migrations/"`},
+			{Category: CategoryJevClassifier, Text: "risky=0.70 is a clear yes"},
+		}
+		got := RenderPlanReviewMessage("<@123>", "rbg-53", "random-bs-go", 2, reasons)
+		want := "<@123> Task `rbg-53` (random-bs-go)'s plan needs review.\n" +
+			"\n" +
+			"**Hard rules**\n" +
+			"- unit \"u1\" touches \"db/migrations/0003.sql\", which matches hard-stop pattern \"migrations/\"\n" +
+			"**Jev classifier**\n" +
+			"- risky=0.70 is a clear yes\n" +
+			"**Planner questions**\n" +
+			"- approach=none\n" +
+			"**Errors**\n" +
+			"- missing answer for \"missing\"\n" +
+			"\n" +
+			"React ✅ to approve, or ❌ and write your feedback under `### Round 2` in `## Plan Review`."
+		if got != want {
+			t.Errorf("RenderPlanReviewMessage() =\n%s\n\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("empty categories are omitted, not printed as headings", func(t *testing.T) {
+		reasons := []Reason{
+			{Category: CategoryJevClassifier, Text: "ambiguous=0.50 is unresolved"},
+			{Category: CategoryErrors, Text: "jev unavailable: rate limited"},
+		}
+		got := RenderPlanReviewMessage("", "slug", "repo", 1, reasons)
+		want := "Task `slug` (repo)'s plan needs review.\n" +
+			"\n" +
+			"**Jev classifier**\n" +
+			"- ambiguous=0.50 is unresolved\n" +
+			"**Errors**\n" +
+			"- jev unavailable: rate limited\n" +
+			"\n" +
+			"React ✅ to approve, or ❌ and write your feedback under `### Round 1` in `## Plan Review`."
+		if got != want {
+			t.Errorf("RenderPlanReviewMessage() =\n%s\n\nwant:\n%s", got, want)
+		}
+		if strings.Contains(got, "**Hard rules**") {
+			t.Errorf("message contains an empty Hard rules heading:\n%s", got)
+		}
+		if strings.Contains(got, "**Planner questions**") {
+			t.Errorf("message contains an empty Planner questions heading:\n%s", got)
+		}
+	})
+
+	t.Run("mention is present or absent without extra whitespace", func(t *testing.T) {
+		reasons := []Reason{{Category: CategoryHardRules, Text: "hard reason"}}
+		withMention := RenderPlanReviewMessage("<@123>", "slug", "repo", 1, reasons)
+		if !strings.HasPrefix(withMention, "<@123> Task `slug`") {
+			t.Errorf("with mention, message starts %q, want the mention then the task line", withMention)
+		}
+		withoutMention := RenderPlanReviewMessage("", "slug", "repo", 1, reasons)
+		if !strings.HasPrefix(withoutMention, "Task `slug`") {
+			t.Errorf("without mention, message starts %q, want the task line with no leading space", withoutMention)
+		}
+	})
+}
