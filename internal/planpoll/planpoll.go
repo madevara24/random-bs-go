@@ -33,7 +33,9 @@ const missingMessageAlertAfter = 10
 // land before the human's note edit syncs, and reading that race as an
 // instant reject (or worse, falling through to an ✅ also present) would
 // replan on nothing. Approval via ✅ needs no feedback. Any other emoji,
-// or neither reaction present, is no change.
+// or neither reaction present, is no change. An ignored ❌ is not silent
+// forever: processNote posts one warning per round for it (see
+// warnEmptyReject).
 func Decide(reactions map[string]int, currentRoundReview string) (newStatus string, changed bool) {
 	rejected := reactions["❌"] > 0
 	approved := reactions["✅"] > 0
@@ -148,6 +150,7 @@ func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), trac
 
 	newStatus, changed := Decide(reactions, review)
 	if !changed {
+		warnEmptyReject(v, webhookURL, userID, relPath, note, threadID, round, reactions, review)
 		return
 	}
 
@@ -172,6 +175,69 @@ func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), trac
 		fmt.Printf("[planpoll] posting %s reply for %s: %v\n", newStatus, relPath, perr)
 	}
 	wake()
+}
+
+// planRejectEmptyEvent is the Runner Log line recording that the poller
+// already warned about an empty-feedback ❌ for a round. It is checked
+// before posting (see warnEmptyReject), so the warning survives a restart
+// and goes out at most once per round.
+func planRejectEmptyEvent(round int) string {
+	return fmt.Sprintf("plan_reject_empty (round %d)", round)
+}
+
+// warnEmptyReject posts the one-time "this ❌ has no feedback yet" warning
+// for a round Decide left unchanged because the review is still empty --
+// including the ✅+❌-with-no-feedback case, where the status outcome stays
+// unchanged too. The warning is posted, then the persisted Runner Log line
+// is appended: the log, not in-memory state, is what makes it once per
+// round across restarts. A failed post is only logged and leaves no log
+// line, so the next tick tries again; once it lands, later ticks see the
+// line and stay silent.
+func warnEmptyReject(v *vaultgit.Vault, webhookURL, userID, relPath string, note *notetask.Note, threadID string, round int, reactions map[string]int, review string) {
+	if reactions["❌"] == 0 || strings.TrimSpace(review) != "" {
+		return
+	}
+
+	// Re-read so the check runs against the persisted Runner Log even when
+	// the caller's note snapshot predates an earlier warning this process
+	// (or another one) already recorded.
+	if fresh, err := v.ReadNote(relPath); err == nil {
+		note = fresh
+	}
+	event := planRejectEmptyEvent(round)
+	for _, entry := range note.RunnerLog {
+		if entry.Event == event {
+			return
+		}
+	}
+
+	slug := taskmeta.SlugFromPath(relPath)
+	// Best effort, one attempt: the warning is advisory, and a failed post
+	// is retried by the next tick rather than in a loop here.
+	if _, err := notify.PostToThread(webhookURL, threadID, planRejectEmptyReply(userID, slug, round), "", ""); err != nil {
+		fmt.Printf("[planpoll] posting empty-feedback warning for %s: %v\n", relPath, err)
+		return
+	}
+
+	werr := v.WriteNote(relPath, fmt.Sprintf("planpoll: %s %s", event, slug), func(n *notetask.Note) error {
+		notetask.AppendRunnerLog(n, event, time.Now())
+		return nil
+	})
+	if werr != nil {
+		fmt.Printf("[planpoll] writing %s for %s: %v\n", event, relPath, werr)
+	}
+}
+
+// planRejectEmptyReply is the warning posted when a ❌ reaction has no
+// feedback under "### Round <N>" yet -- the poller keeps ignoring it, but
+// at least the human is told once per round why nothing happened. The
+// mention is omitted when userID is empty, same as the other replies.
+func planRejectEmptyReply(userID, slug string, round int) string {
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s> ", userID)
+	}
+	return fmt.Sprintf("%s❌ on `%s` round %d ignored -- `### Round %d` under `## Plan Review` is empty. Write your feedback there; the poller picks it up within a minute. The plan will not be redone on empty feedback.", mention, slug, round, round)
 }
 
 // planDecisionReply is the one-line acknowledgement posted into the task's

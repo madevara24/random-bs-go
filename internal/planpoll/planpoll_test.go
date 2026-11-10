@@ -244,13 +244,23 @@ func (r *decisionReplyRecorder) posted() []string {
 }
 
 func decisionReplyServer(t *testing.T, emoji string, postStatus int) (*httptest.Server, *decisionReplyRecorder) {
+	return reactionReplyServer(t, postStatus, emoji)
+}
+
+// reactionReplyServer is decisionReplyServer generalized to more than one
+// reaction, so a test can pin the ✅+❌-with-no-feedback case.
+func reactionReplyServer(t *testing.T, postStatus int, emojis ...string) (*httptest.Server, *decisionReplyRecorder) {
 	t.Helper()
 	rec := &decisionReplyRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
+			quoted := make([]string, 0, len(emojis))
+			for _, emoji := range emojis {
+				quoted = append(quoted, fmt.Sprintf(`{"emoji":{"name":%q},"count":1}`, emoji))
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, `{"reactions":[{"emoji":{"name":%q},"count":1}]}`, emoji)
+			fmt.Fprintf(w, `{"reactions":[%s]}`, strings.Join(quoted, ","))
 			return
 		}
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
@@ -412,6 +422,112 @@ func TestProcessNoteReplyFailureKeepsStatusWrite(t *testing.T) {
 	if got := wakes.Load(); got != 1 {
 		t.Errorf("wake called %d times, want 1", got)
 	}
+}
+
+// TestProcessNoteEmptyRejectWarnsOnce covers the Verify table's first two
+// planpoll cases: the first tick with a ❌ and an empty round review posts
+// the warning and appends the persisted log line, and a second tick -- with
+// a fresh tracker, standing in for a runner restart -- posts nothing.
+func TestProcessNoteEmptyRejectWarnsOnce(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	slug := fmt.Sprintf("planpoll-empty-reject-%d", time.Now().UnixNano())
+	v, relPath, note := seedPlanReviewNote(t, slug, "thread-empty-reject", "msg-empty-reject", 3, "")
+
+	srv, rec := decisionReplyServer(t, "❌", http.StatusOK)
+	var wakes atomic.Int32
+
+	processNote(v, srv.URL, "user-empty-reject", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, note)
+
+	posts := rec.posted()
+	if len(posts) != 1 {
+		t.Fatalf("posted %d messages on the first tick, want exactly 1: %#v", len(posts), posts)
+	}
+	want := fmt.Sprintf("<@user-empty-reject> ❌ on `%s` round 3 ignored -- `### Round 3` under `## Plan Review` is empty. Write your feedback there; the poller picks it up within a minute. The plan will not be redone on empty feedback.", slug)
+	if posts[0] != want {
+		t.Errorf("empty-feedback warning =\n%s\n\nwant =\n%s", posts[0], want)
+	}
+
+	updated, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note after first tick: %v", err)
+	}
+	if updated.Frontmatter.Status != taskmeta.StatusPlanReview {
+		t.Errorf("status = %q, want %q (empty feedback is a no-op)", updated.Frontmatter.Status, taskmeta.StatusPlanReview)
+	}
+	if got := countRunnerLogEvent(updated, "plan_reject_empty (round 3)"); got != 1 {
+		t.Errorf("Runner Log has %d %q lines, want 1: %+v", got, "plan_reject_empty (round 3)", updated.RunnerLog)
+	}
+	if got := wakes.Load(); got != 0 {
+		t.Errorf("wake called %d times, want 0 for an empty-feedback ❌", got)
+	}
+
+	// A fresh tracker is what a restarted runner has; the persisted Runner
+	// Log line must be enough to keep the second tick silent.
+	processNote(v, srv.URL, "user-empty-reject", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, updated)
+	if posts := rec.posted(); len(posts) != 1 {
+		t.Errorf("posted %d messages after a second tick/restart, want still 1: %#v", len(posts), posts)
+	}
+	if got := wakes.Load(); got != 0 {
+		t.Errorf("wake called %d times after the second tick, want 0", got)
+	}
+}
+
+// TestProcessNoteEmptyRejectWithApproveStillWarns confirms the ✅+❌ with no
+// feedback case keeps Decide's unchanged outcome (no status write, no
+// wake) while still getting the one-time warning.
+func TestProcessNoteEmptyRejectWithApproveStillWarns(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	slug := fmt.Sprintf("planpoll-empty-both-%d", time.Now().UnixNano())
+	v, relPath, note := seedPlanReviewNote(t, slug, "thread-empty-both", "msg-empty-both", 2, "")
+
+	srv, rec := reactionReplyServer(t, http.StatusOK, "✅", "❌")
+	var wakes atomic.Int32
+
+	processNote(v, srv.URL, "user-empty-both", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, note)
+
+	posts := rec.posted()
+	if len(posts) != 1 {
+		t.Fatalf("posted %d messages, want exactly 1: %#v", len(posts), posts)
+	}
+	want := fmt.Sprintf("<@user-empty-both> ❌ on `%s` round 2 ignored -- `### Round 2` under `## Plan Review` is empty. Write your feedback there; the poller picks it up within a minute. The plan will not be redone on empty feedback.", slug)
+	if posts[0] != want {
+		t.Errorf("empty-feedback warning =\n%s\n\nwant =\n%s", posts[0], want)
+	}
+
+	updated, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note after processNote: %v", err)
+	}
+	if updated.Frontmatter.Status != taskmeta.StatusPlanReview {
+		t.Errorf("status = %q, want unchanged %q when ✅ and ❌ both present without feedback", updated.Frontmatter.Status, taskmeta.StatusPlanReview)
+	}
+	if got := countRunnerLogEvent(updated, "plan_reject_empty (round 2)"); got != 1 {
+		t.Errorf("Runner Log has %d %q lines, want 1: %+v", got, "plan_reject_empty (round 2)", updated.RunnerLog)
+	}
+	if got := wakes.Load(); got != 0 {
+		t.Errorf("wake called %d times, want 0", got)
+	}
+
+	processNote(v, srv.URL, "user-empty-both", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, updated)
+	if posts := rec.posted(); len(posts) != 1 {
+		t.Errorf("posted %d messages after a second tick, want still 1: %#v", len(posts), posts)
+	}
+}
+
+// countRunnerLogEvent counts exact event matches, so the once-per-round
+// assertion can't be fooled by a substring match.
+func countRunnerLogEvent(note *notetask.Note, event string) int {
+	count := 0
+	for _, entry := range note.RunnerLog {
+		if entry.Event == event {
+			count++
+		}
+	}
+	return count
 }
 
 // TestRunApprovesAndWakes confirms a plan_review note whose Discord
