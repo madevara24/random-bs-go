@@ -5,17 +5,20 @@ package runner
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/madevara24/random-bs-go/internal/claudeusage"
 	"github.com/madevara24/random-bs-go/internal/config"
 	"github.com/madevara24/random-bs-go/internal/engine"
 	"github.com/madevara24/random-bs-go/internal/jev"
@@ -134,6 +137,13 @@ type Deps struct {
 	// Discord behavior in.
 	PostClaim func(threadName, content string) (threadID string, err error)
 
+	// FetchClaudeUsage fetches the current Claude subscription usage for
+	// the claim message's usage bullet. nil falls back to
+	// claudeusage.Fetch -- the real Anthropic OAuth endpoint, reading
+	// ~/.claude/.credentials.json at call time with a 5s timeout. Injected
+	// so tests never touch the real credentials file or network.
+	FetchClaudeUsage func(ctx context.Context) (claudeusage.Usage, error)
+
 	// IdleTimeout is how long the stream-json output may go silent before
 	// the watchdog kills the process group. Same shared setting as the
 	// watcher's own staleness threshold -- one config key
@@ -250,6 +260,11 @@ type Deps struct {
 	// post into), and the task still flips to status: plan_review with no
 	// plan_message_id.
 	ForumWebhookURL string
+
+	// DiscordUserID, if set, is the human mentioned in the plan-review
+	// stop message so the person who must approve or reject the plan is
+	// notified directly. "" omits the mention entirely.
+	DiscordUserID string
 }
 
 func (d Deps) engine() engine.Engine {
@@ -403,7 +418,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		}
 
 		if deps.PostClaim != nil {
-			postTaskClaim(deps, job, note)
+			postTaskClaim(deps, job, note, repoCfg)
 		}
 	}
 
@@ -756,6 +771,112 @@ func truncateThreadName(s string) string {
 	return string(r[:discordThreadNameLimit])
 }
 
+// defaultClaudeUsage is Deps.fetchClaudeUsage's fallback when no hook is
+// injected: the package-level claudeusage.Fetch, which reads the token
+// fresh and enforces its own 5s timeout.
+func defaultClaudeUsage(ctx context.Context) (claudeusage.Usage, error) {
+	return claudeusage.Fetch(ctx)
+}
+
+func (d Deps) fetchClaudeUsage(ctx context.Context) (claudeusage.Usage, error) {
+	if d.FetchClaudeUsage != nil {
+		return d.FetchClaudeUsage(ctx)
+	}
+	return defaultClaudeUsage(ctx)
+}
+
+// singleUnitPlanEngine is the Plan engine bullet's value on a task whose
+// plan engine will not run -- the em dash is the task spec's verbatim text.
+const singleUnitPlanEngine = "— (single-unit)"
+
+// wibFormat is the claim message's reset-time format, always rendered in
+// Asia/Jakarta (WIB).
+const wibFormat = "2006-01-02 15:04 WIB"
+
+// jakartaLocation returns Asia/Jakarta, falling back to a fixed +07:00
+// zone when the host has no tzdata (the container image may not). WIB has
+// no DST, so the fixed zone is exact.
+func jakartaLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		return time.FixedZone("WIB", 7*60*60)
+	}
+	return loc
+}
+
+// formatUsagePercent keeps whole percentages bare ("42%", not "42.0%") and
+// otherwise prints the shortest exact decimal representation.
+func formatUsagePercent(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func formatUsageReset(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.In(jakartaLocation()).Format(wibFormat)
+}
+
+// claimUsesClaude reports whether any engine that will actually run -- code,
+// review, and plan only on a multi-unit task -- resolved to "claude".
+func claimUsesClaude(codingEngine, reviewEngine, planEngine string, multiUnit bool) bool {
+	if codingEngine == fallbackCodingEngineName || reviewEngine == fallbackCodingEngineName {
+		return true
+	}
+	return multiUnit && planEngine == fallbackCodingEngineName
+}
+
+// claudeUsageBullet builds the claim message's usage line (or its
+// unavailable fallback). A fetch failure never fails the claim itself: the
+// caller only reaches this when an engine that will run is Claude, and the
+// return value is always a complete, postable bullet.
+func claudeUsageBullet(deps Deps) string {
+	usage, err := deps.fetchClaudeUsage(context.Background())
+	if err != nil {
+		reason := strings.TrimSpace(strings.ReplaceAll(err.Error(), "\n", " "))
+		if reason == "" {
+			reason = "unknown error"
+		}
+		return fmt.Sprintf("- Claude usage: unavailable (%s)", reason)
+	}
+	if usage.FiveHour == nil || usage.SevenDay == nil {
+		return "- Claude usage: unavailable (usage window missing)"
+	}
+	return fmt.Sprintf("- Claude usage: 5h %s%% (resets %s), weekly %s%% (resets %s)",
+		formatUsagePercent(usage.FiveHour.Utilization), formatUsageReset(usage.FiveHour.ResetsAt),
+		formatUsagePercent(usage.SevenDay.Utilization), formatUsageReset(usage.SevenDay.ResetsAt))
+}
+
+// buildClaimMessage renders the claim post's full body: the one-line claim
+// headline kept from the old message, then one bullet per engine and -- only
+// when an engine that will actually run is Claude -- the current usage.
+// The multi-unit decision is the same isMultiUnit ProcessTask branches on,
+// so a note with multi_unit: true but the flag off still reads as
+// single-unit here (its plan engine never runs).
+func buildClaimMessage(deps Deps, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig) string {
+	title := taskTitle(job.NotePath)
+	codingEngine := resolveCodingEngineName(job, note)
+	reviewEngine := resolveReviewEngineName(note, repoCfg, deps.reviewEngineDefault())
+
+	multiUnit := isMultiUnit(deps, note)
+	planEngine := singleUnitPlanEngine
+	if multiUnit {
+		planEngine = resolvePlanEngineName(note, repoCfg, deps.planEngineDefault())
+	}
+
+	lines := []string{
+		fmt.Sprintf("Task `%s` is claimed", title),
+		fmt.Sprintf("- Task: %s", title),
+		fmt.Sprintf("- Plan engine: %s", planEngine),
+		fmt.Sprintf("- Code engine: %s", codingEngine),
+		fmt.Sprintf("- Review engine: %s", reviewEngine),
+	}
+	if claimUsesClaude(codingEngine, reviewEngine, planEngine, multiUnit) {
+		lines = append(lines, claudeUsageBullet(deps))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // postTaskClaim posts a fresh task's Discord forum claim message and, on
 // success, persists the returned thread ID to the vault note's
 // discord_thread_id -- and to note itself, so the rest of this ProcessTask
@@ -767,9 +888,9 @@ func truncateThreadName(s string) string {
 // "notified"/"notify_failed", so the watcher's "no Discord notification
 // ever recorded" scan (which only checks for those two) keeps firing if a
 // later, real terminal message fails even though the claim succeeded.
-func postTaskClaim(deps Deps, job worker.Job, note *notetask.Note) {
+func postTaskClaim(deps Deps, job worker.Job, note *notetask.Note, repoCfg config.RepoConfig) {
 	title := taskTitle(job.NotePath)
-	threadID, err := deps.PostClaim(truncateThreadName(title), fmt.Sprintf("Task `%s` is claimed", title))
+	threadID, err := deps.PostClaim(truncateThreadName(title), buildClaimMessage(deps, job, note, repoCfg))
 	if err != nil {
 		fmt.Printf("[runner] task %s: forum claim post failed, later messages fall back to the top-level webhook: %v\n", job.Slug, err)
 		return

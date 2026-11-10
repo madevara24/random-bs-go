@@ -16,6 +16,7 @@ import (
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/notify"
+	"github.com/madevara24/random-bs-go/internal/plangate"
 	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 )
@@ -32,7 +33,9 @@ const missingMessageAlertAfter = 10
 // land before the human's note edit syncs, and reading that race as an
 // instant reject (or worse, falling through to an ✅ also present) would
 // replan on nothing. Approval via ✅ needs no feedback. Any other emoji,
-// or neither reaction present, is no change.
+// or neither reaction present, is no change. An ignored ❌ is not silent
+// forever: processNote posts one warning per round for it (see
+// warnEmptyReject).
 func Decide(reactions map[string]int, currentRoundReview string) (newStatus string, changed bool) {
 	rejected := reactions["❌"] > 0
 	approved := reactions["✅"] > 0
@@ -67,8 +70,9 @@ func newMissingMessageTracker() *missingMessageTracker {
 // calling wake so dispatch claims it immediately rather than waiting for
 // its own next trigger. webhookURL is the forum webhook FetchReactions/
 // PostToThread call against -- the same one the plan gate itself posts
-// through. Blocks until ctx is done.
-func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(), interval time.Duration) {
+// through. userID is the human's Discord user ID, threaded down so replies
+// posted from this poll can mention them. Blocks until ctx is done.
+func Run(ctx context.Context, v *vaultgit.Vault, webhookURL, userID string, wake func(), interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -78,7 +82,7 @@ func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(),
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tick(v, webhookURL, wake, tracker)
+			tick(v, webhookURL, userID, wake, tracker)
 		}
 	}
 }
@@ -87,7 +91,7 @@ func Run(ctx context.Context, v *vaultgit.Vault, webhookURL string, wake func(),
 // act on each. Exposed as its own step (rather than inlined into Run) so a
 // test can drive it directly, once per call, without racing a real
 // ticker.
-func tick(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMessageTracker) {
+func tick(v *vaultgit.Vault, webhookURL, userID string, wake func(), tracker *missingMessageTracker) {
 	if err := v.Sync(); err != nil {
 		fmt.Printf("[planpoll] sync: %v\n", err)
 		return
@@ -119,16 +123,16 @@ func tick(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMes
 			continue
 		}
 
-		processNote(v, webhookURL, wake, tracker, relPath, note)
+		processNote(v, webhookURL, userID, wake, tracker, relPath, note)
 	}
 }
 
-func processNote(v *vaultgit.Vault, webhookURL string, wake func(), tracker *missingMessageTracker, relPath string, note *notetask.Note) {
+func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), tracker *missingMessageTracker, relPath string, note *notetask.Note) {
 	threadID := derefStr(note.Frontmatter.DiscordThreadID)
 	messageID := derefStr(note.Frontmatter.PlanMessageID)
 
 	if messageID == "" {
-		retryMissingPlanMessage(v, webhookURL, relPath, note, threadID, tracker)
+		retryMissingPlanMessage(v, webhookURL, userID, relPath, note, threadID, tracker)
 		return
 	}
 
@@ -146,6 +150,7 @@ func processNote(v *vaultgit.Vault, webhookURL string, wake func(), tracker *mis
 
 	newStatus, changed := Decide(reactions, review)
 	if !changed {
+		warnEmptyReject(v, webhookURL, userID, relPath, note, threadID, round, reactions, review)
 		return
 	}
 
@@ -163,26 +168,115 @@ func processNote(v *vaultgit.Vault, webhookURL string, wake func(), tracker *mis
 		fmt.Printf("[planpoll] writing %s for %s: %v\n", newStatus, relPath, werr)
 		return
 	}
+	// Best effort: the status write above is the durable record and must
+	// stand even if Discord is unreachable. A failed reply is only logged
+	// -- never retried in a loop, never allowed to undo the write.
+	if _, perr := notify.PostToThread(webhookURL, threadID, planDecisionReply(userID, slug, round, newStatus), "", ""); perr != nil {
+		fmt.Printf("[planpoll] posting %s reply for %s: %v\n", newStatus, relPath, perr)
+	}
 	wake()
+}
+
+// planRejectEmptyEvent is the Runner Log line recording that the poller
+// already warned about an empty-feedback ❌ for a round. It is checked
+// before posting (see warnEmptyReject), so the warning survives a restart
+// and goes out at most once per round.
+func planRejectEmptyEvent(round int) string {
+	return fmt.Sprintf("plan_reject_empty (round %d)", round)
+}
+
+// warnEmptyReject posts the one-time "this ❌ has no feedback yet" warning
+// for a round Decide left unchanged because the review is still empty --
+// including the ✅+❌-with-no-feedback case, where the status outcome stays
+// unchanged too. The warning is posted, then the persisted Runner Log line
+// is appended: the log, not in-memory state, is what makes it once per
+// round across restarts. A failed post is only logged and leaves no log
+// line, so the next tick tries again; once it lands, later ticks see the
+// line and stay silent.
+func warnEmptyReject(v *vaultgit.Vault, webhookURL, userID, relPath string, note *notetask.Note, threadID string, round int, reactions map[string]int, review string) {
+	if reactions["❌"] == 0 || strings.TrimSpace(review) != "" {
+		return
+	}
+
+	// Re-read so the check runs against the persisted Runner Log even when
+	// the caller's note snapshot predates an earlier warning this process
+	// (or another one) already recorded.
+	if fresh, err := v.ReadNote(relPath); err == nil {
+		note = fresh
+	}
+	event := planRejectEmptyEvent(round)
+	for _, entry := range note.RunnerLog {
+		if entry.Event == event {
+			return
+		}
+	}
+
+	slug := taskmeta.SlugFromPath(relPath)
+	// Best effort, one attempt: the warning is advisory, and a failed post
+	// is retried by the next tick rather than in a loop here.
+	if _, err := notify.PostToThread(webhookURL, threadID, planRejectEmptyReply(userID, slug, round), "", ""); err != nil {
+		fmt.Printf("[planpoll] posting empty-feedback warning for %s: %v\n", relPath, err)
+		return
+	}
+
+	werr := v.WriteNote(relPath, fmt.Sprintf("planpoll: %s %s", event, slug), func(n *notetask.Note) error {
+		notetask.AppendRunnerLog(n, event, time.Now())
+		return nil
+	})
+	if werr != nil {
+		fmt.Printf("[planpoll] writing %s for %s: %v\n", event, relPath, werr)
+	}
+}
+
+// planRejectEmptyReply is the warning posted when a ❌ reaction has no
+// feedback under "### Round <N>" yet -- the poller keeps ignoring it, but
+// at least the human is told once per round why nothing happened. The
+// mention is omitted when userID is empty, same as the other replies.
+func planRejectEmptyReply(userID, slug string, round int) string {
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s> ", userID)
+	}
+	return fmt.Sprintf("%s❌ on `%s` round %d ignored -- `### Round %d` under `## Plan Review` is empty. Write your feedback there; the poller picks it up within a minute. The plan will not be redone on empty feedback.", mention, slug, round, round)
+}
+
+// planDecisionReply is the one-line acknowledgement posted into the task's
+// thread once a reaction has been recorded as plan_approved or
+// plan_rejected, so the human who reacted sees the poller picked it up and
+// what happens next. The mention is omitted when userID is empty, same as
+// the plan-review message's mention.
+func planDecisionReply(userID, slug string, round int, status string) string {
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s> ", userID)
+	}
+	if status == taskmeta.StatusPlanRejected {
+		return fmt.Sprintf("%sPlan for `%s` rejected -- round %d feedback recorded, the planner will replan on the next claim.", mention, slug, round)
+	}
+	return fmt.Sprintf("%sPlan for `%s` approved -- round %d recorded, the unit loop starts on the next claim.", mention, slug, round)
 }
 
 // retryMissingPlanMessage handles a plan_review note whose plan_message_id
 // is empty -- stopForPlanReview sets plan_review even when its own Discord
 // post failed, so this note would otherwise wait forever with nothing to
-// react to. Reposts once per tick (same message shape stopForPlanReview
-// itself used: the latest plan_gate Runner Log line as the stop reason,
-// the Plan as plan-round-<n>.md), and past missingMessageAlertAfter
-// consecutive failures, sends one alert into the task's own thread naming
-// it.
-func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, relPath string, note *notetask.Note, threadID string, tracker *missingMessageTracker) {
+// react to. Reposts once per tick through the same plangate renderer
+// stopForPlanReview uses, from the persisted plan_gate_reasons when present
+// (or, for a note that stopped before that field existed, the latest
+// plan_gate Runner Log line as a single Errors bullet), and past
+// missingMessageAlertAfter consecutive failures, sends one alert into the
+// task's own thread naming it.
+func retryMissingPlanMessage(v *vaultgit.Vault, webhookURL, userID, relPath string, note *notetask.Note, threadID string, tracker *missingMessageTracker) {
 	round := note.Frontmatter.PlanRound
 	if round == 0 {
 		round = 1
 	}
 	slug := taskmeta.SlugFromPath(relPath)
 
-	message := fmt.Sprintf("Task `%s` (%s)'s plan needs review: %s. React ✅ to approve, or ❌ and write your feedback under `### Round %d` in `## Plan Review`.",
-		slug, note.Frontmatter.Repo, latestPlanGateLine(note.RunnerLog), round)
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s>", userID)
+	}
+	message := plangate.RenderPlanReviewMessage(mention, slug, note.Frontmatter.Repo, round, planGateReasons(note))
 	attachmentName := fmt.Sprintf("plan-round-%d.md", round)
 
 	messageID, err := notify.PostToThread(webhookURL, threadID, message, attachmentName, note.Plan)
@@ -218,6 +312,29 @@ func alertMissingPlanMessage(webhookURL, threadID, slug string) {
 	if err != nil {
 		fmt.Printf("[planpoll] alerting about missing plan message for %s also failed: %v\n", slug, err)
 	}
+}
+
+// planGateReasons rebuilds the renderer's ordered reasons from the note.
+// stopForPlanReview persists the grouped plan_gate_reasons, so a normal
+// retry renders the exact same text. A note that reached plan_review before
+// that field existed has none, and falls back to the latest plan_gate
+// Runner Log line -- the only record those notes ever had -- as one Errors
+// bullet, matching the retry's pre-grouping message content.
+func planGateReasons(note *notetask.Note) []plangate.Reason {
+	if len(note.Frontmatter.PlanGateReasons) == 0 {
+		return []plangate.Reason{{
+			Category: plangate.CategoryErrors,
+			Text:     latestPlanGateLine(note.RunnerLog),
+		}}
+	}
+
+	var reasons []plangate.Reason
+	for category, texts := range note.Frontmatter.PlanGateReasons {
+		for _, text := range texts {
+			reasons = append(reasons, plangate.Reason{Category: plangate.Category(category), Text: text})
+		}
+	}
+	return reasons
 }
 
 // latestPlanGateLine returns the most recent Runner Log entry whose event

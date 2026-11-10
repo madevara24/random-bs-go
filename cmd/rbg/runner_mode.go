@@ -101,6 +101,7 @@ func runRunner(cfg *config.Config) {
 		Jev:                 &jev.Client{APIKey: cfg.TypesafeAPIKey, Model: cfg.JevModel},
 		MultiUnitEnabled:    cfg.MultiUnitEnabled,
 		ForumWebhookURL:     cfg.DiscordTaskForumWebhookURL,
+		DiscordUserID:       cfg.DiscordUserID,
 		OnBlocked: func(job worker.Job, payload runner.AlertPayload) {
 			notifier.Send(
 				job.NotePath, payload.DiscordThreadID,
@@ -163,7 +164,7 @@ func runRunner(cfg *config.Config) {
 			default:
 			}
 		}
-		go planpoll.Run(context.Background(), vault, cfg.DiscordTaskForumWebhookURL, wake, time.Minute)
+		go planpoll.Run(context.Background(), vault, cfg.DiscordTaskForumWebhookURL, cfg.DiscordUserID, wake, time.Minute)
 		fmt.Printf("[runner] plan-review poller started (interval=1m)\n")
 	}
 

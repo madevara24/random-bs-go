@@ -344,3 +344,150 @@ func TestSortByReadyThenCreated(t *testing.T) {
 		t.Errorf("notes[2].Created = %q, want latest ready_at last", notes[2].Frontmatter.Created)
 	}
 }
+
+// planGateReasonsNote is a note that has just stopped at the plan gate: it
+// carries the grouped stop reasons in the new plan_gate_reasons frontmatter
+// field, in the exact shape yaml.Marshal produces for a map (keys sorted,
+// four-space indent, one "- " bullet per reason).
+const planGateReasonsNote = `---
+status: plan_review
+repo: test-repo
+auto_merge: false
+engine: claude
+review_engine: claude
+session_id: null
+pr_url: null
+last_updated: null
+created: "2026-11-10"
+ready_at: "2026-11-10T09:03:54Z"
+discord_thread_id: "1569638728018694246"
+multi_unit: true
+plan_round: 1
+plan_message_id: "1569639704138223706"
+plan_gate_reasons:
+    Errors:
+        - 'jev unavailable: timeout'
+    Hard rules:
+        - touches a protected path
+    Jev classifier:
+        - 'risky: is a clear yes'
+    Planner questions:
+        - 'U2: confidence 0.4 below threshold'
+---
+
+Plan the thing in two units.
+`
+
+// TestParsePlanGateReasons checks the field lands on Frontmatter with every
+// category's reason list intact.
+func TestParsePlanGateReasons(t *testing.T) {
+	note, err := Parse([]byte(planGateReasonsNote))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	want := map[string][]string{
+		"Errors":            {"jev unavailable: timeout"},
+		"Hard rules":        {"touches a protected path"},
+		"Jev classifier":    {"risky: is a clear yes"},
+		"Planner questions": {"U2: confidence 0.4 below threshold"},
+	}
+	got := note.Frontmatter.PlanGateReasons
+	if len(got) != len(want) {
+		t.Fatalf("PlanGateReasons = %#v, want %#v", got, want)
+	}
+	for category, wantReasons := range want {
+		gotReasons := got[category]
+		if len(gotReasons) != len(wantReasons) {
+			t.Errorf("PlanGateReasons[%q] = %#v, want %#v", category, gotReasons, wantReasons)
+			continue
+		}
+		for i := range wantReasons {
+			if gotReasons[i] != wantReasons[i] {
+				t.Errorf("PlanGateReasons[%q][%d] = %q, want %q", category, i, gotReasons[i], wantReasons[i])
+			}
+		}
+	}
+}
+
+// TestRoundTripPlanGateReasons confirms a note carrying plan_gate_reasons
+// reproduces it byte-for-byte on read-then-write, and that a re-parse sees
+// the same grouped reasons.
+func TestRoundTripPlanGateReasons(t *testing.T) {
+	note, err := Parse([]byte(planGateReasonsNote))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := note.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(out) != planGateReasonsNote {
+		t.Errorf("round-trip not byte-identical.\ngot:\n%s\nwant:\n%s", out, planGateReasonsNote)
+	}
+
+	reparsed, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-Parse after Bytes(): %v\n%s", err, out)
+	}
+	if got := reparsed.Frontmatter.PlanGateReasons["Hard rules"]; len(got) != 1 || got[0] != "touches a protected path" {
+		t.Errorf("after round-trip, PlanGateReasons[\"Hard rules\"] = %#v", got)
+	}
+	if got := reparsed.Frontmatter.PlanGateReasons["Planner questions"]; len(got) != 1 || got[0] != "U2: confidence 0.4 below threshold" {
+		t.Errorf("after round-trip, PlanGateReasons[\"Planner questions\"] = %#v", got)
+	}
+}
+
+// planReviewWithoutReasonsNote is planGateReasonsNote minus the
+// plan_gate_reasons block -- the shape of a note that reached plan_review
+// before this field existed (or of one whose gate produced no reasons).
+const planReviewWithoutReasonsNote = `---
+status: plan_review
+repo: test-repo
+auto_merge: false
+engine: claude
+review_engine: claude
+session_id: null
+pr_url: null
+last_updated: null
+created: "2026-11-10"
+ready_at: "2026-11-10T09:03:54Z"
+discord_thread_id: "1569638728018694246"
+multi_unit: true
+plan_round: 1
+plan_message_id: "1569639704138223706"
+---
+
+Plan the thing in two units.
+`
+
+// TestRoundTripWithoutPlanGateReasons confirms a note that never carried
+// plan_gate_reasons is unchanged byte-for-byte by a read/write and gains no
+// new frontmatter key.
+func TestRoundTripWithoutPlanGateReasons(t *testing.T) {
+	for name, fixture := range map[string]string{
+		"plan-review-no-reasons": planReviewWithoutReasonsNote,
+		"legacy-finished":        legacyFinishedNote,
+		"multi-unit":             multiUnitNote,
+	} {
+		t.Run(name, func(t *testing.T) {
+			note, err := Parse([]byte(fixture))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if note.Frontmatter.PlanGateReasons != nil {
+				t.Fatalf("PlanGateReasons = %#v, want nil", note.Frontmatter.PlanGateReasons)
+			}
+			out, err := note.Bytes()
+			if err != nil {
+				t.Fatalf("Bytes: %v", err)
+			}
+			if string(out) != fixture {
+				t.Errorf("round-trip not byte-identical.\ngot:\n%s\nwant:\n%s", out, fixture)
+			}
+			if strings.Contains(string(out), "plan_gate_reasons") {
+				t.Errorf("round-tripped note gained plan_gate_reasons:\n%s", out)
+			}
+		})
+	}
+}

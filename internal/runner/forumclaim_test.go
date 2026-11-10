@@ -64,6 +64,7 @@ func TestProcessTaskClaimPostsThreadNameAndStoresThreadID(t *testing.T) {
 	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
 
 	deps, job, v, _ := setupCrashTest(t, "forumclaim-basic", scriptPath)
+	deps.FetchClaudeUsage = stubClaimUsage(t)
 	writeStubScript(t, scriptPath, "exit 0") // leaves the copy at in_progress -> ScenarioNonTerminal blocked
 
 	forum, hits, requests := forumClaimServer(t, "555444333")
@@ -88,8 +89,8 @@ func TestProcessTaskClaimPostsThreadNameAndStoresThreadID(t *testing.T) {
 	if req.body["thread_name"] != wantTitle {
 		t.Errorf("thread_name = %q, want %q", req.body["thread_name"], wantTitle)
 	}
-	if req.body["content"] != fmt.Sprintf("Task `%s` is claimed", wantTitle) {
-		t.Errorf("content = %q, want the claim message", req.body["content"])
+	if req.body["content"] != wantClaimContent(wantTitle) {
+		t.Errorf("content = %q, want the claim message %q", req.body["content"], wantClaimContent(wantTitle))
 	}
 	if strings.Contains(req.body["content"], "<@") {
 		t.Errorf("content = %q, want no @-mentions on a bare claim", req.body["content"])
@@ -141,6 +142,7 @@ func TestProcessTaskLaterBlockedMessageRoutesIntoThread(t *testing.T) {
 	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
 
 	deps, job, _, _ := setupCrashTest(t, "forumclaim-routing", scriptPath)
+	deps.FetchClaudeUsage = stubClaimUsage(t)
 	writeStubScript(t, scriptPath, "exit 0")
 
 	forum, _, claimRequests := forumClaimServer(t, "888777666")
@@ -230,6 +232,7 @@ func TestProcessTaskClaimPostFailureFallsBackToTopLevel(t *testing.T) {
 	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
 
 	deps, job, v, _ := setupCrashTest(t, "forumclaim-postfail", scriptPath)
+	deps.FetchClaudeUsage = stubClaimUsage(t)
 	writeStubScript(t, scriptPath, "exit 0")
 
 	var claimAttempts atomic.Int32
