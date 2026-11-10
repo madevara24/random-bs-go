@@ -165,7 +165,29 @@ func processNote(v *vaultgit.Vault, webhookURL, userID string, wake func(), trac
 		fmt.Printf("[planpoll] writing %s for %s: %v\n", newStatus, relPath, werr)
 		return
 	}
+	// Best effort: the status write above is the durable record and must
+	// stand even if Discord is unreachable. A failed reply is only logged
+	// -- never retried in a loop, never allowed to undo the write.
+	if _, perr := notify.PostToThread(webhookURL, threadID, planDecisionReply(userID, slug, round, newStatus), "", ""); perr != nil {
+		fmt.Printf("[planpoll] posting %s reply for %s: %v\n", newStatus, relPath, perr)
+	}
 	wake()
+}
+
+// planDecisionReply is the one-line acknowledgement posted into the task's
+// thread once a reaction has been recorded as plan_approved or
+// plan_rejected, so the human who reacted sees the poller picked it up and
+// what happens next. The mention is omitted when userID is empty, same as
+// the plan-review message's mention.
+func planDecisionReply(userID, slug string, round int, status string) string {
+	mention := ""
+	if userID != "" {
+		mention = fmt.Sprintf("<@%s> ", userID)
+	}
+	if status == taskmeta.StatusPlanRejected {
+		return fmt.Sprintf("%sPlan for `%s` rejected -- round %d feedback recorded, the planner will replan on the next claim.", mention, slug, round)
+	}
+	return fmt.Sprintf("%sPlan for `%s` approved -- round %d recorded, the unit loop starts on the next claim.", mention, slug, round)
 }
 
 // retryMissingPlanMessage handles a plan_review note whose plan_message_id

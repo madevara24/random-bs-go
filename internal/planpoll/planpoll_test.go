@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -225,6 +226,191 @@ func TestRetryFallsBackToRunnerLogUnderErrors(t *testing.T) {
 	}
 	if strings.Contains(got, "**Hard rules**") || strings.Contains(got, "**Jev classifier**") || strings.Contains(got, "**Planner questions**") {
 		t.Errorf("fallback rendered categories beyond Errors:\n%s", got)
+	}
+}
+
+// decisionReplyRecorder stands in for both FetchReactions (GET, returning
+// emoji as the message's only reaction) and PostToThread (POST) on one
+// httptest server, recording every posted content string.
+type decisionReplyRecorder struct {
+	mu       sync.Mutex
+	contents []string
+}
+
+func (r *decisionReplyRecorder) posted() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.contents...)
+}
+
+func decisionReplyServer(t *testing.T, emoji string, postStatus int) (*httptest.Server, *decisionReplyRecorder) {
+	t.Helper()
+	rec := &decisionReplyRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"reactions":[{"emoji":{"name":%q},"count":1}]}`, emoji)
+			return
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var payload struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("payload_json")), &payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		rec.mu.Lock()
+		rec.contents = append(rec.contents, payload.Content)
+		rec.mu.Unlock()
+		if postStatus < 200 || postStatus >= 300 {
+			http.Error(w, "webhook down", postStatus)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"reply-1"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+// seedPlanReviewNote seeds a plan_review note with a plan message id (so
+// processNote polls reactions rather than reposting), optionally writing a
+// round's review feedback, and returns the vault, relative path and parsed
+// note processNote expects.
+func seedPlanReviewNote(t *testing.T, slug, threadID, messageID string, round int, review string) (*vaultgit.Vault, string, *notetask.Note) {
+	t.Helper()
+	relPath := fmt.Sprintf("Tasks/%s.md", slug)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "plan_review", Repo: "phase6-test-repo", Created: "2026-11-06",
+		DiscordThreadID: &threadID, PlanMessageID: &messageID, PlanRound: round,
+	}, "Do the thing.")
+
+	if review != "" {
+		if err := v.WriteNote(relPath, "test: seed review "+slug, func(n *notetask.Note) error {
+			n.HasPlanReview = true
+			n.PlanReview = fmt.Sprintf("### Round %d\n%s\n", round, review)
+			return nil
+		}); err != nil {
+			t.Fatalf("seeding review: %v", err)
+		}
+	}
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading seeded note: %v", err)
+	}
+	return v, relPath, note
+}
+
+// TestProcessNoteApprovedPostsOneReply confirms a recorded ✅ writes
+// plan_approved and posts exactly one acknowledgement into the task's
+// thread, mentioning the user and naming the round.
+func TestProcessNoteApprovedPostsOneReply(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	slug := fmt.Sprintf("planpoll-approved-reply-%d", time.Now().UnixNano())
+	v, relPath, note := seedPlanReviewNote(t, slug, "thread-approved-reply", "msg-approved-reply", 2, "")
+
+	srv, rec := decisionReplyServer(t, "✅", http.StatusOK)
+	var wakes atomic.Int32
+	processNote(v, srv.URL, "user-approved", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, note)
+
+	posts := rec.posted()
+	if len(posts) != 1 {
+		t.Fatalf("posted %d messages, want exactly 1: %#v", len(posts), posts)
+	}
+	want := fmt.Sprintf("<@user-approved> Plan for `%s` approved -- round 2 recorded, the unit loop starts on the next claim.", slug)
+	if posts[0] != want {
+		t.Errorf("approved reply =\n%s\n\nwant =\n%s", posts[0], want)
+	}
+
+	updated, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note after processNote: %v", err)
+	}
+	if updated.Frontmatter.Status != taskmeta.StatusPlanApproved {
+		t.Errorf("status = %q, want %q", updated.Frontmatter.Status, taskmeta.StatusPlanApproved)
+	}
+	if got := wakes.Load(); got != 1 {
+		t.Errorf("wake called %d times, want 1", got)
+	}
+}
+
+// TestProcessNoteRejectedPostsOneReply confirms a recorded ❌ (with this
+// round's feedback written) writes plan_rejected and posts exactly one
+// acknowledgement, mentioning the user and naming the round.
+func TestProcessNoteRejectedPostsOneReply(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	slug := fmt.Sprintf("planpoll-rejected-reply-%d", time.Now().UnixNano())
+	v, relPath, note := seedPlanReviewNote(t, slug, "thread-rejected-reply", "msg-rejected-reply", 1, "Use X instead.")
+
+	srv, rec := decisionReplyServer(t, "❌", http.StatusOK)
+	var wakes atomic.Int32
+	processNote(v, srv.URL, "user-rejected", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, note)
+
+	posts := rec.posted()
+	if len(posts) != 1 {
+		t.Fatalf("posted %d messages, want exactly 1: %#v", len(posts), posts)
+	}
+	want := fmt.Sprintf("<@user-rejected> Plan for `%s` rejected -- round 1 feedback recorded, the planner will replan on the next claim.", slug)
+	if posts[0] != want {
+		t.Errorf("rejected reply =\n%s\n\nwant =\n%s", posts[0], want)
+	}
+
+	updated, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note after processNote: %v", err)
+	}
+	if updated.Frontmatter.Status != taskmeta.StatusPlanRejected {
+		t.Errorf("status = %q, want %q", updated.Frontmatter.Status, taskmeta.StatusPlanRejected)
+	}
+	if got := wakes.Load(); got != 1 {
+		t.Errorf("wake called %d times, want 1", got)
+	}
+}
+
+// TestProcessNoteReplyFailureKeepsStatusWrite confirms a webhook failure on
+// the acknowledgement is only logged: the status write stands, the attempt
+// happens once (no retry loop), and the task is still woken.
+func TestProcessNoteReplyFailureKeepsStatusWrite(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	slug := fmt.Sprintf("planpoll-reply-fail-%d", time.Now().UnixNano())
+	v, relPath, note := seedPlanReviewNote(t, slug, "thread-reply-fail", "msg-reply-fail", 1, "Use X instead.")
+
+	srv, rec := decisionReplyServer(t, "❌", http.StatusInternalServerError)
+	var wakes atomic.Int32
+	processNote(v, srv.URL, "user-reply-fail", func() { wakes.Add(1) }, newMissingMessageTracker(), relPath, note)
+
+	if posts := rec.posted(); len(posts) != 1 {
+		t.Errorf("posted %d attempts, want exactly 1 (never retried)", len(posts))
+	}
+
+	updated, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note after processNote: %v", err)
+	}
+	if updated.Frontmatter.Status != taskmeta.StatusPlanRejected {
+		t.Errorf("status = %q, want %q even though the reply failed", updated.Frontmatter.Status, taskmeta.StatusPlanRejected)
+	}
+	if got := wakes.Load(); got != 1 {
+		t.Errorf("wake called %d times, want 1", got)
 	}
 }
 
