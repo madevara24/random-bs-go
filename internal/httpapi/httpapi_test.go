@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -508,6 +509,120 @@ func TestResumeClearsPauseFlipsNotesAndWakesEverything(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Runner Log missing a \"blocker_resolved\" entry: %+v", note.RunnerLog)
+	}
+}
+
+// seedBlockerForResume opens a numbered blocker on an already-seeded note,
+// optionally filling its resolution first, so Resume has a current blocker
+// to auto-fill (or to leave alone).
+func seedBlockerForResume(t *testing.T, v *vaultgit.Vault, relPath, resolution string) {
+	t.Helper()
+	if err := v.WriteNote(relPath, "test: seed blocker", func(n *notetask.Note) error {
+		notetask.AppendBlocker(n, "usage_limit: claude, auto-resumes at 2026-09-15T00:00:00Z", time.Now())
+		if resolution != "" && !notetask.FillCurrentBlockerResolution(n, resolution) {
+			t.Fatalf("seeding resolution %q returned false", resolution)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding blocker on %s: %v", relPath, err)
+	}
+}
+
+// TestResumeFillsEmptyBlockerResolution confirms a usage-limit resume fills
+// the current blocker's blank resolution with the auto-resume note, so the
+// dispatch resume check has a non-empty resolution to claim against.
+func TestResumeFillsEmptyBlockerResolution(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/httpapi-resume-autofill-%s.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Resume autofill test task.")
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	seedBlockerForResume(t, v, relPath, "")
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("claude", relPath)
+
+	s := New(make(chan struct{}, 1), nil, v, &p)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.Status != "blocker_resolved" {
+		t.Errorf("status = %q, want %q", note.Frontmatter.Status, "blocker_resolved")
+	}
+	if got, want := notetask.CurrentBlockerResolution(note), "Auto: claude usage limit reset."; got != want {
+		t.Errorf("current blocker resolution = %q, want %q", got, want)
+	}
+}
+
+// TestResumeKeepsHumanBlockerResolution confirms a resolution a human
+// already filled in survives a racing auto-resume unchanged.
+func TestResumeKeepsHumanBlockerResolution(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/httpapi-resume-human-resolution-%s.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Resume human-resolution test task.")
+
+	const human = "Human: restarted the local proxy; retry after lunch."
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	seedBlockerForResume(t, v, relPath, human)
+
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+	p.AddBlockedNote("claude", relPath)
+
+	s := New(make(chan struct{}, 1), nil, v, &p)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/resume", "", nil)
+	if err != nil {
+		t.Fatalf("POST /resume: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if got := notetask.CurrentBlockerResolution(note); got != human {
+		t.Errorf("current blocker resolution = %q, want unchanged %q", got, human)
+	}
+	if strings.Contains(note.Blockers, "Auto: claude usage limit reset.") {
+		t.Errorf("blockers gained an auto-resume line over a human resolution:\n%s", note.Blockers)
 	}
 }
 
