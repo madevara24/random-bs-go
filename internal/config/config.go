@@ -20,7 +20,6 @@ type RepoConfig struct {
 	Path             string `json:"path"`
 	Remote           string `json:"remote"`
 	DefaultBranch    string `json:"default_branch"`
-	CI               string `json:"ci"`
 	AutoMergeDefault bool   `json:"auto_merge_default"`
 
 	// Engine overrides DEFAULT_ENGINE for every task onboarded to this repo
@@ -249,6 +248,21 @@ func parseEnvFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("reading env file %s: %w", path, err)
 	}
 	return out, nil
+}
+
+// ReadEnvValue reads one key from a KEY=VALUE .env file, using the same
+// parser as Load. Callers outside this package (e.g. notify) that only need
+// a single value can share this instead of reimplementing the format.
+func ReadEnvValue(path, key string) (string, error) {
+	raw, err := parseEnvFile(path)
+	if err != nil {
+		return "", err
+	}
+	value, ok := raw[key]
+	if !ok || value == "" {
+		return "", fmt.Errorf("%s not found in %s", key, path)
+	}
+	return value, nil
 }
 
 // loadRepos reads and validates repos.json.
