@@ -259,7 +259,7 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, "done", note.WorkLog, autoMerge, prURL, discordThreadID, nil, codingEng.Name())
+		deps.OnTerminal(job, "done", note.WorkLog, autoMerge, prURL, discordThreadID, nil, codingEng.Name(), 0)
 	}
 
 	if autoMerge && deps.MergeGateFactory != nil {

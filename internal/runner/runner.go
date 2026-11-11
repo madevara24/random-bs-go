@@ -208,8 +208,11 @@ type Deps struct {
 	// status with no usage-limit involvement. engineName is this task's
 	// resolved coding engine (codingEngineName), the same name a trip
 	// above was scoped to -- main.go's wiring needs it to arm the right
-	// engine's timer and name it in the Discord message.
-	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string)
+	// engine's timer and name it in the Discord message. blockerRound is
+	// the numbered blocker this merge-back opened (blocker_round after the
+	// AppendBlocker call), or 0 when status isn't "blocked", so the
+	// Discord message can say which blocker it is.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string, blockerRound int)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -624,6 +627,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// begin with), and append the terminal-status Runner Log line in the
 	// same commit.
 	terminalStatus := copyAfter.Frontmatter.Status
+	blockerRound := 0
 	mergeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: %s %s", terminalStatus, job.Slug), func(n *notetask.Note) error {
 		n.Frontmatter.Status = terminalStatus
 		n.Frontmatter.PRURL = copyAfter.Frontmatter.PRURL
@@ -632,6 +636,15 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		}
 		n.HasWorkLog = copyAfter.HasWorkLog
 		n.WorkLog = copyAfter.WorkLog
+		if terminalStatus == "blocked" {
+			// CC itself opened this blocker (its Work Log entry begins with
+			// "Blocker <n>:"); the runner owns ## Blockers and turns that
+			// self-report into the numbered block every other blocked path
+			// writes. blockerN is the number the cause text has to name too.
+			blockerN := n.Frontmatter.BlockerRound + 1
+			cause := fmt.Sprintf("self-reported -- see the Work Log entry starting \"Blocker %d:\"", blockerN)
+			blockerRound = notetask.AppendBlocker(n, cause, time.Now())
+		}
 		notetask.AppendRunnerLog(n, terminalStatus, time.Now())
 		return nil
 	})
@@ -676,7 +689,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit, codingEngineName)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit, codingEngineName, blockerRound)
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {
@@ -1039,6 +1052,8 @@ func writeNoteCopy(note *notetask.Note, copyPath string) error {
 		Plan:          note.Plan,
 		HasPlanReview: note.HasPlanReview,
 		PlanReview:    note.PlanReview,
+		HasBlockers:   note.HasBlockers,
+		Blockers:      note.Blockers,
 		HasHandoff:    note.HasHandoff,
 		Handoff:       note.Handoff,
 		HasWorkLog:    note.HasWorkLog,

@@ -308,11 +308,13 @@ func TestProcessTaskSelfReportedBlockedWhileUsageLimitTripped(t *testing.T) {
 
 	var gotStatus string
 	var gotUsageLimit *UsageLimitInfo
+	var gotBlockerRound int
 	var onTerminalCalled bool
-	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string) {
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string, blockerRound int) {
 		onTerminalCalled = true
 		gotStatus = status
 		gotUsageLimit = usageLimit
+		gotBlockerRound = blockerRound
 	}
 
 	err := ProcessTask(deps, noopReporter{}, job)
@@ -327,6 +329,9 @@ func TestProcessTaskSelfReportedBlockedWhileUsageLimitTripped(t *testing.T) {
 	}
 	if gotStatus != "blocked" {
 		t.Errorf("status = %q, want %q", gotStatus, "blocked")
+	}
+	if gotBlockerRound != 1 {
+		t.Errorf("blockerRound = %d, want 1 for a self-reported blocked", gotBlockerRound)
 	}
 	if gotUsageLimit == nil {
 		t.Fatal("usageLimit = nil, want it set for a self-reported blocked while the limit tripped on this invocation")
@@ -385,11 +390,13 @@ func TestProcessTaskSelfReportedDoneWhileUsageLimitTripped(t *testing.T) {
 
 	var gotStatus string
 	var gotUsageLimit *UsageLimitInfo
+	var gotBlockerRound int
 	var onTerminalCalled bool
-	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string) {
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string, blockerRound int) {
 		onTerminalCalled = true
 		gotStatus = status
 		gotUsageLimit = usageLimit
+		gotBlockerRound = blockerRound
 	}
 
 	err := ProcessTask(deps, noopReporter{}, job)
@@ -404,6 +411,9 @@ func TestProcessTaskSelfReportedDoneWhileUsageLimitTripped(t *testing.T) {
 	}
 	if gotStatus != "done" {
 		t.Errorf("status = %q, want %q", gotStatus, "done")
+	}
+	if gotBlockerRound != 0 {
+		t.Errorf("blockerRound = %d, want 0 for a self-reported done", gotBlockerRound)
 	}
 	if gotUsageLimit == nil {
 		t.Fatal("usageLimit = nil, want it set for a self-reported done while the limit tripped on this invocation")
