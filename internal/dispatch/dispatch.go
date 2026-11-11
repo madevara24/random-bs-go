@@ -38,6 +38,21 @@ type Job struct {
 // internal/engineresolve.Coding).
 type EngineResolver func(repoKey, noteEngine string) string
 
+// ResumeNotifyOptions carries the Discord routing values a dispatch pass
+// needs when it has to report on a resumed task: the forum-channel webhook
+// that owns the task's thread and the human to mention. Both empty is the
+// valid "nothing to post to" default. It is a single struct rather than
+// loose parameters so later units can add fields without churning
+// RunDispatchPass's signature again.
+//
+// No dispatch logic reads these fields yet -- this parameter exists purely
+// so the values are threaded end to end (daemon.Runner -> here) ahead of the
+// resume check that uses them.
+type ResumeNotifyOptions struct {
+	ForumWebhookURL string
+	DiscordUserID   string
+}
+
 // Enqueuer is how a claimed job reaches its repo's queue. Defined here
 // (the caller side) rather than in the worker package, so this package
 // doesn't need to import worker at all -- worker.RepoWorker satisfies this
@@ -106,7 +121,11 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 // field -- nil is valid (every Job.Engine comes out "", same as before
 // this field existed) for any caller that doesn't care. Resolution never
 // writes `engine:` to the note itself -- see Job's doc comment.
-func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEngine EngineResolver) error {
+//
+// resumeNotify carries the Discord routing values for reporting on a
+// resumed task. Accepted and threaded through, but unused today -- see
+// ResumeNotifyOptions.
+func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEngine EngineResolver, resumeNotify ResumeNotifyOptions) error {
 	if err := v.Sync(); err != nil {
 		return fmt.Errorf("dispatch: sync: %w", err)
 	}

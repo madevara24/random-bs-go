@@ -128,7 +128,7 @@ func TestRunDispatchPass(t *testing.T) {
 	}, "Ready F, already stamped.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
+	if err := RunDispatchPass(v, enq, nil, nil, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -175,6 +175,44 @@ func TestRunDispatchPass(t *testing.T) {
 	}
 }
 
+// TestRunDispatchPassAcceptsResumeNotifyOptions confirms a populated
+// ResumeNotifyOptions is accepted and, in this unit, changes nothing: the
+// note is still claimed and enqueued exactly as with the zero value (no
+// Discord call is made from dispatch here -- there is no server to call).
+func TestRunDispatchPassAcceptsResumeNotifyOptions(t *testing.T) {
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/phase2-%s-resume-notify.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocker_resolved", Repo: "repo-resume", Created: "2026-09-15",
+	}, "Blocker resolved, resuming.")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{
+		ForumWebhookURL: "https://discord.example/api/webhooks/forum",
+		DiscordUserID:   "123456789",
+	}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1: %+v", len(enq.calls), enq.calls)
+	}
+	if got := enq.calls[0].repoKey; got != "repo-resume" {
+		t.Errorf("enqueued repo = %q, want repo-resume", got)
+	}
+	if n := readNote(t, v.Path, relPath); n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q, want queued", n.Frontmatter.Status)
+	}
+}
+
 // TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused covers
 // RBG-35's per-engine pause: with "claude" paused, a ready note that
 // resolves to "claude" must stay ready, not queued, while a ready note
@@ -215,7 +253,7 @@ func TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused(t *testing.T
 	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, &p, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass while claude paused: %v", err)
 	}
 
@@ -239,7 +277,7 @@ func TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused(t *testing.T
 	// proof this is a guard scoped to that engine, not a hidden rejection
 	// of this particular note.
 	p.Clear("claude")
-	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, &p, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass after resume: %v", err)
 	}
 	if len(enq.calls) != 2 {
@@ -285,7 +323,7 @@ func TestRunDispatchPassResolvesEngine(t *testing.T) {
 	}
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, nil, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -340,7 +378,7 @@ func TestDispatchClaimsPlanStatuses(t *testing.T) {
 	}, "Still waiting on a reaction.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
+	if err := RunDispatchPass(v, enq, nil, nil, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 

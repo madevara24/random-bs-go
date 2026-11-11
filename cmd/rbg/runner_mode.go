@@ -142,6 +142,11 @@ func runRunner(cfg *config.Config) {
 		return engineresolve.Coding(noteEngine, cfg.Repos[repoKey].Engine, cfg.DefaultEngine)
 	}
 	r := daemon.NewRunner(vault, workers, pauseState, resolveEngine)
+	// The forum webhook and human mention a later resume check posts with --
+	// threaded through every dispatch pass; empty here just means "no forum
+	// routing configured".
+	r.ForumWebhookURL = cfg.DiscordTaskForumWebhookURL
+	r.DiscordUserID = cfg.DiscordUserID
 	if err := r.Boot(); err != nil {
 		fmt.Printf("rbg: fatal: boot failed: %v\n", err)
 		return
