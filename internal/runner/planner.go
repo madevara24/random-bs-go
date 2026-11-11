@@ -435,11 +435,13 @@ func resolvePlanReview(deps Deps, reporter ActivityReporter, job worker.Job, not
 func blockPlannerTask(deps Deps, job worker.Job, reason string) error {
 	entry := fmt.Sprintf("%s: %s", time.Now().UTC().Format(time.RFC3339), reason)
 	var discordThreadID string
+	var blockerN int
 	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (planner)", job.Slug), func(n *notetask.Note) error {
 		if n.Frontmatter.DiscordThreadID != nil {
 			discordThreadID = *n.Frontmatter.DiscordThreadID
 		}
 		n.Frontmatter.Status = "blocked"
+		blockerN = notetask.AppendBlocker(n, "planner_failure: "+oneLine(reason, oneLineMaxRunes), time.Now())
 		if strings.TrimSpace(n.WorkLog) == "" {
 			n.WorkLog = entry
 		} else {
@@ -458,6 +460,7 @@ func blockPlannerTask(deps Deps, job worker.Job, reason string) error {
 		Repo:            job.Repo,
 		Scenario:        ScenarioPlannerFailure,
 		Stage:           "planner",
+		BlockerN:        blockerN,
 		DiscordThreadID: discordThreadID,
 		ExitCode:        -1,
 		ExitErrText:     reason,

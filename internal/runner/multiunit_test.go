@@ -669,3 +669,41 @@ func TestOpenPRFailureBlocks(t *testing.T) {
 		t.Errorf("branch %s not preserved on origin: %v", branchName, err)
 	}
 }
+
+// TestFinishFailureOpensBlocker pins the numbered-blocker contract for
+// blockFinishFailure's blocked write: "### Blocker 1" with the
+// "open_pr_failure: <step>" Cause line (step = the failing label),
+// payload.BlockerN, and " (Blocker 1)" in the resulting Discord message.
+func TestFinishFailureOpensBlocker(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "finishfail-blocker-" + run
+
+	units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusDone}}
+	v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "")
+	branchName, _ := setupUnitLoopBranch(t, slug)
+
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault: v,
+		Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+	err := blockFinishFailure(deps, job, unitLoopRepoCfg(), branchName, "opening pull request", fmt.Errorf("gh pr create: exit status 1"))
+	if err == nil {
+		t.Fatal("blockFinishFailure returned nil error, want a non-nil error")
+	}
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.Scenario != ScenarioOpenPRFailure {
+		t.Errorf("alert scenario = %v, want %v", gotAlert.Scenario, ScenarioOpenPRFailure)
+	}
+	assertNumberedBlocker(t, v, relPath, gotAlert, "open_pr_failure: opening pull request", true)
+}
