@@ -198,6 +198,14 @@ type AlertPayload struct {
 	// from Scenario) so callers outside this package can check it directly.
 	UsageLimit *UsageLimitInfo
 
+	// BlockerN is the numbered blocker this block opened (notetask's
+	// blocker_round after the write) -- rendered into DiscordMessage as
+	// " (Blocker <n>)" and carried by callers that need to name the
+	// blocker elsewhere. Zero when no blocker was opened (e.g. a payload
+	// from a path that predates numbered blockers), which renders the
+	// message byte-identically to before.
+	BlockerN int
+
 	WatchdogKilled bool
 	ExitCode       int // -1 if unknown/signal-terminated
 	ExitErrText    string
@@ -238,9 +246,10 @@ type AlertPayload struct {
 // reset away by the next task in this repo, which needs a human's hand
 // regardless of why the task blocked in the first place.
 func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
+	blocker := p.blockerSuffix()
 	if p.PreserveErr != "" {
-		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**, and the blocked work was **not preserved**: %s. The work exists only in the clone's uncommitted tree at %s -- the next task in this repo will reset it away. See attached for details.",
-			mentionID, araDevMentionID, p.Slug, p.Repo, p.PreserveErr, p.RepoPath)
+		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**%s, and the blocked work was **not preserved**: %s. The work exists only in the clone's uncommitted tree at %s -- the next task in this repo will reset it away. See attached for details.",
+			mentionID, araDevMentionID, p.Slug, p.Repo, blocker, p.PreserveErr, p.RepoPath)
 	}
 	if p.Scenario == ScenarioUsageLimit {
 		// Devara only, never Ara-Dev: there's nothing for the `dev` gateway
@@ -250,11 +259,24 @@ func (p AlertPayload) DiscordMessage(mentionID, araDevMentionID string) string {
 			mentionID, p.Slug, p.Repo, p.EngineName, p.UsageLimit.ResetsAtSuffix())
 	}
 	if p.Scenario == ScenarioDoneWithoutPR {
-		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked** instead, no crash occurred. See attached for details.",
-			mentionID, araDevMentionID, p.Slug, p.Repo)
+		return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) reported **done** but no `pr_url` was found -- marked **blocked**%s instead, no crash occurred. See attached for details.",
+			mentionID, araDevMentionID, p.Slug, p.Repo, blocker)
 	}
-	return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- %s during %s. See attached for details.",
-		mentionID, araDevMentionID, p.Slug, p.Repo, p.Scenario, p.Stage)
+	return fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**%s -- %s during %s. See attached for details.",
+		mentionID, araDevMentionID, p.Slug, p.Repo, blocker, p.Scenario, p.Stage)
+}
+
+// blockerSuffix is the " (Blocker <n>)" clause DiscordMessage inserts
+// right after every literal "**blocked**" -- empty when no blocker was
+// opened (BlockerN == 0), so every message from a write path without a
+// numbered blocker stays byte-identical to what it rendered before this
+// field existed. The ScenarioUsageLimit branch says "**paused**" and so
+// never carries this suffix.
+func (p AlertPayload) blockerSuffix() string {
+	if p.BlockerN <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (Blocker %d)", p.BlockerN)
 }
 
 // AttachmentMarkdown is the fuller diagnosable content: task slug/repo,
@@ -342,6 +364,7 @@ func exitCodeOf(err error) int {
 // "blocked" Runner Log line, builds the alert payload, and invokes
 // Deps.OnBlocked with it.
 func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
+	var blockerN int
 	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (%s)", job.Slug, info.scenario), func(n *notetask.Note) error {
 		n.Frontmatter.Status = "blocked"
 		if info.sessionID != "" {
@@ -358,6 +381,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 				n.Frontmatter.PRURL = info.partialCopy.Frontmatter.PRURL
 			}
 		}
+		blockerN = notetask.AppendBlocker(n, crashBlockerCause(info), time.Now())
 		notetask.AppendRunnerLog(n, "blocked", time.Now())
 		return nil
 	})
@@ -385,6 +409,7 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 		Repo:                  job.Repo,
 		Scenario:              info.scenario,
 		Stage:                 info.stage,
+		BlockerN:              blockerN,
 		DiscordThreadID:       info.discordThreadID,
 		EngineName:            info.engineName,
 		UsageLimit:            info.usageLimit,
@@ -408,6 +433,30 @@ func handleCrashFallback(deps Deps, job worker.Job, info crashInfo) error {
 
 	fmt.Printf("[runner] task %s: blocked (%s) at stage %q\n", job.Slug, info.scenario, info.stage)
 	return fmt.Errorf("runner: task %s blocked (%s) at stage %q", job.Slug, info.scenario, info.stage)
+}
+
+// crashBlockerCause renders the Cause line for the numbered blocker
+// handleCrashFallback opens: "<scenario> during <stage>" for every scenario
+// except ScenarioUsageLimit, where the known cause (an engine usage limit
+// that clears on its own at a known time) is more useful than the
+// copy-read-back stage that noticed it.
+func crashBlockerCause(info crashInfo) string {
+	if info.scenario == ScenarioUsageLimit {
+		return usageLimitBlockerCause(info.engineName, info.usageLimit)
+	}
+	return fmt.Sprintf("%s during %s", info.scenario, info.stage)
+}
+
+// usageLimitBlockerCause is the shared Cause line for a numbered blocker
+// opened because an engine hit its usage limit -- also used by
+// unitloop.go's blockUnitTask, which can trip ScenarioUsageLimit directly
+// (a mid-loop limit) rather than only via handleCrashFallback.
+func usageLimitBlockerCause(engineName string, usageLimit *UsageLimitInfo) string {
+	reset := "unknown"
+	if usageLimit != nil && usageLimit.ResetsAt != nil {
+		reset = usageLimit.ResetsAt.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("usage_limit: %s, auto-resumes at %s", engineName, reset)
 }
 
 func errorIsIdleTimeout(err error) bool {

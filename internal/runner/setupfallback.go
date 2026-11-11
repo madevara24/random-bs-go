@@ -123,6 +123,7 @@ func handleSetupFailure(deps Deps, job worker.Job, info setupFailureInfo) error 
 	}
 
 	entry := fmt.Sprintf("%s: setup failed at stage %q: %v", time.Now().UTC().Format(time.RFC3339), info.stage, info.err)
+	var blockerN int
 	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (setup: %s)", job.Slug, info.stage), func(n *notetask.Note) error {
 		n.Frontmatter.Status = "blocked"
 		if strings.TrimSpace(n.WorkLog) == "" {
@@ -131,6 +132,7 @@ func handleSetupFailure(deps Deps, job worker.Job, info setupFailureInfo) error 
 			n.WorkLog = strings.TrimSpace(n.WorkLog) + "\n" + entry
 		}
 		n.HasWorkLog = true
+		blockerN = notetask.AppendBlocker(n, fmt.Sprintf("setup_failure during setup: %s", info.stage), time.Now())
 		notetask.AppendRunnerLog(n, "blocked", time.Now())
 		return nil
 	})
@@ -143,6 +145,7 @@ func handleSetupFailure(deps Deps, job worker.Job, info setupFailureInfo) error 
 		Repo:            job.Repo,
 		Scenario:        ScenarioSetupFailure,
 		Stage:           "setup: " + info.stage.String(),
+		BlockerN:        blockerN,
 		DiscordThreadID: info.discordThreadID,
 		ExitCode:        -1,
 		ExitErrText:     info.err.Error(),
