@@ -4,12 +4,15 @@
 package dispatch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/madevara24/random-bs-go/internal/notetask"
+	"github.com/madevara24/random-bs-go/internal/notify"
 	"github.com/madevara24/random-bs-go/internal/pause"
 	"github.com/madevara24/random-bs-go/internal/taskmeta"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -45,9 +48,11 @@ type EngineResolver func(repoKey, noteEngine string) string
 // loose parameters so later units can add fields without churning
 // RunDispatchPass's signature again.
 //
-// No dispatch logic reads these fields yet -- this parameter exists purely
-// so the values are threaded end to end (daemon.Runner -> here) ahead of the
-// resume check that uses them.
+// RunDispatchPass reads both fields in its resume check: ForumWebhookURL is
+// where the refusal/resume messages are posted, into the task's own thread,
+// and DiscordUserID is the human mentioned when a blocker_resolved note is
+// refused for having an empty resolution. Empty ForumWebhookURL skips both
+// posts entirely (the status writes still happen).
 type ResumeNotifyOptions struct {
 	ForumWebhookURL string
 	DiscordUserID   string
@@ -123,8 +128,9 @@ func scanTasks(vaultPath string) ([]scannedNote, error) {
 // writes `engine:` to the note itself -- see Job's doc comment.
 //
 // resumeNotify carries the Discord routing values for reporting on a
-// resumed task. Accepted and threaded through, but unused today -- see
-// ResumeNotifyOptions.
+// refused or resumed task -- see ResumeNotifyOptions. Both posts are best
+// effort: a failed post is only logged, never retried, and never undoes the
+// status write that preceded it.
 func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEngine EngineResolver, resumeNotify ResumeNotifyOptions) error {
 	if err := v.Sync(); err != nil {
 		return fmt.Errorf("dispatch: sync: %w", err)
@@ -186,6 +192,29 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEng
 		repoKey := note.Frontmatter.Repo
 		engineName := resolveEngineFor(resolveEngine, repoKey, note)
 
+		// The resume check runs before the pause check on purpose: a
+		// blocker_resolved note with an empty resolution is refused
+		// even while its engine is paused, so the human finds out now
+		// rather than waiting for the pause to clear. Dispatch is the
+		// last place that still sees blocker_resolved -- by the time the
+		// runner starts, the claim write has already rewritten it to
+		// queued.
+		var resumed *resumeOutcome
+		if note.Frontmatter.Status == "blocker_resolved" {
+			outcome, checkErr := checkResume(v, relPath, slug)
+			if checkErr != nil {
+				fmt.Fprintf(os.Stderr, "[dispatch] resume check failed for %s: %v\n", relPath, checkErr)
+				continue
+			}
+			if outcome.refused {
+				postResumeRefusal(resumeNotify, slug, outcome.blockerN, outcome.threadID)
+				continue
+			}
+			if outcome.resuming {
+				resumed = &outcome
+			}
+		}
+
 		if p.IsPaused(engineName) {
 			// This note's engine is paused -- leave it exactly as it is
 			// (ready/blocker_resolved, not queued) for a later pass to
@@ -207,9 +236,126 @@ func RunDispatchPass(v *vaultgit.Vault, enq Enqueuer, p *pause.State, resolveEng
 		}
 
 		enq.Enqueue(repoKey, Job{NotePath: relPath, Repo: repoKey, Slug: slug, Engine: engineName})
+
+		if resumed != nil {
+			postResumedNotice(resumeNotify, slug, resumed.blockerN, resumed.firstLine, resumed.threadID)
+		}
 	}
 
 	return nil
+}
+
+// errResumeCheckSkip aborts the resume-check WriteNote without touching the
+// note. vaultgit.WriteNote commits on every call (and a git commit with
+// nothing staged is an error), so the "nothing to do" branches have to
+// abort the write instead of returning nil.
+var errResumeCheckSkip = errors.New("dispatch: resume check: no write needed")
+
+// resumeOutcome is what the resume check learned from the fresh note.
+// resuming is true only when the note is a blocker_resolved note with a
+// non-zero blocker_round and a non-empty current resolution -- i.e. the
+// claim is a genuine resume and gets a post-claim message.
+type resumeOutcome struct {
+	resuming  bool
+	refused   bool
+	blockerN  int
+	firstLine string
+	threadID  string
+}
+
+// checkResume re-reads relPath inside a dedicated WriteNote and applies the
+// resume rule: a blocker_resolved note whose current blocker has no
+// resolution is flipped back to blocked (blocker_round untouched) and
+// logged as resume_refused, so it is not claimed. A blocker_resolved note
+// with no blocker_round (blocked before numbered blockers existed) or with
+// a filled resolution falls through to the normal claim. Every branch that
+// needs no write aborts the WriteNote via errResumeCheckSkip.
+func checkResume(v *vaultgit.Vault, relPath, slug string) (resumeOutcome, error) {
+	var out resumeOutcome
+	err := v.WriteNote(relPath, fmt.Sprintf("dispatch: resume check %s", slug), func(n *notetask.Note) error {
+		// Re-read the fresh note: between scan and here someone may have
+		// claimed or re-blocked it.
+		if n.Frontmatter.Status != "blocker_resolved" {
+			return errResumeCheckSkip
+		}
+		if n.Frontmatter.BlockerRound == 0 {
+			// Blocked before numbered blockers existed -- no check to do.
+			return errResumeCheckSkip
+		}
+
+		if resolution := notetask.CurrentBlockerResolution(n); resolution != "" {
+			out.resuming = true
+			out.blockerN = n.Frontmatter.BlockerRound
+			out.firstLine = firstLineCut(resolution, 200)
+			out.threadID = threadIDOf(n)
+			return errResumeCheckSkip
+		}
+
+		n.Frontmatter.Status = "blocked"
+		notetask.AppendRunnerLog(n,
+			fmt.Sprintf("resume_refused (Blocker %d: empty resolution)", n.Frontmatter.BlockerRound),
+			time.Now())
+		out.refused = true
+		out.blockerN = n.Frontmatter.BlockerRound
+		out.threadID = threadIDOf(n)
+		return nil
+	})
+	if errors.Is(err, errResumeCheckSkip) {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// postResumeRefusal tells the task's thread why a blocker_resolved flip was
+// ignored. Best effort: skipped when there is no forum webhook or no thread
+// to post into, and a failure is only logged, never retried.
+func postResumeRefusal(opts ResumeNotifyOptions, slug string, blockerN int, threadID string) {
+	if opts.ForumWebhookURL == "" || threadID == "" {
+		return
+	}
+	msg := fmt.Sprintf("<@%s> `blocker_resolved` on `%s` ignored -- `#### Resolution` under `### Blocker %d` in `## Blockers` is empty. Write the resolution there, then flip it to `blocker_resolved` again.",
+		opts.DiscordUserID, slug, blockerN)
+	if _, err := notify.PostToThread(opts.ForumWebhookURL, threadID, msg, "", ""); err != nil {
+		fmt.Fprintf(os.Stderr, "[dispatch] posting resume refusal for %s: %v\n", slug, err)
+	}
+}
+
+// postResumedNotice tells the task's thread that its blocker is resolved
+// and the task is running again. Same best-effort/skip rules as
+// postResumeRefusal; no @-mention.
+func postResumedNotice(opts ResumeNotifyOptions, slug string, blockerN int, firstLine, threadID string) {
+	if opts.ForumWebhookURL == "" || threadID == "" {
+		return
+	}
+	msg := fmt.Sprintf("Task `%s` resumed -- Blocker %d resolved: %s", slug, blockerN, firstLine)
+	if _, err := notify.PostToThread(opts.ForumWebhookURL, threadID, msg, "", ""); err != nil {
+		fmt.Fprintf(os.Stderr, "[dispatch] posting resume notice for %s: %v\n", slug, err)
+	}
+}
+
+func threadIDOf(n *notetask.Note) string {
+	if n.Frontmatter.DiscordThreadID == nil {
+		return ""
+	}
+	return *n.Frontmatter.DiscordThreadID
+}
+
+// firstLineCut returns text's first line, trimmed, cut to at most limit
+// runes (so a multi-byte character is never split).
+func firstLineCut(text string, limit int) string {
+	line := text
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	runes := []rune(line)
+	if len(runes) > limit {
+		return string(runes[:limit])
+	}
+	return line
 }
 
 // resolveEngineFor calls resolveEngine (if non-nil) with repoKey and
