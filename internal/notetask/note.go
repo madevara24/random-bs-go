@@ -1,8 +1,9 @@
 // Package notetask parses and serializes a PM task note: YAML frontmatter
 // plus body sections in order -- the freeform task prompt, "## Plan" and
-// "## Plan Review" and "## Handoff" (multi-unit tasks only), "## Work Log"
-// (CC's own narrative), and "## Runner Log" (runner-only, append-only,
-// never sourced from or written to CC's note-copy).
+// "## Plan Review" and "## Handoff" (multi-unit tasks only), "## Blockers"
+// (runner-owned numbered blocker blocks), "## Work Log" (CC's own
+// narrative), and "## Runner Log" (runner-only, append-only, never sourced
+// from or written to CC's note-copy).
 package notetask
 
 import (
@@ -37,6 +38,12 @@ type Frontmatter struct {
 	MultiUnit     *bool   `yaml:"multi_unit,omitempty"`
 	PlanRound     int     `yaml:"plan_round,omitempty"`
 	PlanMessageID *string `yaml:"plan_message_id,omitempty"`
+
+	// BlockerRound numbers the numbered "### Blocker <n>" blocks in the
+	// "## Blockers" section. Zero/absent on a note that never blocked,
+	// including every note written before blockers were numbered; those
+	// round-trip untouched and resume exactly as before.
+	BlockerRound int `yaml:"blocker_round,omitempty"`
 
 	// PlanGateReasons holds the plan gate's stop reasons grouped by their
 	// display category (map key), written alongside plan_review so the
@@ -77,11 +84,12 @@ type RunnerLogEntry struct {
 	Event     string
 }
 
-// Note is a parsed task note. HasPlan/HasPlanReview/HasHandoff/HasWorkLog/
-// HasRunnerLog distinguish "section absent" from "section present but
-// empty" -- a freshly authored draft note has none of these sections, and
+// Note is a parsed task note. HasPlan/HasPlanReview/HasHandoff/HasBlockers/
+// HasWorkLog/HasRunnerLog distinguish "section absent" from "section present
+// but empty" -- a freshly authored draft note has none of these sections, and
 // Serialize must not invent them; AppendRunnerLog and AppendPlanReviewRound
-// are what turn HasRunnerLog/HasPlanReview on.
+// are what turn HasRunnerLog/HasPlanReview on, and AppendBlocker is what
+// turns HasBlockers on.
 type Note struct {
 	Path        string // absolute path on disk; empty if not yet written
 	Frontmatter Frontmatter
@@ -96,6 +104,9 @@ type Note struct {
 	HasHandoff bool
 	Handoff    string
 
+	HasBlockers bool
+	Blockers    string
+
 	HasWorkLog bool
 	WorkLog    string
 
@@ -107,13 +118,14 @@ const (
 	planHeading       = "## Plan"
 	planReviewHeading = "## Plan Review"
 	handoffHeading    = "## Handoff"
+	blockersHeading   = "## Blockers"
 	workLogHeading    = "## Work Log"
 	runnerLogHeading  = "## Runner Log"
 )
 
-// bodyHeadings lists the five possible section headings in the order they
+// bodyHeadings lists the six possible section headings in the order they
 // must appear in a note's body, after the prompt.
-var bodyHeadings = []string{planHeading, planReviewHeading, handoffHeading, workLogHeading, runnerLogHeading}
+var bodyHeadings = []string{planHeading, planReviewHeading, handoffHeading, blockersHeading, workLogHeading, runnerLogHeading}
 
 // Parse splits raw note bytes into frontmatter + body sections. A malformed
 // or missing frontmatter delimiter, or YAML that fails to parse, is a hard
@@ -192,11 +204,15 @@ func Parse(data []byte) (*Note, error) {
 		note.HasHandoff = true
 		note.Handoff = strings.TrimSpace(strings.Join(bodyLines[handoffLine+1:sectionEnd(handoffLine)], "\n"))
 	}
-	if workLogLine := headingLines[3]; workLogLine != -1 {
+	if blockersLine := headingLines[3]; blockersLine != -1 {
+		note.HasBlockers = true
+		note.Blockers = strings.TrimSpace(strings.Join(bodyLines[blockersLine+1:sectionEnd(blockersLine)], "\n"))
+	}
+	if workLogLine := headingLines[4]; workLogLine != -1 {
 		note.HasWorkLog = true
 		note.WorkLog = strings.TrimSpace(strings.Join(bodyLines[workLogLine+1:sectionEnd(workLogLine)], "\n"))
 	}
-	if runnerLogLine := headingLines[4]; runnerLogLine != -1 {
+	if runnerLogLine := headingLines[5]; runnerLogLine != -1 {
 		note.HasRunnerLog = true
 		section := strings.TrimSpace(strings.Join(bodyLines[runnerLogLine+1:], "\n"))
 		entries, err := parseRunnerLog(section)
@@ -267,6 +283,7 @@ func (n *Note) Bytes() ([]byte, error) {
 	writeTextSection(planHeading, n.HasPlan, n.Plan)
 	writeTextSection(planReviewHeading, n.HasPlanReview, n.PlanReview)
 	writeTextSection(handoffHeading, n.HasHandoff, n.Handoff)
+	writeTextSection(blockersHeading, n.HasBlockers, n.Blockers)
 	writeTextSection(workLogHeading, n.HasWorkLog, n.WorkLog)
 
 	if n.HasRunnerLog {
