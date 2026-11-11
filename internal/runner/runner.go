@@ -1118,6 +1118,26 @@ const resumeReconciliationNotice = "The runner only fetched and checked out your
 // the first time it pushes rather than assuming a plain `git push` works.
 const resumeLocalOnlyNotice = "The runner found your preserved branch only locally on this clone -- it was never pushed to `origin`, so it has no upstream, and the runner never merges, rebases, or touches `origin/%s` itself. `origin/%s` may have advanced while this task was blocked, so before continuing the task itself, reconcile `origin/%s` into your branch (merge or rebase, whichever this repo's convention is) and resolve any conflicts yourself. Because this branch has no upstream yet, push it with `git push -u origin %s` the first time -- a plain `git push` will fail.\n\n"
 
+// blockerWorkLogInstruction tells a session how to report a block so the
+// runner's own numbered blocker (see notetask.AppendBlocker) and the
+// session's Work Log entry agree on the same n. The n it names is the one
+// the runner will open on merge-back (BlockerRound+1), not the currently
+// open blocker, if any.
+func blockerWorkLogInstruction(note *notetask.Note) string {
+	return fmt.Sprintf("If you set `status` to `blocked`, begin that Work Log entry with `Blocker %d:`. Do not edit the \"## Blockers\" section yourself -- the runner owns it.\n\n", note.Frontmatter.BlockerRound+1)
+}
+
+// currentBlockerNotice points a resumed session at its already-open blocker
+// so it reads the human's resolution before continuing. It's empty when
+// BlockerRound is 0 -- a note blocked before numbered blockers existed has
+// no `### Blocker <n>` block to point at.
+func currentBlockerNotice(note *notetask.Note) string {
+	if note.Frontmatter.BlockerRound == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Your current blocker is `### Blocker %d` under `## Blockers`. Read its `#### Resolution` first, then continue.\n\n", note.Frontmatter.BlockerRound)
+}
+
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
 // vault access, so it's pointed at the note-copy instead for anything it
 // needs to read or write about task state. localOnlyResume is true only
@@ -1134,12 +1154,15 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranc
 		} else {
 			b.WriteString(fmt.Sprintf(resumeReconciliationNotice, defaultBranch, defaultBranch, defaultBranch))
 		}
+		b.WriteString(currentBlockerNotice(note))
+		b.WriteString(blockerWorkLogInstruction(note))
 	} else {
 		b.WriteString(fmt.Sprintf(
 			"You are working on a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). It holds your task's frontmatter (status/repo/auto_merge/pr_url/session_id/etc.) and body (the task prompt below, plus a \"## Work Log\" section for your own narrative).\n\n"+
 				"As you work, append entries to its \"## Work Log\" section describing what you did. When finished, update its frontmatter: set `status` to `done` if you succeeded, `blocked` if you need human input (explain what you need in the Work Log), or `failed` if you're giving up. Never touch `session_id` -- that field is managed externally.\n\n"+
 				"%s\n\n"+
 				"Task:\n%s\n", copyName, prCompletionContract, note.Prompt))
+		b.WriteString(blockerWorkLogInstruction(note))
 	}
 	return b.String()
 }

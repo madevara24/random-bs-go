@@ -109,3 +109,51 @@ func TestBuildPromptResumeLocalOnlyMentionsPushUpstream(t *testing.T) {
 		t.Errorf("normal resume prompt should not carry the local-only push instruction:\n%s", normalPrompt)
 	}
 }
+
+// TestBuildPromptCarriesNumberedBlockerInstructions guards RBG-54: both
+// prompts tell the session which blocker number to name in a new Work Log
+// entry (the runner opens BlockerRound+1), without letting it touch the
+// runner-owned "## Blockers" section. Only a resume with an already-open
+// blocker also points at that block's resolution, using BlockerRound
+// itself rather than the next number.
+func TestBuildPromptCarriesNumberedBlockerInstructions(t *testing.T) {
+	tests := []struct {
+		name        string
+		resume      bool
+		round       int
+		wantNext    string
+		wantCurrent string
+	}{
+		{name: "fresh with no prior blocker", resume: false, round: 0, wantNext: "`Blocker 1:`"},
+		{name: "fresh after a prior blocker", resume: false, round: 2, wantNext: "`Blocker 3:`"},
+		{name: "resume with no prior blocker", resume: true, round: 0, wantNext: "`Blocker 1:`"},
+		{name: "resume with an open blocker", resume: true, round: 2, wantNext: "`Blocker 3:`", wantCurrent: "Your current blocker is `### Blocker 2` under `## Blockers`. Read its `#### Resolution` first, then continue."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			note := &notetask.Note{
+				Frontmatter: notetask.Frontmatter{Status: "ready", BlockerRound: tt.round},
+				Prompt:      "Do the thing.",
+			}
+			prompt := buildPrompt(note, "copy.md", tt.resume, "main", "task/slug", false)
+
+			if !strings.Contains(prompt, tt.wantNext) {
+				t.Errorf("prompt missing next-blocker instruction %q:\n%s", tt.wantNext, prompt)
+			}
+			if !strings.Contains(prompt, `Do not edit the "## Blockers" section yourself`) {
+				t.Errorf("prompt missing the do-not-touch-##-Blockers instruction:\n%s", prompt)
+			}
+
+			if tt.wantCurrent == "" {
+				if strings.Contains(prompt, "Your current blocker is") {
+					t.Errorf("prompt should not point at a current blocker:\n%s", prompt)
+				}
+				return
+			}
+			if !strings.Contains(prompt, tt.wantCurrent) {
+				t.Errorf("prompt missing current-blocker/resolution instruction %q:\n%s", tt.wantCurrent, prompt)
+			}
+		})
+	}
+}
