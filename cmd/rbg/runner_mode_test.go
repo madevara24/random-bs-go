@@ -109,7 +109,7 @@ func TestTerminalHandlerDone(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "", nil, "claude")
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", tc.autoMerge, prURL, "", nil, "claude", 0)
 
 			got := waitForAlert(t, alerts)
 			if got.hasFile {
@@ -132,10 +132,18 @@ func TestTerminalHandlerDone(t *testing.T) {
 }
 
 // TestTerminalHandlerBlockedAndFailedKeepAttachment confirms blocked/failed
-// still get the .md work-log attachment -- only `done` drops it.
+// still get the .md work-log attachment -- only `done` drops it. A plain
+// blocked also carries the numbered-blocker clause ProcessTask's merge-back
+// opened ("**blocked** (Blocker 1)"); a failed status has no blocker.
 func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
-	for _, status := range []string{"blocked", "failed"} {
-		t.Run(status, func(t *testing.T) {
+	for _, tc := range []struct {
+		status       string
+		blockerRound int
+	}{
+		{status: "blocked", blockerRound: 1},
+		{status: "failed", blockerRound: 0},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
 			srv, alerts := capturingDiscordServer(t)
 			defer srv.Close()
 
@@ -143,17 +151,23 @@ func TestTerminalHandlerBlockedAndFailedKeepAttachment(t *testing.T) {
 			notifier := &notify.Notifier{WebhookURL: srv.URL}
 			handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
-			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, status, "something went wrong", false, "", "", nil, "claude")
+			handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, tc.status, "something went wrong", false, "", "", nil, "claude", tc.blockerRound)
 
 			got := waitForAlert(t, alerts)
 			if !got.hasFile {
-				t.Errorf("%s message dropped the .md attachment, want it kept", status)
+				t.Errorf("%s message dropped the .md attachment, want it kept", tc.status)
 			}
 			if !strings.Contains(got.content, "<@12345>") {
 				t.Errorf("message %q missing Devara mention", got.content)
 			}
 			if !strings.Contains(got.content, "<@67890>") {
 				t.Errorf("message %q missing Ara-Dev mention", got.content)
+			}
+			if tc.blockerRound > 0 && !strings.Contains(got.content, "**blocked** (Blocker 1)") {
+				t.Errorf("message %q missing the numbered-blocker clause", got.content)
+			}
+			if tc.blockerRound == 0 && strings.Contains(got.content, "(Blocker") {
+				t.Errorf("message %q has a blocker clause, want none for %s", got.content, tc.status)
 			}
 		})
 	}
@@ -173,7 +187,7 @@ func TestTerminalHandlerUsageLimitBlockMentionsDevaraOnly(t *testing.T) {
 	handler := newTerminalHandler(cfg, notifier, newResumeTimerMgr(cfg, notifier, nil))
 
 	resetsAt := time.Now().Add(time.Hour)
-	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "blocked", "hit the limit", false, "", "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude")
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "blocked", "hit the limit", false, "", "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude", 0)
 
 	got := waitForAlert(t, alerts)
 	if !strings.Contains(got.content, "<@12345>") {
@@ -205,7 +219,7 @@ func TestTerminalHandlerDoneWithUsageLimitArmsResumeTimer(t *testing.T) {
 
 	resetsAt := time.Now().Add(time.Hour)
 	const prURL = "https://github.com/example/repo/pull/42"
-	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", false, prURL, "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude")
+	handler(worker.Job{Repo: "repo-a", Slug: "task-1"}, "done", "irrelevant work log", false, prURL, "", &runner.UsageLimitInfo{ResetsAt: &resetsAt}, "claude", 0)
 
 	if resumeMgr.timerFor("claude") == nil {
 		t.Error("resume timer was not armed for a done task that hit the usage limit")
@@ -378,6 +392,9 @@ func TestPanicHandlerWritesBlockedAndAlerts(t *testing.T) {
 	if !strings.Contains(got.content, "<@67890>") {
 		t.Errorf("message %q missing Ara-Dev mention", got.content)
 	}
+	if !strings.Contains(got.content, "**blocked** (Blocker 1)") {
+		t.Errorf("message %q missing the numbered-blocker clause", got.content)
+	}
 
 	note, err := v.ReadNote(relPath)
 	if err != nil {
@@ -388,5 +405,14 @@ func TestPanicHandlerWritesBlockedAndAlerts(t *testing.T) {
 	}
 	if !note.HasWorkLog || !strings.Contains(note.WorkLog, "boom: simulated ProcessTask panic") {
 		t.Errorf("Work Log missing the recovered panic value: %q", note.WorkLog)
+	}
+	if note.Frontmatter.BlockerRound != 1 {
+		t.Errorf("blocker_round = %d, want 1", note.Frontmatter.BlockerRound)
+	}
+	if !note.HasBlockers || !strings.Contains(note.Blockers, "### Blocker 1") {
+		t.Errorf("note missing \"### Blocker 1\" block:\n%s", note.Blockers)
+	}
+	if !strings.Contains(note.Blockers, "- Cause: panic: boom: simulated ProcessTask panic") {
+		t.Errorf("note missing the panic Cause line:\n%s", note.Blockers)
 	}
 }

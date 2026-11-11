@@ -142,6 +142,11 @@ func runRunner(cfg *config.Config) {
 		return engineresolve.Coding(noteEngine, cfg.Repos[repoKey].Engine, cfg.DefaultEngine)
 	}
 	r := daemon.NewRunner(vault, workers, pauseState, resolveEngine)
+	// The forum webhook and human mention a later resume check posts with --
+	// threaded through every dispatch pass; empty here just means "no forum
+	// routing configured".
+	r.ForumWebhookURL = cfg.DiscordTaskForumWebhookURL
+	r.DiscordUserID = cfg.DiscordUserID
 	if err := r.Boot(); err != nil {
 		fmt.Printf("rbg: fatal: boot failed: %v\n", err)
 		return
@@ -265,9 +270,13 @@ func buildWorkers(cfg *config.Config, globalSlots chan struct{}, runnerDeps runn
 // usageLimit, the normal message for that status is sent with one extra
 // sentence appended naming the engine and noting the pause; the
 // blocked+usageLimit message stays exactly as it already was, just naming
-// the engine too.
-func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr *resumeTimerMgr) func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string) {
-	return func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string) {
+// the engine too. blockerRound is the numbered blocker ProcessTask's
+// merge-back opened for a self-reported block (0 for any other terminal
+// status), rendered after "**blocked**" so the message names which blocker
+// to look at. The blocked+usageLimit message is unchanged: it says
+// "**paused**", not "**blocked**", and has no blocker clause to anchor to.
+func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr *resumeTimerMgr) func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string, blockerRound int) {
+	return func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *runner.UsageLimitInfo, engineName string, blockerRound int) {
 		if usageLimit != nil {
 			resumeMgr.handleTrip(engineName, usageLimit.ResetsAt)
 		}
@@ -279,8 +288,12 @@ func newTerminalHandler(cfg *config.Config, notifier *notify.Notifier, resumeMgr
 			return
 		}
 		if status == "blocked" {
+			blockerClause := ""
+			if blockerRound > 0 {
+				blockerClause = fmt.Sprintf(" (Blocker %d)", blockerRound)
+			}
 			notifier.Send(job.NotePath, discordThreadID,
-				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- see its Work Log.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo),
+				fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**%s -- see its Work Log.", cfg.DiscordUserID, cfg.DiscordAraDevUserID, job.Slug, job.Repo, blockerClause),
 				job.Slug+".md", "# Task blocked\n\n"+workLog+"\n")
 			return
 		}
@@ -344,6 +357,7 @@ func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUs
 	return func(job worker.Job, recovered any) {
 		entry := fmt.Sprintf("%s: recovered from panic in repo %s: %v", time.Now().UTC().Format(time.RFC3339), job.Repo, recovered)
 		var discordThreadID string
+		var blockerN int
 		writeErr := vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (panic)", job.Slug), func(n *notetask.Note) error {
 			if n.Frontmatter.DiscordThreadID != nil {
 				discordThreadID = *n.Frontmatter.DiscordThreadID
@@ -355,6 +369,7 @@ func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUs
 				n.WorkLog = strings.TrimSpace(n.WorkLog) + "\n" + entry
 			}
 			n.HasWorkLog = true
+			blockerN = notetask.AppendBlocker(n, fmt.Sprintf("panic: %v", recovered), time.Now())
 			notetask.AppendRunnerLog(n, "blocked", time.Now())
 			return nil
 		})
@@ -364,9 +379,14 @@ func newPanicHandler(vault *vaultgit.Vault, notifier *notify.Notifier, discordUs
 
 		// Always fires, independent of writeErr above -- Discord must not
 		// depend on the vault being writable, same rule as
-		// handleSetupFailure's Discord call.
+		// handleSetupFailure's Discord call. The blocker clause only appears
+		// when the write actually opened one.
+		blockerClause := ""
+		if blockerN > 0 {
+			blockerClause = fmt.Sprintf(" (Blocker %d)", blockerN)
+		}
 		notifier.Send(job.NotePath, discordThreadID,
-			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked** -- panic recovered: %v", discordUserID, araDevUserID, job.Slug, job.Repo, recovered),
+			fmt.Sprintf("<@%s> <@%s> Task `%s` (%s) is **blocked**%s -- panic recovered: %v", discordUserID, araDevUserID, job.Slug, job.Repo, blockerClause, recovered),
 			job.Slug+".md",
 			fmt.Sprintf("# Task blocked: panic\n\n- **Repo**: %s\n- **Recovered panic**: %v\n", job.Repo, recovered))
 

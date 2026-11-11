@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,47 @@ import (
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
 	"github.com/madevara24/random-bs-go/internal/worker"
 )
+
+// TestSetupFailureOpensBlocker pins the numbered-blocker contract for
+// handleSetupFailure's blocked write: "### Blocker 1" with the
+// "setup_failure during setup: <stage>" Cause line, payload.BlockerN, and
+// " (Blocker 1)" in the resulting Discord message.
+func TestSetupFailureOpensBlocker(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "setupfail-blocker-" + run
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Setup Failure Blocker Test %s.md", run)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
+	}, "Setup-failure numbered-blocker test -- handleSetupFailure is called directly at the engine-resolution stage.")
+
+	deps := Deps{Vault: v}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+	var gotAlert *AlertPayload
+	deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotAlert = &p }
+
+	err := handleSetupFailure(deps, job, setupFailureInfo{
+		stage: setupStageResolveEngine,
+		err:   errors.New("unknown coding engine \"nope\""),
+	})
+	if err == nil {
+		t.Fatal("handleSetupFailure returned nil error, want an error for a blocked task")
+	}
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.Scenario != ScenarioSetupFailure {
+		t.Errorf("alert scenario = %v, want %v", gotAlert.Scenario, ScenarioSetupFailure)
+	}
+	assertNumberedBlocker(t, v, relPath, gotAlert, "setup_failure during setup: resolving coding/review engine", true)
+}
 
 // TestSetupFailurePullAndBranchRestoresRepoAndAlerts reproduces the real
 // production trigger confirmed live 2026-09-17: a branch collision makes

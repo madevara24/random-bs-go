@@ -343,6 +343,10 @@ func (s *Server) Resume(engine string) ([]string, error) {
 					return nil
 				}
 				n.Frontmatter.Status = "blocker_resolved"
+				// Fill an empty current-blocker resolution so the dispatch resume
+				// check doesn't refuse this auto-resume; a resolution a human (or
+				// another auto-resume) already filled in is left untouched.
+				notetask.FillCurrentBlockerResolution(n, fmt.Sprintf("Auto: %s usage limit reset.", eng))
 				notetask.AppendRunnerLog(n, "blocker_resolved", time.Now())
 				return nil
 			})

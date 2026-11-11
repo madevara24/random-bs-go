@@ -208,8 +208,11 @@ type Deps struct {
 	// status with no usage-limit involvement. engineName is this task's
 	// resolved coding engine (codingEngineName), the same name a trip
 	// above was scoped to -- main.go's wiring needs it to arm the right
-	// engine's timer and name it in the Discord message.
-	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string)
+	// engine's timer and name it in the Discord message. blockerRound is
+	// the numbered blocker this merge-back opened (blocker_round after the
+	// AppendBlocker call), or 0 when status isn't "blocked", so the
+	// Discord message can say which blocker it is.
+	OnTerminal func(job worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string, blockerRound int)
 
 	// MergeGateFactory, if non-nil, is called once a task lands on
 	// status: done with auto_merge: true and a real pr_url, to run the
@@ -624,6 +627,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	// begin with), and append the terminal-status Runner Log line in the
 	// same commit.
 	terminalStatus := copyAfter.Frontmatter.Status
+	blockerRound := 0
 	mergeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: %s %s", terminalStatus, job.Slug), func(n *notetask.Note) error {
 		n.Frontmatter.Status = terminalStatus
 		n.Frontmatter.PRURL = copyAfter.Frontmatter.PRURL
@@ -632,6 +636,15 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 		}
 		n.HasWorkLog = copyAfter.HasWorkLog
 		n.WorkLog = copyAfter.WorkLog
+		if terminalStatus == "blocked" {
+			// CC itself opened this blocker (its Work Log entry begins with
+			// "Blocker <n>:"); the runner owns ## Blockers and turns that
+			// self-report into the numbered block every other blocked path
+			// writes. blockerN is the number the cause text has to name too.
+			blockerN := n.Frontmatter.BlockerRound + 1
+			cause := fmt.Sprintf("self-reported -- see the Work Log entry starting \"Blocker %d:\"", blockerN)
+			blockerRound = notetask.AppendBlocker(n, cause, time.Now())
+		}
 		notetask.AppendRunnerLog(n, terminalStatus, time.Now())
 		return nil
 	})
@@ -676,7 +689,7 @@ func ProcessTask(deps Deps, reporter ActivityReporter, job worker.Job) error {
 	prURL := derefStr(copyAfter.Frontmatter.PRURL)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit, codingEngineName)
+		deps.OnTerminal(job, terminalStatus, copyAfter.WorkLog, autoMerge, prURL, discordThreadID, selfReportedUsageLimit, codingEngineName, blockerRound)
 	}
 
 	if terminalStatus == "done" && autoMerge && deps.MergeGateFactory != nil && prURL != "" {
@@ -1039,6 +1052,8 @@ func writeNoteCopy(note *notetask.Note, copyPath string) error {
 		Plan:          note.Plan,
 		HasPlanReview: note.HasPlanReview,
 		PlanReview:    note.PlanReview,
+		HasBlockers:   note.HasBlockers,
+		Blockers:      note.Blockers,
 		HasHandoff:    note.HasHandoff,
 		Handoff:       note.Handoff,
 		HasWorkLog:    note.HasWorkLog,
@@ -1103,6 +1118,26 @@ const resumeReconciliationNotice = "The runner only fetched and checked out your
 // the first time it pushes rather than assuming a plain `git push` works.
 const resumeLocalOnlyNotice = "The runner found your preserved branch only locally on this clone -- it was never pushed to `origin`, so it has no upstream, and the runner never merges, rebases, or touches `origin/%s` itself. `origin/%s` may have advanced while this task was blocked, so before continuing the task itself, reconcile `origin/%s` into your branch (merge or rebase, whichever this repo's convention is) and resolve any conflicts yourself. Because this branch has no upstream yet, push it with `git push -u origin %s` the first time -- a plain `git push` will fail.\n\n"
 
+// blockerWorkLogInstruction tells a session how to report a block so the
+// runner's own numbered blocker (see notetask.AppendBlocker) and the
+// session's Work Log entry agree on the same n. The n it names is the one
+// the runner will open on merge-back (BlockerRound+1), not the currently
+// open blocker, if any.
+func blockerWorkLogInstruction(note *notetask.Note) string {
+	return fmt.Sprintf("If you set `status` to `blocked`, begin that Work Log entry with `Blocker %d:`. Do not edit the \"## Blockers\" section yourself -- the runner owns it.\n\n", note.Frontmatter.BlockerRound+1)
+}
+
+// currentBlockerNotice points a resumed session at its already-open blocker
+// so it reads the human's resolution before continuing. It's empty when
+// BlockerRound is 0 -- a note blocked before numbered blockers existed has
+// no `### Blocker <n>` block to point at.
+func currentBlockerNotice(note *notetask.Note) string {
+	if note.Frontmatter.BlockerRound == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Your current blocker is `### Blocker %d` under `## Blockers`. Read its `#### Resolution` first, then continue.\n\n", note.Frontmatter.BlockerRound)
+}
+
 // buildPrompt constructs what gets passed to `claude -p`. CC has zero PM
 // vault access, so it's pointed at the note-copy instead for anything it
 // needs to read or write about task state. localOnlyResume is true only
@@ -1119,12 +1154,15 @@ func buildPrompt(note *notetask.Note, copyName string, resume bool, defaultBranc
 		} else {
 			b.WriteString(fmt.Sprintf(resumeReconciliationNotice, defaultBranch, defaultBranch, defaultBranch))
 		}
+		b.WriteString(currentBlockerNotice(note))
+		b.WriteString(blockerWorkLogInstruction(note))
 	} else {
 		b.WriteString(fmt.Sprintf(
 			"You are working on a task tracked in the file `%s` in this repository's root (already git-ignored -- do not commit it). It holds your task's frontmatter (status/repo/auto_merge/pr_url/session_id/etc.) and body (the task prompt below, plus a \"## Work Log\" section for your own narrative).\n\n"+
 				"As you work, append entries to its \"## Work Log\" section describing what you did. When finished, update its frontmatter: set `status` to `done` if you succeeded, `blocked` if you need human input (explain what you need in the Work Log), or `failed` if you're giving up. Never touch `session_id` -- that field is managed externally.\n\n"+
 				"%s\n\n"+
 				"Task:\n%s\n", copyName, prCompletionContract, note.Prompt))
+		b.WriteString(blockerWorkLogInstruction(note))
 	}
 	return b.String()
 }

@@ -259,7 +259,7 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 	autoMerge := resolveAutoMerge(note.Frontmatter.AutoMerge, repoCfg.AutoMergeDefault)
 
 	if deps.OnTerminal != nil {
-		deps.OnTerminal(job, "done", note.WorkLog, autoMerge, prURL, discordThreadID, nil, codingEng.Name())
+		deps.OnTerminal(job, "done", note.WorkLog, autoMerge, prURL, discordThreadID, nil, codingEng.Name(), 0)
 	}
 
 	if autoMerge && deps.MergeGateFactory != nil {
@@ -279,9 +279,11 @@ func finishMultiUnitTask(deps Deps, reporter ActivityReporter, job worker.Job, r
 // line; failErr is the underlying error.
 func blockFinishFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchName, label string, failErr error) error {
 	var discordThreadID string
+	var blockerN int
 	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (%s)", job.Slug, label), func(n *notetask.Note) error {
 		discordThreadID = threadIDOf(n)
 		n.Frontmatter.Status = "blocked"
+		blockerN = notetask.AppendBlocker(n, "open_pr_failure: "+label, time.Now())
 		notetask.AppendRunnerLog(n, fmt.Sprintf("blocked: %s failed: %s", label, oneLine(failErr.Error(), oneLineMaxRunes)), time.Now())
 		return nil
 	})
@@ -300,6 +302,7 @@ func blockFinishFailure(deps Deps, job worker.Job, repoCfg config.RepoConfig, br
 		Repo:            job.Repo,
 		Scenario:        ScenarioOpenPRFailure,
 		Stage:           label,
+		BlockerN:        blockerN,
 		DiscordThreadID: discordThreadID,
 		ExitCode:        -1,
 		ExitErrText:     failErr.Error(),

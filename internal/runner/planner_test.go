@@ -960,3 +960,45 @@ func TestRejectedReplansWithFeedback(t *testing.T) {
 		t.Errorf("plan_round = %d, want 2", noteAfter.Frontmatter.PlanRound)
 	}
 }
+
+// TestPlannerFailureOpensBlocker pins the numbered-blocker contract for
+// blockPlannerTask's blocked write: "### Blocker 1" with the
+// "planner_failure: <reason>" Cause line, payload.BlockerN, and
+// " (Blocker 1)" in the resulting Discord message.
+func TestPlannerFailureOpensBlocker(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	slug := "plannerblocker-" + run
+	relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Planner Blocker Test %s.md", run)
+
+	v := vaultgit.New(testvault.Path, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "in_progress", Repo: "phase6-test-repo", Created: "2026-11-06",
+	}, "Planner numbered-blocker test -- blockPlannerTask is called directly.")
+
+	var gotAlert *AlertPayload
+	deps := Deps{
+		Vault: v,
+		OnBlocked: func(j worker.Job, payload AlertPayload) {
+			gotAlert = &payload
+		},
+	}
+	job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+
+	err := blockPlannerTask(deps, job, "plan rejected after 3 rounds")
+	if err == nil {
+		t.Fatal("blockPlannerTask returned nil error, want an error for a blocked task")
+	}
+	if gotAlert == nil {
+		t.Fatal("OnBlocked was never called")
+	}
+	if gotAlert.Scenario != ScenarioPlannerFailure {
+		t.Errorf("alert scenario = %v, want %v", gotAlert.Scenario, ScenarioPlannerFailure)
+	}
+	assertNumberedBlocker(t, v, relPath, gotAlert, "planner_failure: plan rejected after 3 rounds", true)
+}

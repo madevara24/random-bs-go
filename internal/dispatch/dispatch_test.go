@@ -1,9 +1,13 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -128,7 +132,7 @@ func TestRunDispatchPass(t *testing.T) {
 	}, "Ready F, already stamped.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
+	if err := RunDispatchPass(v, enq, nil, nil, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -175,6 +179,44 @@ func TestRunDispatchPass(t *testing.T) {
 	}
 }
 
+// TestRunDispatchPassAcceptsResumeNotifyOptions confirms a populated
+// ResumeNotifyOptions is accepted and, in this unit, changes nothing: the
+// note is still claimed and enqueued exactly as with the zero value (no
+// Discord call is made from dispatch here -- there is no server to call).
+func TestRunDispatchPassAcceptsResumeNotifyOptions(t *testing.T) {
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/phase2-%s-resume-notify.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocker_resolved", Repo: "repo-resume", Created: "2026-09-15",
+	}, "Blocker resolved, resuming.")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{
+		ForumWebhookURL: "https://discord.example/api/webhooks/forum",
+		DiscordUserID:   "123456789",
+	}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1: %+v", len(enq.calls), enq.calls)
+	}
+	if got := enq.calls[0].repoKey; got != "repo-resume" {
+		t.Errorf("enqueued repo = %q, want repo-resume", got)
+	}
+	if n := readNote(t, v.Path, relPath); n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q, want queued", n.Frontmatter.Status)
+	}
+}
+
 // TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused covers
 // RBG-35's per-engine pause: with "claude" paused, a ready note that
 // resolves to "claude" must stay ready, not queued, while a ready note
@@ -215,7 +257,7 @@ func TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused(t *testing.T
 	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, &p, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass while claude paused: %v", err)
 	}
 
@@ -239,7 +281,7 @@ func TestRunDispatchPassSkipsClaimingOnlyThatNotesEngineWhilePaused(t *testing.T
 	// proof this is a guard scoped to that engine, not a hidden rejection
 	// of this particular note.
 	p.Clear("claude")
-	if err := RunDispatchPass(v, enq, &p, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, &p, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass after resume: %v", err)
 	}
 	if len(enq.calls) != 2 {
@@ -285,7 +327,7 @@ func TestRunDispatchPassResolvesEngine(t *testing.T) {
 	}
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, resolveEngine); err != nil {
+	if err := RunDispatchPass(v, enq, nil, resolveEngine, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -340,7 +382,7 @@ func TestDispatchClaimsPlanStatuses(t *testing.T) {
 	}, "Still waiting on a reaction.")
 
 	enq := &recordingEnqueuer{}
-	if err := RunDispatchPass(v, enq, nil, nil); err != nil {
+	if err := RunDispatchPass(v, enq, nil, nil, ResumeNotifyOptions{}); err != nil {
 		t.Fatalf("RunDispatchPass: %v", err)
 	}
 
@@ -369,4 +411,347 @@ func enqOrder(e *recordingEnqueuer) []string {
 		out = append(out, c.repoKey)
 	}
 	return out
+}
+
+// --- resume check ---------------------------------------------------------
+
+const testForumThreadID = "thread-987654321"
+
+// discordRecorder is a stand-in forum webhook: it records the content and
+// thread_id of every PostToThread call and answers with a message id, which
+// is all notify.PostToThread needs back.
+type discordRecorder struct {
+	mu        sync.Mutex
+	contents  []string
+	threadIDs []string
+}
+
+func newDiscordRecorder(t *testing.T) (*httptest.Server, *discordRecorder) {
+	t.Helper()
+	rec := &discordRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("parsing discord request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var payload struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("payload_json")), &payload); err != nil {
+			t.Errorf("decoding payload_json: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		rec.mu.Lock()
+		rec.contents = append(rec.contents, payload.Content)
+		rec.threadIDs = append(rec.threadIDs, r.URL.Query().Get("thread_id"))
+		rec.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg-1"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+func (r *discordRecorder) snapshot() (contents, threadIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.contents...), append([]string(nil), r.threadIDs...)
+}
+
+func newResumeTestVault(t *testing.T) *vaultgit.Vault {
+	t.Helper()
+	skipIfNoTestVault(t)
+	t.Cleanup(testvault.Lock(t))
+	v := vaultgit.New(testVaultPath, "master")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	return v
+}
+
+// seedBlockerNote seeds a note, then in one vault write gives it blocker
+// round 1 and the requested status -- optionally filling the resolution.
+// Going through the real WriteNote keeps the seeding identical to how the
+// runner opens a blocker in production.
+func seedBlockerNote(t *testing.T, v *vaultgit.Vault, relPath, status, resolution string) {
+	t.Helper()
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocked", Repo: "repo-resume", Created: "2026-09-15",
+		DiscordThreadID: strp(testForumThreadID),
+	}, "Resume check fixture.")
+	err := v.WriteNote(relPath, "test: open blocker for "+relPath, func(n *notetask.Note) error {
+		n.Frontmatter.Status = status
+		notetask.AppendBlocker(n, "test: blocked", time.Now())
+		if resolution != "" && !notetask.FillCurrentBlockerResolution(n, resolution) {
+			return fmt.Errorf("resolution did not fill")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("opening blocker for %s: %v", relPath, err)
+	}
+}
+
+func hasRunnerLogEvent(n *notetask.Note, event string) bool {
+	for _, e := range n.RunnerLog {
+		if e.Event == event {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunDispatchPassRefusesEmptyResolution covers the core refusal: a
+// blocker_resolved note whose current blocker has no resolution goes back
+// to blocked (blocker_round untouched), records the resume_refused Runner
+// Log line, posts once into the task's thread, and never enqueues a job.
+func TestRunDispatchPassRefusesEmptyResolution(t *testing.T) {
+	v := newResumeTestVault(t)
+	srv, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-empty.md", run)
+	seedBlockerNote(t, v, relPath, "blocker_resolved", "")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{ForumWebhookURL: srv.URL, DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want blocked (refused resume)", n.Frontmatter.Status)
+	}
+	if n.Frontmatter.BlockerRound != 1 {
+		t.Errorf("blocker_round = %d, want unchanged 1", n.Frontmatter.BlockerRound)
+	}
+	if !hasRunnerLogEvent(n, "resume_refused (Blocker 1: empty resolution)") {
+		t.Errorf("missing resume_refused Runner Log line: %+v", n.RunnerLog)
+	}
+	if len(enq.calls) != 0 {
+		t.Errorf("enqueued %d jobs, want 0: %+v", len(enq.calls), enq.calls)
+	}
+
+	contents, threadIDs := rec.snapshot()
+	if len(contents) != 1 {
+		t.Fatalf("posted %d messages, want 1: %v", len(contents), contents)
+	}
+	want := fmt.Sprintf("<@111222333> `blocker_resolved` on `%s` ignored -- `#### Resolution` under `### Blocker 1` in `## Blockers` is empty. Write the resolution there, then flip it to `blocker_resolved` again.",
+		taskmeta.SlugFromPath(relPath))
+	if contents[0] != want {
+		t.Errorf("refusal post = %q, want %q", contents[0], want)
+	}
+	if threadIDs[0] != testForumThreadID {
+		t.Errorf("refusal post thread_id = %q, want %q", threadIDs[0], testForumThreadID)
+	}
+}
+
+// TestRunDispatchPassResumesFilledResolution covers the happy path: a
+// blocker_resolved note with a filled resolution is claimed exactly as
+// today and gets one post-claim resume message carrying the blocker number
+// and the resolution's first line.
+func TestRunDispatchPassResumesFilledResolution(t *testing.T) {
+	v := newResumeTestVault(t)
+	srv, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-filled.md", run)
+	seedBlockerNote(t, v, relPath, "blocker_resolved", "Use the pooled client instead.\nA second line that must not appear.")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{ForumWebhookURL: srv.URL, DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q, want queued", n.Frontmatter.Status)
+	}
+	if n.Frontmatter.BlockerRound != 1 {
+		t.Errorf("blocker_round = %d, want unchanged 1", n.Frontmatter.BlockerRound)
+	}
+	if hasRunnerLogEvent(n, "resume_refused (Blocker 1: empty resolution)") {
+		t.Errorf("filled resolution was refused: %+v", n.RunnerLog)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1: %+v", len(enq.calls), enq.calls)
+	}
+
+	contents, threadIDs := rec.snapshot()
+	if len(contents) != 1 {
+		t.Fatalf("posted %d messages, want 1: %v", len(contents), contents)
+	}
+	want := fmt.Sprintf("Task `%s` resumed -- Blocker 1 resolved: Use the pooled client instead.",
+		taskmeta.SlugFromPath(relPath))
+	if contents[0] != want {
+		t.Errorf("resume post = %q, want %q", contents[0], want)
+	}
+	if strings.Contains(contents[0], "<@") {
+		t.Errorf("resume post = %q, want no mention", contents[0])
+	}
+	if threadIDs[0] != testForumThreadID {
+		t.Errorf("resume post thread_id = %q, want %q", threadIDs[0], testForumThreadID)
+	}
+}
+
+// TestRunDispatchPassClaimsBlockerResolvedWithoutRound covers a note blocked
+// before numbered blockers existed: no round means no check and no post, and
+// the claim proceeds exactly as before this change.
+func TestRunDispatchPassClaimsBlockerResolvedWithoutRound(t *testing.T) {
+	v := newResumeTestVault(t)
+	srv, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-legacy.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "blocker_resolved", Repo: "repo-resume", Created: "2026-09-15",
+		DiscordThreadID: strp(testForumThreadID),
+	}, "Blocked before numbered blockers existed.")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{ForumWebhookURL: srv.URL, DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q, want queued", n.Frontmatter.Status)
+	}
+	if n.Frontmatter.BlockerRound != 0 {
+		t.Errorf("blocker_round = %d, want 0 (never written)", n.Frontmatter.BlockerRound)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1: %+v", len(enq.calls), enq.calls)
+	}
+	if contents, _ := rec.snapshot(); len(contents) != 0 {
+		t.Errorf("posted %d messages, want 0: %v", len(contents), contents)
+	}
+}
+
+// TestRunDispatchPassRefusesEmptyResolutionWhilePaused confirms the resume
+// check runs before the paused-engine skip: the refusal does not wait for
+// the engine's pause to clear, and still does not enqueue.
+func TestRunDispatchPassRefusesEmptyResolutionWhilePaused(t *testing.T) {
+	v := newResumeTestVault(t)
+	srv, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-paused.md", run)
+	seedBlockerNote(t, v, relPath, "blocker_resolved", "")
+
+	resolveEngine := func(repoKey, noteEngine string) string { return "claude" }
+	var p pause.State
+	resetsAt := time.Now().Add(time.Hour)
+	p.Trip("claude", pause.ReasonUsageLimit, &resetsAt)
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{ForumWebhookURL: srv.URL, DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, &p, resolveEngine, opts); err != nil {
+		t.Fatalf("RunDispatchPass while paused: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q while paused, want blocked (refused before the pause skip)", n.Frontmatter.Status)
+	}
+	if !hasRunnerLogEvent(n, "resume_refused (Blocker 1: empty resolution)") {
+		t.Errorf("missing resume_refused Runner Log line while paused: %+v", n.RunnerLog)
+	}
+	if len(enq.calls) != 0 {
+		t.Errorf("enqueued %d jobs while paused, want 0: %+v", len(enq.calls), enq.calls)
+	}
+	if contents, _ := rec.snapshot(); len(contents) != 1 {
+		t.Errorf("posted %d messages, want 1 refusal post: %v", len(contents), contents)
+	}
+}
+
+// TestRunDispatchPassRefusesEmptyResolutionWithoutWebhook confirms the
+// refusal is a status write plus Runner Log line even when no Discord
+// routing is configured: no HTTP post is attempted at all.
+func TestRunDispatchPassRefusesEmptyResolutionWithoutWebhook(t *testing.T) {
+	v := newResumeTestVault(t)
+	_, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-nowebhook.md", run)
+	seedBlockerNote(t, v, relPath, "blocker_resolved", "")
+
+	enq := &recordingEnqueuer{}
+	// srv.URL is deliberately not passed: an empty webhook URL means no post.
+	opts := ResumeNotifyOptions{DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "blocked" {
+		t.Errorf("status = %q, want blocked", n.Frontmatter.Status)
+	}
+	if !hasRunnerLogEvent(n, "resume_refused (Blocker 1: empty resolution)") {
+		t.Errorf("missing resume_refused Runner Log line: %+v", n.RunnerLog)
+	}
+	if len(enq.calls) != 0 {
+		t.Errorf("enqueued %d jobs, want 0: %+v", len(enq.calls), enq.calls)
+	}
+	if contents, _ := rec.snapshot(); len(contents) != 0 {
+		t.Errorf("posted %d messages with an empty webhook URL, want 0: %v", len(contents), contents)
+	}
+}
+
+// TestRunDispatchPassReadyNotePostsNothing confirms the resume check never
+// touches a ready note: claimed exactly as today, no resume/refusal post.
+func TestRunDispatchPassReadyNotePostsNothing(t *testing.T) {
+	v := newResumeTestVault(t)
+	srv, rec := newDiscordRecorder(t)
+
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	relPath := fmt.Sprintf("Tasks/resume-%s-ready.md", run)
+	testvault.Seed(t, relPath, notetask.Frontmatter{
+		Status: "ready", Repo: "repo-resume", Created: "2026-09-15",
+		DiscordThreadID: strp(testForumThreadID),
+	}, "Ready, not a resume.")
+
+	enq := &recordingEnqueuer{}
+	opts := ResumeNotifyOptions{ForumWebhookURL: srv.URL, DiscordUserID: "111222333"}
+	if err := RunDispatchPass(v, enq, nil, nil, opts); err != nil {
+		t.Fatalf("RunDispatchPass: %v", err)
+	}
+
+	n := readNote(t, v.Path, relPath)
+	if n.Frontmatter.Status != "queued" {
+		t.Errorf("status = %q, want queued", n.Frontmatter.Status)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1: %+v", len(enq.calls), enq.calls)
+	}
+	if contents, _ := rec.snapshot(); len(contents) != 0 {
+		t.Errorf("posted %d messages for a ready note, want 0: %v", len(contents), contents)
+	}
+}
+
+func TestFirstLineCut(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		limit int
+		want  string
+	}{
+		{"first line only", "one\ntwo", 200, "one"},
+		{"trimmed", "  spaced  ", 200, "spaced"},
+		{"cut to limit", strings.Repeat("a", 250), 200, strings.Repeat("a", 200)},
+		{"multibyte not split", strings.Repeat("é", 250) + "\nignored", 200, strings.Repeat("é", 200)},
+		{"empty", "", 200, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := firstLineCut(c.in, c.limit); got != c.want {
+				t.Errorf("firstLineCut(%q, %d) = %q, want %q", c.in, c.limit, got, c.want)
+			}
+		})
+	}
 }

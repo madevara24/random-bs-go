@@ -883,3 +883,88 @@ func TestUnitVerifyTimeoutKillsChildren(t *testing.T) {
 		t.Errorf("syscall.Kill(%d, 0) = %v, want ESRCH (child still running after the verify timeout)", pid, killErr)
 	}
 }
+
+// TestBlockUnitTaskOpensBlocker pins the numbered-blocker contract for
+// blockUnitTask's blocked write: "### Blocker 1" with the expected Cause
+// line, payload.BlockerN, and " (Blocker 1)" in the resulting Discord
+// message. Covers the three cause shapes this call site builds: a unit
+// named in both the argument and the reason (no duplicate prefix), no unit
+// id at all, and a mid-loop usage limit (which reuses
+// handleCrashFallback's usage_limit cause and, being a "**paused**"
+// message, carries no blocker clause in Discord).
+func TestBlockUnitTaskOpensBlocker(t *testing.T) {
+	testvault.SkipIfAbsent(t)
+	t.Cleanup(testvault.Lock(t))
+
+	resetAt := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name          string
+		unitID        string
+		scenario      Scenario
+		reason        string
+		usageLimit    *UsageLimitInfo
+		engineName    string
+		wantCause     string
+		wantInDiscord bool
+	}{
+		{
+			name:          "unit named",
+			unitID:        "U1",
+			scenario:      ScenarioUnitLoopBlocked,
+			reason:        "unit U1: hit its per-unit review-round cap (3)",
+			wantCause:     "unit_loop_blocked: unit U1: hit its per-unit review-round cap (3)",
+			wantInDiscord: true,
+		},
+		{
+			name:          "no unit id",
+			unitID:        "",
+			scenario:      ScenarioUnitLoopBlocked,
+			reason:        "task hit its total review-round budget (4)",
+			wantCause:     "unit_loop_blocked: task hit its total review-round budget (4)",
+			wantInDiscord: true,
+		},
+		{
+			name:          "usage limit",
+			unitID:        "",
+			scenario:      ScenarioUsageLimit,
+			reason:        "unit U1: coding engine claude hit its usage limit",
+			usageLimit:    &UsageLimitInfo{ResetsAt: &resetAt},
+			engineName:    "claude",
+			wantCause:     "usage_limit: claude, auto-resumes at 2026-11-10T15:00:00Z",
+			wantInDiscord: false,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := fmt.Sprintf("%d-%d", time.Now().UnixNano(), i)
+			slug := "unitblock-blocker-" + run
+
+			units := []notetask.UnitState{{ID: "U1", Status: notetask.UnitStatusBuilding}}
+			v, relPath := seedUnitLoopNote(t, slug, oneUnitPlan, units, "U1")
+			branchName, _ := setupUnitLoopBranch(t, slug)
+
+			var gotAlert *AlertPayload
+			deps := Deps{
+				Vault: v,
+				Repos: map[string]config.RepoConfig{unitLoopTestRepoKey: unitLoopRepoCfg()},
+				OnBlocked: func(j worker.Job, payload AlertPayload) {
+					gotAlert = &payload
+				},
+			}
+			job := worker.Job{NotePath: relPath, Repo: unitLoopTestRepoKey, Slug: slug}
+
+			err := blockUnitTask(deps, job, unitLoopRepoCfg(), branchName, tc.unitID, tc.scenario, tc.reason, tc.usageLimit, tc.engineName)
+			if err == nil {
+				t.Fatal("blockUnitTask returned nil error, want a non-nil error")
+			}
+			if gotAlert == nil {
+				t.Fatal("OnBlocked was never called")
+			}
+			if gotAlert.Scenario != tc.scenario {
+				t.Errorf("alert scenario = %v, want %v", gotAlert.Scenario, tc.scenario)
+			}
+			assertNumberedBlocker(t, v, relPath, gotAlert, tc.wantCause, tc.wantInDiscord)
+		})
+	}
+}

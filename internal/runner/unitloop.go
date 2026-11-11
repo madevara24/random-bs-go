@@ -217,12 +217,14 @@ func runUnitVerify(repoPath, verifyCmd string, timeout time.Duration) (string, e
 // limit tripping mid-loop. Always returns a non-nil error.
 func blockUnitTask(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchName, unitID string, scenario Scenario, reason string, usageLimit *UsageLimitInfo, engineName string) error {
 	var discordThreadID string
+	var blockerN int
 	writeErr := deps.Vault.WriteNote(job.NotePath, fmt.Sprintf("runner: blocked %s (unit loop)", job.Slug), func(n *notetask.Note) error {
 		discordThreadID = threadIDOf(n)
 		n.Frontmatter.Status = "blocked"
 		if unitID != "" {
 			mutateUnit(n, unitID, func(us *notetask.UnitState) { us.Status = notetask.UnitStatusBlocked })
 		}
+		blockerN = notetask.AppendBlocker(n, unitLoopBlockerCause(unitID, scenario, reason, usageLimit, engineName), time.Now())
 		notetask.AppendRunnerLog(n, "blocked: "+reason, time.Now())
 		return nil
 	})
@@ -245,6 +247,7 @@ func blockUnitTask(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchN
 		Repo:            job.Repo,
 		Scenario:        scenario,
 		Stage:           "unit loop",
+		BlockerN:        blockerN,
 		DiscordThreadID: discordThreadID,
 		EngineName:      engineName,
 		UsageLimit:      usageLimit,
@@ -261,6 +264,26 @@ func blockUnitTask(deps Deps, job worker.Job, repoCfg config.RepoConfig, branchN
 
 	fmt.Printf("[runner] task %s: blocked (unit loop): %s\n", job.Slug, reason)
 	return fmt.Errorf("runner: task %s blocked (unit loop): %s", job.Slug, reason)
+}
+
+// unitLoopBlockerCause renders the Cause line for the numbered blocker
+// blockUnitTask opens. ScenarioUsageLimit reuses the same
+// "usage_limit: <engine>, auto-resumes at <reset>" line
+// handleCrashFallback uses, since this function can trip that scenario
+// directly (a coding or review engine's limit hit mid-loop) rather than
+// only via handleCrashFallback. Every other scenario names the unit when
+// there is one; a reason that already starts with the same
+// "unit <id>: " prefix (blockUnitTaskOnErr's own) isn't repeated.
+func unitLoopBlockerCause(unitID string, scenario Scenario, reason string, usageLimit *UsageLimitInfo, engineName string) string {
+	if scenario == ScenarioUsageLimit {
+		return usageLimitBlockerCause(engineName, usageLimit)
+	}
+	short := oneLine(reason, oneLineMaxRunes)
+	if unitID == "" {
+		return "unit_loop_blocked: " + short
+	}
+	prefix := "unit " + unitID + ": "
+	return "unit_loop_blocked: " + prefix + strings.TrimPrefix(short, prefix)
 }
 
 // blockUnitTaskOnErr is runUnitLoop's shared conversion for a plain

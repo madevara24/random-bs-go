@@ -488,3 +488,58 @@ func TestClaimMessageResetTimesUseJakarta(t *testing.T) {
 		t.Errorf("formatUsageReset = %q, want %q", got, want)
 	}
 }
+
+// TestProcessTaskSelfReportedBlockedOpensNumberedBlocker covers the
+// merge-back path (the happy exit where CC's own copy says status: blocked):
+// the runner opens the numbered blocker itself, with the self-reported cause
+// naming the Work Log entry's number, and threads that number through
+// OnTerminal so the Discord message can say "(Blocker 1)". Unlike every
+// crash/setup/planner/unit-loop block, this one is not a failure path --
+// ProcessTask returns nil.
+func TestProcessTaskSelfReportedBlockedOpensNumberedBlocker(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+
+	deps, job, v, slug := setupCrashTest(t, "phase-selfreport-blocker", scriptPath)
+	copyName := copyFileName(slug)
+	writeStubScript(t, scriptPath, fmt.Sprintf(
+		"printf -- '---\\nstatus: blocked\\nrepo: phase6-test-repo\\ncreated: \"2026-09-15\"\\n---\\nSelf-reported blocker test.\\n\\n## Work Log\\n\\nBlocker 1: need the missing deploy credentials.\\n' > %q\nexit 0",
+		filepath.Join(testTargetRepoPath, copyName)))
+
+	var gotStatus string
+	var gotBlockerRound int
+	var onTerminalCalled bool
+	deps.OnTerminal = func(j worker.Job, status, workLog string, autoMerge bool, prURL, discordThreadID string, usageLimit *UsageLimitInfo, engineName string, blockerRound int) {
+		onTerminalCalled = true
+		gotStatus = status
+		gotBlockerRound = blockerRound
+	}
+
+	if err := ProcessTask(deps, noopReporter{}, job); err != nil {
+		t.Fatalf("ProcessTask: %v (self-reported blocked is the happy path, not a crash)", err)
+	}
+	if !onTerminalCalled {
+		t.Fatal("OnTerminal was never called")
+	}
+	if gotStatus != "blocked" {
+		t.Errorf("status = %q, want %q", gotStatus, "blocked")
+	}
+	if gotBlockerRound != 1 {
+		t.Errorf("blockerRound = %d, want 1", gotBlockerRound)
+	}
+
+	note, err := v.ReadNote(job.NotePath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.BlockerRound != 1 {
+		t.Errorf("blocker_round = %d, want 1", note.Frontmatter.BlockerRound)
+	}
+	if !note.HasBlockers || !strings.Contains(note.Blockers, "### Blocker 1\n") {
+		t.Errorf("note missing \"### Blocker 1\" block:\n%s", note.Blockers)
+	}
+	wantCause := `- Cause: self-reported -- see the Work Log entry starting "Blocker 1:"`
+	if !strings.Contains(note.Blockers, wantCause+"\n") {
+		t.Errorf("note missing Cause line %q:\n%s", wantCause, note.Blockers)
+	}
+}

@@ -108,6 +108,39 @@ func assertBlocked(t *testing.T, v *vaultgit.Vault, relPath string, wantScenario
 	}
 }
 
+// assertNumberedBlocker is the numbered-blocker contract for every blocked
+// write site u2 covers: the note's first blocker block carries the expected
+// Cause line, the payload carries its number, and DiscordMessage renders
+// " (Blocker 1)" -- except for ScenarioUsageLimit, whose message says
+// "**paused**" rather than "**blocked**" and so stays unchanged.
+func assertNumberedBlocker(t *testing.T, v *vaultgit.Vault, relPath string, alert *AlertPayload, wantCause string, wantInDiscord bool) {
+	t.Helper()
+	note, err := v.ReadNote(relPath)
+	if err != nil {
+		t.Fatalf("reading note back: %v", err)
+	}
+	if note.Frontmatter.BlockerRound != 1 {
+		t.Errorf("blocker_round = %d, want 1", note.Frontmatter.BlockerRound)
+	}
+	if !note.HasBlockers || !strings.Contains(note.Blockers, "### Blocker 1\n") {
+		t.Errorf("note missing \"### Blocker 1\" block:\n%s", note.Blockers)
+	}
+	if !strings.Contains(note.Blockers, "- Cause: "+wantCause+"\n") {
+		t.Errorf("note missing Cause line %q:\n%s", wantCause, note.Blockers)
+	}
+	if alert.BlockerN != 1 {
+		t.Errorf("payload.BlockerN = %d, want 1", alert.BlockerN)
+	}
+
+	msg := alert.DiscordMessage("devara-id", "aradev-id")
+	if wantInDiscord && !strings.Contains(msg, "(Blocker 1)") {
+		t.Errorf("DiscordMessage = %q, want it to contain %q", msg, "(Blocker 1)")
+	}
+	if !wantInDiscord && strings.Contains(msg, "(Blocker") {
+		t.Errorf("DiscordMessage = %q, want no blocker clause for a paused (not blocked) message", msg)
+	}
+}
+
 // TestAlertPayloadDiscordMessageMentionsBoth confirms DiscordMessage
 // includes both the Devara and Ara-Dev mentions on every scenario branch --
 // the 2026-08-31 decision replaced the old default-profile `hermes -z`
@@ -159,6 +192,7 @@ func TestCrashFallbackScenario1NoCopy(t *testing.T) {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioNoCopy, gotJob, gotAlert)
+	assertNumberedBlocker(t, v, job.NotePath, gotAlert, "no_copy during result read-back", true)
 }
 
 // TestCrashFallbackScenario2NonTerminal forces scenario 2 (copy parses
@@ -182,6 +216,7 @@ func TestCrashFallbackScenario2NonTerminal(t *testing.T) {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioNonTerminal, gotJob, gotAlert)
+	assertNumberedBlocker(t, v, job.NotePath, gotAlert, "non_terminal during result read-back", true)
 }
 
 // TestCrashFallbackScenario4DoneWithoutPR forces scenario 4 (copy reports
@@ -210,6 +245,7 @@ func TestCrashFallbackScenario4DoneWithoutPR(t *testing.T) {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioDoneWithoutPR, gotJob, gotAlert)
+	assertNumberedBlocker(t, v, job.NotePath, gotAlert, "done_without_pr during result read-back", true)
 
 	note, err := v.ReadNote(job.NotePath)
 	if err != nil {
@@ -433,4 +469,80 @@ func TestCrashFallbackScenario3ParseFailure(t *testing.T) {
 		t.Fatal("ProcessTask returned nil error, want an error for a blocked task")
 	}
 	assertBlocked(t, v, job.NotePath, ScenarioParseFailure, gotJob, gotAlert)
+	assertNumberedBlocker(t, v, job.NotePath, gotAlert, "parse_failure during result read-back", true)
+}
+
+// TestCrashFallbackScenarioUsageLimitOpensBlocker pins the usage-limit
+// branch's numbered-blocker behavior by calling handleCrashFallback
+// directly (the ProcessTask-level gate lives in usagelimit_test.go). The
+// Cause line names the engine and the reset time -- "unknown" when
+// ResetsAt is nil -- and, unlike every other scenario, DiscordMessage says
+// "**paused**" rather than "**blocked**", so it must not gain a
+// " (Blocker <n>)" clause.
+func TestCrashFallbackScenarioUsageLimitOpensBlocker(t *testing.T) {
+	reset := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		usageLimit *UsageLimitInfo
+		wantCause  string
+	}{
+		{
+			name:       "known reset time",
+			usageLimit: &UsageLimitInfo{ResetsAt: &reset},
+			wantCause:  "usage_limit: claude, auto-resumes at 2026-11-10T15:00:00Z",
+		},
+		{
+			name:       "unknown reset time",
+			usageLimit: &UsageLimitInfo{},
+			wantCause:  "usage_limit: claude, auto-resumes at unknown",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testvault.SkipIfAbsent(t)
+			t.Cleanup(testvault.Lock(t))
+
+			run := fmt.Sprintf("%d", time.Now().UnixNano())
+			slug := "usagelimit-blocker-" + run
+			relPath := fmt.Sprintf("Tasks/(phase6-test-repo) Usage Limit Blocker Test %s.md", run)
+
+			v := vaultgit.New(testvault.Path, "master")
+			if err := v.Sync(); err != nil {
+				t.Fatalf("initial sync: %v", err)
+			}
+			testvault.Seed(t, relPath, notetask.Frontmatter{
+				Status: "queued", Repo: "phase6-test-repo", Created: "2026-09-15",
+			}, "Usage-limit numbered-blocker test -- handleCrashFallback is called directly with ScenarioUsageLimit.")
+
+			// preserveBlockedWork resolves the current branch first; the
+			// disposable target repo is a real clone and the unique branch name
+			// never matches its current checkout, so preserving is a no-op (no
+			// push) and PreserveErr stays empty -- DiscordMessage then takes the
+			// usage-limit branch instead of the preserve-failure one.
+			repoPath := testTargetRepoPath
+
+			deps := Deps{Vault: v}
+			job := worker.Job{NotePath: relPath, Repo: "phase6-test-repo", Slug: slug}
+			var gotAlert *AlertPayload
+			deps.OnBlocked = func(j worker.Job, p AlertPayload) { gotAlert = &p }
+
+			err := handleCrashFallback(deps, job, crashInfo{
+				scenario:   ScenarioUsageLimit,
+				stage:      "result read-back",
+				repoPath:   repoPath,
+				branchName: "task/" + slug,
+				engineName: "claude",
+				usageLimit: tc.usageLimit,
+			})
+			if err == nil {
+				t.Fatal("handleCrashFallback returned nil error, want an error for a blocked task")
+			}
+			if gotAlert == nil {
+				t.Fatal("OnBlocked was never called")
+			}
+			if gotAlert.PreserveErr != "" {
+				t.Fatalf("payload.PreserveErr = %q, want empty so DiscordMessage takes the usage-limit branch", gotAlert.PreserveErr)
+			}
+			assertNumberedBlocker(t, v, relPath, gotAlert, tc.wantCause, false)
+		})
+	}
 }

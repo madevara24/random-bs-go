@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/madevara24/random-bs-go/internal/dispatch"
 	"github.com/madevara24/random-bs-go/internal/notetask"
 	"github.com/madevara24/random-bs-go/internal/testvault"
 	"github.com/madevara24/random-bs-go/internal/vaultgit"
@@ -13,6 +14,28 @@ import (
 )
 
 func strp(s string) *string { return &s }
+
+// TestRunnerThreadsResumeNotifyOptionsIntoDispatchPass pins the wiring this
+// unit adds: a Runner built by NewRunner starts with both Discord routing
+// fields unset (so any caller that doesn't wire them gets dispatch's
+// empty-options default), and RunDispatchPass packages whatever the caller
+// then sets into dispatch.ResumeNotifyOptions.
+func TestRunnerThreadsResumeNotifyOptionsIntoDispatchPass(t *testing.T) {
+	r := NewRunner(nil, nil, nil, nil)
+	if got := r.resumeNotifyOptions(); got != (dispatch.ResumeNotifyOptions{}) {
+		t.Errorf("default resumeNotifyOptions() = %+v, want zero value", got)
+	}
+
+	r.ForumWebhookURL = "https://discord.example/api/webhooks/forum"
+	r.DiscordUserID = "123456789"
+	want := dispatch.ResumeNotifyOptions{
+		ForumWebhookURL: "https://discord.example/api/webhooks/forum",
+		DiscordUserID:   "123456789",
+	}
+	if got := r.resumeNotifyOptions(); got != want {
+		t.Errorf("resumeNotifyOptions() = %+v, want %+v", got, want)
+	}
+}
 
 // newRecordingWorkers builds a worker.Workers map for the given repo keys,
 // each backed by a stub ProcessFunc that just records which slugs it was

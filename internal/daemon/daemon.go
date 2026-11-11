@@ -35,6 +35,16 @@ type Runner struct {
 	// below. nil is valid (every Job.Engine comes out ""), same meaning as
 	// dispatch.EngineResolver's own nil case.
 	ResolveEngine dispatch.EngineResolver
+
+	// ForumWebhookURL is the Discord forum-channel webhook that owns each
+	// task's thread, and DiscordUserID is the human to mention -- both are
+	// forwarded to every dispatch.RunDispatchPass call below so a later
+	// resume check can post into the task's thread. Empty is valid (no
+	// forum routing configured) and means the same as dispatch's
+	// ResumeNotifyOptions zero value. Set by the caller (cmd/rbg) after
+	// NewRunner; nothing reads them yet.
+	ForumWebhookURL string
+	DiscordUserID   string
 }
 
 // NewRunner constructs a Runner. Does not touch disk or start any
@@ -65,7 +75,16 @@ func (r *Runner) Boot() error {
 // RunDispatchPass runs one full dispatch pass (sync -> scan -> claim ->
 // enqueue) against this Runner's vault and workers.
 func (r *Runner) RunDispatchPass() error {
-	return dispatch.RunDispatchPass(r.Vault, r.Workers, r.Pause, r.ResolveEngine)
+	return dispatch.RunDispatchPass(r.Vault, r.Workers, r.Pause, r.ResolveEngine, r.resumeNotifyOptions())
+}
+
+// resumeNotifyOptions packages this Runner's Discord routing values for a
+// dispatch pass -- both fields empty is the valid no-op default.
+func (r *Runner) resumeNotifyOptions() dispatch.ResumeNotifyOptions {
+	return dispatch.ResumeNotifyOptions{
+		ForumWebhookURL: r.ForumWebhookURL,
+		DiscordUserID:   r.DiscordUserID,
+	}
 }
 
 // RunDispatchLoop blocks forever, running exactly one dispatch pass each
